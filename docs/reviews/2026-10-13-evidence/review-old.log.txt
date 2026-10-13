@@ -1,0 +1,32 @@
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.032s
+
+OK
+Started 2 prediction job(s) with model m.
+Output directory: /private/tmp/tmp_45qj1ie/out
+  病例乙: status.json
+  病例甲: status.json
+found 1 mask(s)
+selected 0 mask(s) by filter
+Manifest saved: /private/tmp/tmpo8_viy3m/manifest.json
+Exporting masks to: /private/tmp/tmpog3zy5b9
+found 2 mask(s)
+selected 1 mask(s) by filter
+image dimensions: [3, 4, 5]
+exporting mask: target
+  -> target
+Manifest saved: /private/tmp/tmpog3zy5b9/work/export_buffers/manifest.json
+Exporting masks to: /private/tmp/tmpog3zy5b9
+found 2 mask(s)
+selected 1 mask(s) by filter
+image dimensions: [3, 4, 5]
+exporting mask: target
+  -> target
+Manifest saved: /private/tmp/tmpog3zy5b9/work/export_buffers/manifest.json
+found 2 mask(s)
+selected 1 mask(s) by filter
+image dimensions: [3, 4, 5]
+exporting mask: target
+  -> target
+Manifest saved: /private/tmp/tmpdetyaphs/manifest.json

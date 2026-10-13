@@ -1,0 +1,76 @@
+qt.qpa.fonts: Populating font family aliases took 126 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+This plugin does not support raise()
+{
+  "long_model_chooser": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      1573,
+      367
+    ],
+    "summary": "baseline\n版本：same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_version_A · 未验证\n点提示 · 训练 2 例 + 验证 1 例 · 无自动验证对比",
+    "model_id_width": 1154,
+    "summary_width": 805,
+    "selectable": false
+  },
+  "retained_completion_navigation": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      769,
+      334
+    ],
+    "detail": "训练完成，但因未通过质量检查，当前标注模型保持不变。新版本保留在本页的模型列表中，可手动启用。",
+    "default_model_rows": 0,
+    "show_failed": false
+  },
+  "chinese_label_submission": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      342,
+      419
+    ],
+    "status": "Mask alias '脾脏' is assigned to both '肝脏' and '脾脏'."
+  },
+  "remote_profile_identity": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      539,
+      332
+    ],
+    "toggle": "高级运行设置",
+    "summary": []
+  },
+  "actual_batch_liver_warning": {
+    "questions": [
+      [
+        "部分病例缺少所选 Mask",
+        "以下 1 例不含所选 Mask，将仅导入图像：\nCaseC\n\n如非预期，请取消并检查这些病例的 segmentations/ 文件夹，或改选其他 Mask。"
+      ]
+    ],
+    "CaseB_named_in_warning": false
+  },
+  "actual_batch_two_mask_submit": {
+    "questions": [],
+    "launches": [
+      {
+        "kind": "batch",
+        "source_path": "<synthetic-state>/batch",
+        "output_path": "<synthetic-state>/mask_exports",
+        "mask_selection": "Liver,Spleen",
+        "mask_paths": [],
+        "paths": []
+      }
+    ]
+  }
+}

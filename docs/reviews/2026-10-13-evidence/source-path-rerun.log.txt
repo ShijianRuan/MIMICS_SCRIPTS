@@ -1,0 +1,77 @@
+test_apply_intensity_transform_clinical (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_clinical)
+Path B: Clinical HU2GV transform (slope=1, intercept=1024). ... ok
+test_apply_intensity_transform_identity (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_identity)
+Path B: Identity slope/intercept → GV = HU (no transformation). ... ok
+test_apply_intensity_transform_missing_params (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_missing_params)
+Path B: Missing slope/intercept → no transform applied. ... ok
+test_both_paths_produce_same_values_clinical_dicom (__main__.TestSourceImagePathEquivalence.test_both_paths_produce_same_values_clinical_dicom)
+For clinical DICOM (RescaleSlope=1, Intercept=-1024): both paths match. ... ok
+test_both_paths_produce_same_values_derived_dicom (__main__.TestSourceImagePathEquivalence.test_both_paths_produce_same_values_derived_dicom)
+For derived DICOM (slope=1, intercept=0): both paths = HU. ... ok
+test_call_mimics_bridge_nonzero_exit_reports_stderr (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_nonzero_exit_reports_stderr) ... ok
+test_call_mimics_bridge_pumps_gui_during_wait (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_pumps_gui_during_wait) ... ok
+test_call_mimics_bridge_timeout_kills_and_raises (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_timeout_kills_and_raises) ... ok
+test_derived_dicom_identity_transform (__main__.TestSourceImagePathEquivalence.test_derived_dicom_identity_transform)
+Path A: Mimics imports derived DICOM → GV = stored_pixel = HU. ... ok
+test_derived_dicom_stores_original_hu_values (__main__.TestSourceImagePathEquivalence.test_derived_dicom_stores_original_hu_values)
+Path A: DICOM slices encapsulate the image data correctly. ... <audit-python>/lib/python3.12/site-packages/pydicom/dataset.py:1378: DeprecationWarning: 'FileDataset.is_little_endian' will be removed in v4.0, set the Transfer Syntax UID or use the 'little_endian' argument with FileDataset.save_as() or dcmwrite() instead
+  warn_and_log(
+<audit-python>/lib/python3.12/site-packages/pydicom/dataset.py:1337: DeprecationWarning: 'FileDataset.is_implicit_VR' will be removed in v4.0, set the Transfer Syntax UID or use the 'implicit_vr' argument with FileDataset.save_as() or dcmwrite() instead
+  warn_and_log(
+ok
+test_dicom_pixel_roundtrip (__main__.TestSourceImagePathEquivalence.test_dicom_pixel_roundtrip)
+NIfTI → DICOM → read pixel → preserves voxel values within int16 range. ... ok
+test_hu_gv_conversion_is_modality_specific (__main__.TestSourceImagePathEquivalence.test_hu_gv_conversion_is_modality_specific) ... ok
+test_hu_to_gv_transform_computation (__main__.TestSourceImagePathEquivalence.test_hu_to_gv_transform_computation)
+Simulate _hu_to_mimics_gv_transform() computation for derived DICOM. ... ok
+test_load_image_nifti_returns_float32_hu (__main__.TestSourceImagePathEquivalence.test_load_image_nifti_returns_float32_hu)
+Path B: load_image_nifti returns float32 values from NIfTI. ... ok
+test_mri_rescale_restoration_preserves_negative_background_contract (__main__.TestSourceImagePathEquivalence.test_mri_rescale_restoration_preserves_negative_background_contract) ... ERROR
+test_official_model_source_alignment_is_deferred_by_default (__main__.TestSourceImagePathEquivalence.test_official_model_source_alignment_is_deferred_by_default) ... ok
+test_official_model_sync_alignment_still_available_when_configured (__main__.TestSourceImagePathEquivalence.test_official_model_sync_alignment_still_available_when_configured) ... ok
+test_prediction_context_errors_point_to_real_repair_paths (__main__.TestSourceImagePathEquivalence.test_prediction_context_errors_point_to_real_repair_paths) ... ok
+test_prediction_failure_offers_repair_on_geometry_mismatch (__main__.TestSourceImagePathEquivalence.test_prediction_failure_offers_repair_on_geometry_mismatch) ... ok
+test_source_image_missing_file_is_not_silent_fallback (__main__.TestSourceImagePathEquivalence.test_source_image_missing_file_is_not_silent_fallback)
+Valid source metadata with a missing file should fail unless fallback is explicit. ... ok
+test_task_model_auto_mode_never_probes_unc_source_on_mimics_thread (__main__.TestSourceImagePathEquivalence.test_task_model_auto_mode_never_probes_unc_source_on_mimics_thread) ... ok
+test_task_model_explicit_mimics_mode_ignores_source_fallback_switch (__main__.TestSourceImagePathEquivalence.test_task_model_explicit_mimics_mode_ignores_source_fallback_switch) ... ok
+test_task_model_local_source_alignment_is_deferred_to_external_worker (__main__.TestSourceImagePathEquivalence.test_task_model_local_source_alignment_is_deferred_to_external_worker) ... ok
+test_task_model_missing_source_uses_portable_mimics_buffer (__main__.TestSourceImagePathEquivalence.test_task_model_missing_source_uses_portable_mimics_buffer) ... ok
+test_task_model_mri_buffer_restores_source_values_from_mcs_metadata (__main__.TestSourceImagePathEquivalence.test_task_model_mri_buffer_restores_source_values_from_mcs_metadata) ... ok
+test_task_model_mri_uint16_quantization_preserves_zscore_input (__main__.TestSourceImagePathEquivalence.test_task_model_mri_uint16_quantization_preserves_zscore_input) ... ERROR
+test_task_model_old_mcs_reads_mri_rescale_from_dicom_tags (__main__.TestSourceImagePathEquivalence.test_task_model_old_mcs_reads_mri_rescale_from_dicom_tags) ... ok
+test_task_model_strict_source_does_not_silently_fallback (__main__.TestSourceImagePathEquivalence.test_task_model_strict_source_does_not_silently_fallback) ... ok
+
+======================================================================
+ERROR: test_mri_rescale_restoration_preserves_negative_background_contract (__main__.TestSourceImagePathEquivalence.test_mri_rescale_restoration_preserves_negative_background_contract)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 6903, in test_mri_rescale_restoration_preserves_negative_background_contract
+    from nninteractive_finetune.data import normalize_like_nninteractive
+  File "<repo>/integrations/nninteractive-finetune/src/nninteractive_finetune/__init__.py", line 3, in <module>
+    from .config import load_config
+  File "<repo>/integrations/nninteractive-finetune/src/nninteractive_finetune/config.py", line 10, in <module>
+    import yaml
+ModuleNotFoundError: No module named 'yaml'
+
+======================================================================
+ERROR: test_task_model_mri_uint16_quantization_preserves_zscore_input (__main__.TestSourceImagePathEquivalence.test_task_model_mri_uint16_quantization_preserves_zscore_input)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 7220, in test_task_model_mri_uint16_quantization_preserves_zscore_input
+    from nninteractive_finetune.data import normalize_like_nninteractive
+  File "<repo>/integrations/nninteractive-finetune/src/nninteractive_finetune/__init__.py", line 3, in <module>
+    from .config import load_config
+  File "<repo>/integrations/nninteractive-finetune/src/nninteractive_finetune/config.py", line 10, in <module>
+    import yaml
+ModuleNotFoundError: No module named 'yaml'
+
+----------------------------------------------------------------------
+Ran 28 tests in 0.690s
+
+FAILED (errors=2)
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <repo>
+============================================================

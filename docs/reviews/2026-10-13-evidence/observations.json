@@ -1,0 +1,307 @@
+{
+  "task_id_roundtrip": {
+    "names": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa肝脏",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa肾脏"
+    ],
+    "gui_normalized": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a8f810b3",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_c8813474"
+    ],
+    "normalized_twice": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "job_persisted": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "first_distinct": true,
+    "job_ids_collide": true,
+    "idempotent": false
+  },
+  "ascii_task_collision": {
+    "names": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay"
+    ],
+    "ids": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  "chinese_multi_organ_labels": {
+    "error": "Mask alias '脾脏' is assigned to both '肝脏' and '脾脏'."
+  },
+  "maskless_case_warning": {
+    "case_count": 3,
+    "case_mask_names": {
+      "CaseA": [
+        "Liver"
+      ],
+      "CaseC": [
+        "Spleen"
+      ]
+    },
+    "selected": [
+      "Liver"
+    ],
+    "warned": [
+      "CaseC"
+    ],
+    "expected_images_only": [
+      "CaseB",
+      "CaseC"
+    ],
+    "selected_multiple": [
+      "Liver",
+      "Spleen"
+    ],
+    "warned_multiple": []
+  },
+  "mask_case_sensitive_ui": {
+    "ui_warned": [
+      "CaseA"
+    ],
+    "worker_selected": [
+      {
+        "name": "liver",
+        "path": "synthetic.nii.gz"
+      }
+    ]
+  },
+  "receipt_after_worker_update": {
+    "before_found": true,
+    "final_status_keys": [
+      "case_id",
+      "completed",
+      "failed",
+      "output_mcs",
+      "phase",
+      "status",
+      "total",
+      "updated_at_epoch"
+    ],
+    "after_found": false,
+    "found_receipt": null
+  },
+  "edited_owned_mask_undo": {
+    "manual_voxel_edit": true,
+    "diverged_before_delete": false,
+    "reason": "",
+    "deleted_names": [
+      "Liver"
+    ],
+    "ambiguous": [],
+    "remaining_masks": 0,
+    "native_mimics_delete_stubbed": true
+  },
+  "mimics_guard_contention": {
+    "callback_seconds": 2.0218,
+    "viewed_file_written": false,
+    "call_chain": "Mimics conversion monitor -> _al_finish_conversion -> _al_mark_viewed -> lock retry/sleep"
+  },
+  "dicom_irregular_geometry": [
+    {
+      "input_z": [
+        0,
+        1,
+        3
+      ],
+      "inferred_z": [
+        0.0,
+        1.5,
+        3.0
+      ],
+      "rejected": false
+    },
+    {
+      "input_z": [
+        0,
+        1,
+        1
+      ],
+      "inferred_z": [
+        0.0,
+        1.0,
+        2.0
+      ],
+      "rejected": false
+    }
+  ],
+  "frozen_validation_after_retrain": {
+    "previous_val": [
+      "c0"
+    ],
+    "after_shared": [
+      {
+        "train": [
+          "c1",
+          "c3"
+        ],
+        "val": [
+          "c0",
+          "c2"
+        ]
+      },
+      {
+        "train": [
+          "c1",
+          "c2"
+        ],
+        "val": [
+          "c0",
+          "c3"
+        ]
+      },
+      {
+        "train": [
+          "c2",
+          "c3"
+        ],
+        "val": [
+          "c0",
+          "c1"
+        ]
+      },
+      {
+        "train": [
+          "c1",
+          "c2",
+          "c3"
+        ],
+        "val": [
+          "c0"
+        ]
+      },
+      {
+        "train": [
+          "c1",
+          "c3"
+        ],
+        "val": [
+          "c0",
+          "c2"
+        ]
+      }
+    ],
+    "after_flexict": [
+      {
+        "train": [
+          "c0",
+          "c1",
+          "c2"
+        ],
+        "val": [
+          "c3"
+        ]
+      }
+    ],
+    "previous_validation_entered_train": true
+  },
+  "empty_group_split": {
+    "rejected": true,
+    "error": "训练/验证拆分后为空（训练 0 例 / 验证 4 例）。同一患者的全部扫描会整组进入同一侧，请减少验证病例数或调整验证病例的选择。"
+  },
+  "remote_patient_group_handoff": {
+    "local_split": {
+      "train": [
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0",
+        "c1"
+      ]
+    },
+    "remote_prepared_keys": [
+      "case_id",
+      "fingerprint",
+      "image",
+      "label"
+    ],
+    "remote_request_retains_groups": {
+      "c0": "A",
+      "c1": "A",
+      "c2": "B",
+      "c3": "B"
+    },
+    "remote_split": {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    "patient_A_leaks": true
+  },
+  "remote_output_overwrite": {
+    "previous_preserved": false,
+    "replacement_bytes": "new unvalidated synthetic result",
+    "replacement_is_valid_nifti": false
+  },
+  "reserved_background_label": {
+    "accepted": true,
+    "dataset_labels": {
+      "background": 1
+    }
+  },
+  "nninteractive_write_mode_caption": {
+    "session_memory": "derived_copy",
+    "current_state_mode": "in_place",
+    "menu_message": "源快照：肝脏\nAI 结果 Mask：肝脏\n本 AI 会话中的提示数：0\n\n提交提示后会启动后台推理，并立即将控制权交还给 Mimics。结果就绪后将自动应用（当前方式：创建可编辑副本）。",
+    "target_reused": true
+  },
+  "in_place_directory_mutation": {
+    "directory_mtime_unchanged": true,
+    "cached_signature_unchanged": true,
+    "fresh_signature_differs": true,
+    "cache_max_age_seconds": 604800
+  },
+  "uncertainty_affine_mismatch": {
+    "accepted": true,
+    "array_shape": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "physical_shift_mm": 100,
+    "reference_affine": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "hidden_remote_identity": {
+    "profile": {
+      "runtime_image": "private/synthetic-runtime:2",
+      "remote_root": "different-storage"
+    },
+    "summary": []
+  }
+}

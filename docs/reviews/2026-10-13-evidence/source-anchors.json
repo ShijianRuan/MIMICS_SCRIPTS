@@ -1,0 +1,187 @@
+{
+  "tools/nnunet_common.py": {
+    "safe_identifier": {
+      "start": 37,
+      "end": 40
+    },
+    "stable_task_identifier": {
+      "start": 43,
+      "end": 60
+    },
+    "path_signature": {
+      "start": 324,
+      "end": 383
+    },
+    "normalize_labels": {
+      "start": 496,
+      "end": 571
+    },
+    "normalize_request": {
+      "start": 574,
+      "end": 699
+    }
+  },
+  "tools/nnunet_jobs.py": {
+    "create_job": {
+      "start": 74,
+      "end": 174
+    }
+  },
+  "tools/io_path_setup_ui.py": {
+    "summarize_dataset": {
+      "start": 294,
+      "end": 428
+    }
+  },
+  "tools/import_drop_window.py": {
+    "cases_missing_selected_masks": {
+      "start": 174,
+      "end": 188
+    },
+    "submit_import": {
+      "start": 412,
+      "end": 550
+    }
+  },
+  "tools/single_case_import_worker.py": {
+    "_write_status": {
+      "start": 42,
+      "end": 49
+    },
+    "_filter_masks": {
+      "start": 83,
+      "end": 93
+    }
+  },
+  "runtime_py35/import_undo_mimics.py": {
+    "_recent_drop_output_dirs": {
+      "start": 73,
+      "end": 97
+    },
+    "find_latest_receipt": {
+      "start": 100,
+      "end": 128
+    },
+    "_delete_owned_masks": {
+      "start": 279,
+      "end": 305
+    },
+    "_session_diverged": {
+      "start": 308,
+      "end": 360
+    }
+  },
+  "runtime_py35/flexict_mimics.py": {
+    "_annotation_state_guard": {
+      "start": 1484,
+      "end": 1532
+    },
+    "_al_mark_viewed": {
+      "start": 1554,
+      "end": 1589
+    },
+    "_al_finish_conversion": {
+      "start": 1846,
+      "end": 1953
+    }
+  },
+  "tools/flexict_active_learning_ui.py": {
+    "_annotation_state_guard": {
+      "start": 142,
+      "end": 179
+    },
+    "set_case_state": {
+      "start": 201,
+      "end": 223
+    }
+  },
+  "tools/flexict_pipeline.py": {
+    "_materialize_flexict_raw": {
+      "start": 397,
+      "end": 415
+    },
+    "_split_train_val": {
+      "start": 453,
+      "end": 537
+    },
+    "_write_flexict_splits": {
+      "start": 540,
+      "end": 555
+    },
+    "run_training": {
+      "start": 865,
+      "end": 1125
+    },
+    "_al_predict_configuration": {
+      "start": 1503,
+      "end": 1557
+    },
+    "run_active_learning": {
+      "start": 1609,
+      "end": 1773
+    }
+  },
+  "tools/remote_training_controller.py": {
+    "_prepare_flexict": {
+      "start": 1565,
+      "end": 1704
+    },
+    "_apply_remote_prediction_output": {
+      "start": 2849,
+      "end": 2871
+    }
+  },
+  "runtime_py35/nninteractive_mimics.py": {
+    "_choose_completed_result_target": {
+      "start": 1995,
+      "end": 2038
+    },
+    "_async_prompt_menu": {
+      "start": 2749,
+      "end": 2787
+    }
+  },
+  "tools/nninteractive_task_model_chooser.py": {},
+  "tools/nninteractive_task_model_center.py": {
+    "refresh_status": {
+      "start": 1795,
+      "end": 2134
+    },
+    "refresh_models": {
+      "start": 2342,
+      "end": 2457
+    }
+  },
+  "tools/remote_compute_ui.py": {
+    "_non_default_summary": {
+      "start": 47,
+      "end": 83
+    }
+  },
+  "mimics_bridge.py": {
+    "get_image_affine_from_dicom": {
+      "start": 1693,
+      "end": 1751
+    },
+    "get_image_shape_from_dicom": {
+      "start": 1754,
+      "end": 1757
+    }
+  },
+  "integrations/flexict-finetune/uncertainty/uncertainty.py": {
+    "load_masks": {
+      "start": 84,
+      "end": 119
+    }
+  },
+  "tools/nnunet_pipeline.py": {
+    "prepare_source_grid_cases": {
+      "start": 646,
+      "end": 780
+    },
+    "_materialize_nnunet_raw": {
+      "start": 934,
+      "end": 1054
+    }
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "scope": "17 primary suite invocations; counts are executions and may overlap test methods. source-path-rerun is diagnostic repetition, excluded from primary totals.",
+  "source_commit": "96448aee155f2009624b5a93fc08e64e31b41c6e",
+  "suites": [
+    {
+      "suite": "changed-runtime",
+      "executed": 100,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "changed-runtime.log.txt",
+      "command_selector": "tests/test_all.py TestSyntax TestScriptingLibraryEntries TestImportReceiptAndUndo TestFlexiCTActiveLearningApply TestNNInteractiveContinuousPrompting TestNNInteractiveSessionWriteMode TestImportDropWindow TestGuiThreadBlockingContract",
+      "passed": 100
+    },
+    {
+      "suite": "cross",
+      "executed": 2,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "cross.log.txt",
+      "command_selector": "tests/test_cross_workflow_transitions.py",
+      "passed": 2
+    },
+    {
+      "suite": "diagnostics",
+      "executed": 11,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "diagnostics.log.txt",
+      "command_selector": "tests/test_all.py TestNNInteractiveTaskDiagnostics",
+      "passed": 11
+    },
+    {
+      "suite": "environment",
+      "executed": 17,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 1,
+      "result": "FAILED (failures=1)",
+      "log": "environment.log.txt",
+      "command_selector": "tests/test_all.py TestEnvGuidance",
+      "passed": 16
+    },
+    {
+      "suite": "flexict",
+      "executed": 133,
+      "skipped": 0,
+      "errors": 1,
+      "failures": 0,
+      "result": "FAILED (errors=1)",
+      "log": "flexict.log.txt",
+      "command_selector": "tests/test_flexict_integration.py",
+      "passed": 132
+    },
+    {
+      "suite": "geometry",
+      "executed": 6,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "geometry.log.txt",
+      "command_selector": "tests/test_geometry_manifest_regressions.py",
+      "passed": 6
+    },
+    {
+      "suite": "gui",
+      "executed": 82,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "gui.log.txt",
+      "command_selector": "tests/test_gui_smoke.py",
+      "passed": 82
+    },
+    {
+      "suite": "nnint-deep",
+      "executed": 75,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "nnint-deep.log.txt",
+      "command_selector": "tests/test_mimics_nnint_deep.py",
+      "passed": 75
+    },
+    {
+      "suite": "nnint-functional",
+      "executed": 91,
+      "skipped": 1,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK (skipped=1)",
+      "log": "nnint-functional.log.txt",
+      "command_selector": "tests/test_mimics_nnint_functional.py",
+      "passed": 90
+    },
+    {
+      "suite": "nnunet",
+      "executed": 107,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "nnunet.log.txt",
+      "command_selector": "tests/test_nnunet_integration.py",
+      "passed": 107
+    },
+    {
+      "suite": "other-workflows",
+      "executed": 120,
+      "skipped": 0,
+      "errors": 2,
+      "failures": 0,
+      "result": "FAILED (errors=2)",
+      "log": "other-workflows.log.txt",
+      "command_selector": "tests/test_all.py TestMimicsBridgeBufferMapping TestVerifyMedicalGeometry TestBridgeDicomLoading TestSourceImagePathEquivalence TestSystemHealthPanel TestEnvironmentRepairSemantics TestWindowLevel TestDatasetProfiles TestBatchPredictCommand",
+      "passed": 118
+    },
+    {
+      "suite": "portability",
+      "executed": 22,
+      "skipped": 0,
+      "errors": 19,
+      "failures": 0,
+      "result": "FAILED (errors=19)",
+      "log": "portability.log.txt",
+      "command_selector": "tests/test_model_portability.py",
+      "passed": 3
+    },
+    {
+      "suite": "remote",
+      "executed": 134,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "remote.log.txt",
+      "command_selector": "tests/test_remote_training.py",
+      "passed": 134
+    },
+    {
+      "suite": "review-old",
+      "executed": 11,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "review-old.log.txt",
+      "command_selector": "tests/test_review_workflow_regressions.py",
+      "passed": 11
+    },
+    {
+      "suite": "scribble",
+      "executed": 23,
+      "skipped": 2,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK (skipped=2)",
+      "log": "scribble.log.txt",
+      "command_selector": "tests/test_interactive_algorithms.py",
+      "passed": 21
+    },
+    {
+      "suite": "source-path-rerun",
+      "executed": 28,
+      "skipped": 0,
+      "errors": 2,
+      "failures": 0,
+      "result": "FAILED (errors=2)",
+      "log": "source-path-rerun.log.txt",
+      "command_selector": "PYTHONPATH=integrations/nninteractive-finetune/src python tests/test_all.py TestSourceImagePathEquivalence",
+      "passed": 26
+    },
+    {
+      "suite": "ui-quality",
+      "executed": 5,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "ui-quality.log.txt",
+      "command_selector": "tests/test_ui_quality.py",
+      "passed": 5
+    },
+    {
+      "suite": "ui",
+      "executed": 19,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "log": "ui.log.txt",
+      "command_selector": "tests/test_ui_workflow_regressions.py",
+      "passed": 19
+    }
+  ],
+  "totals": {
+    "executed": 958,
+    "passed": 932,
+    "skipped": 3,
+    "errors": 22,
+    "failures": 1
+  },
+  "unavailable": [
+    "Windows/Mimics native API",
+    "GPU/torch/checkpoint execution",
+    "SSH server end-to-end"
+  ],
+  "rendering": {
+    "default_states": 150,
+    "font125_states": 150,
+    "scenario_screenshots": 7,
+    "button_content_clipping_detected": 0,
+    "not_equivalent_to_windows_dpi": true
+  },
+  "environment_error_notes": [
+    "20 errors require torch in flexict/portability suites.",
+    "2 SourceImagePathEquivalence tests lack integration import; adding source PYTHONPATH exposes missing PyYAML. These are unverified, not proven product regressions.",
+    "One pre-existing TestEnvGuidance POSIX old-root fixture failure also occurs on previous baseline; not caused by these remote edits."
+  ]
+}

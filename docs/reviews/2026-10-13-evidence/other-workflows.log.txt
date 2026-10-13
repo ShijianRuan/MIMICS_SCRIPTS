@@ -1,0 +1,217 @@
+test_affine_close (__main__.TestMimicsBridgeBufferMapping.test_affine_close) ... ok
+test_affine_is_usable (__main__.TestMimicsBridgeBufferMapping.test_affine_is_usable) ... ok
+test_apply_buffer_mapping_flip_axis0 (__main__.TestMimicsBridgeBufferMapping.test_apply_buffer_mapping_flip_axis0) ... ok
+test_apply_buffer_mapping_flip_axis1 (__main__.TestMimicsBridgeBufferMapping.test_apply_buffer_mapping_flip_axis1) ... ok
+test_convert_can_write_to_job_scoped_segmentations (__main__.TestMimicsBridgeBufferMapping.test_convert_can_write_to_job_scoped_segmentations) ... ok
+test_convert_canonical_source_mask_bypasses_corrupt_mcs_buffer (__main__.TestMimicsBridgeBufferMapping.test_convert_canonical_source_mask_bypasses_corrupt_mcs_buffer) ... ok
+test_convert_canonical_source_mask_rejects_bad_shape_affine_and_values (__main__.TestMimicsBridgeBufferMapping.test_convert_canonical_source_mask_rejects_bad_shape_affine_and_values) ... ok
+test_convert_degraded_export_uses_mimics_grid_without_source_geometry (__main__.TestMimicsBridgeBufferMapping.test_convert_degraded_export_uses_mimics_grid_without_source_geometry) ... ok
+test_convert_multi_format_writes_nrrd_and_mha_with_same_geometry (__main__.TestMimicsBridgeBufferMapping.test_convert_multi_format_writes_nrrd_and_mha_with_same_geometry) ... ok
+test_convert_rejects_unsupported_export_format (__main__.TestMimicsBridgeBufferMapping.test_convert_rejects_unsupported_export_format) ... ok
+test_convert_resamples_mimics_mask_back_to_source_image_grid (__main__.TestMimicsBridgeBufferMapping.test_convert_resamples_mimics_mask_back_to_source_image_grid) ... ok
+test_convert_restores_source_grid_from_metadata_when_file_missing (__main__.TestMimicsBridgeBufferMapping.test_convert_restores_source_grid_from_metadata_when_file_missing) ... ok
+test_convert_strict_source_export_refuses_missing_source_geometry (__main__.TestMimicsBridgeBufferMapping.test_convert_strict_source_export_refuses_missing_source_geometry) ... ok
+test_convert_uses_mimics_grid_affine_from_manifest (__main__.TestMimicsBridgeBufferMapping.test_convert_uses_mimics_grid_affine_from_manifest) ... ok
+test_custom_export_does_not_overwrite_existing_mask (__main__.TestMimicsBridgeBufferMapping.test_custom_export_does_not_overwrite_existing_mask) ... ok
+test_derived_dicom_kill_mid_slices_leaves_unpublished_residue_and_rerun_recovers (__main__.TestMimicsBridgeBufferMapping.test_derived_dicom_kill_mid_slices_leaves_unpublished_residue_and_rerun_recovers) ... <audit-python>/lib/python3.12/site-packages/pydicom/dataset.py:1378: DeprecationWarning: 'FileDataset.is_little_endian' will be removed in v4.0, set the Transfer Syntax UID or use the 'little_endian' argument with FileDataset.save_as() or dcmwrite() instead
+  warn_and_log(
+<audit-python>/lib/python3.12/site-packages/pydicom/dataset.py:1337: DeprecationWarning: 'FileDataset.is_implicit_VR' will be removed in v4.0, set the Transfer Syntax UID or use the 'implicit_vr' argument with FileDataset.save_as() or dcmwrite() instead
+  warn_and_log(
+ok
+test_derived_dicom_validation_rejects_incomplete_series (__main__.TestMimicsBridgeBufferMapping.test_derived_dicom_validation_rejects_incomplete_series) ... ok
+test_empty_source_image_path_never_scans_cwd (__main__.TestMimicsBridgeBufferMapping.test_empty_source_image_path_never_scans_cwd)
+An empty source_image_path must not treat cwd as a DICOM folder. ... ok
+test_export_manifest_roundtrips_chinese_mask_names_as_utf8 (__main__.TestMimicsBridgeBufferMapping.test_export_manifest_roundtrips_chinese_mask_names_as_utf8)
+F-8: export manifests must be written (and read back) as UTF-8. ... ok
+test_inverse_buffer_mapping_roundtrip (__main__.TestMimicsBridgeBufferMapping.test_inverse_buffer_mapping_roundtrip) ... ok
+test_mask_header_geometry_fallback_is_explicit (__main__.TestMimicsBridgeBufferMapping.test_mask_header_geometry_fallback_is_explicit) ... ok
+test_mask_nifti_kill_mid_write_never_publishes_partial_file (__main__.TestMimicsBridgeBufferMapping.test_mask_nifti_kill_mid_write_never_publishes_partial_file) ... ok
+test_mask_resample_default_is_nearest_and_discrete_flip_is_exact (__main__.TestMimicsBridgeBufferMapping.test_mask_resample_default_is_nearest_and_discrete_flip_is_exact) ... ok
+test_mr_mhd_float_intensity_survives_derived_dicom_scaling (__main__.TestMimicsBridgeBufferMapping.test_mr_mhd_float_intensity_survives_derived_dicom_scaling) ... ok
+test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers (__main__.TestMimicsBridgeBufferMapping.test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers) ... ok
+test_nifti_to_derived_dicom_shape (__main__.TestMimicsBridgeBufferMapping.test_nifti_to_derived_dicom_shape) ... ok
+test_prepare_supports_mhd_and_preserves_source_geometry (__main__.TestMimicsBridgeBufferMapping.test_prepare_supports_mhd_and_preserves_source_geometry) ... ok
+test_read_mask_labels_rejects_nonfinite_values (__main__.TestMimicsBridgeBufferMapping.test_read_mask_labels_rejects_nonfinite_values)
+F23: the multi-label entry point keeps rejecting NaN/Inf labels. ... ok
+test_read_nifti_mask_accepts_trailing_singleton_channel (__main__.TestMimicsBridgeBufferMapping.test_read_nifti_mask_accepts_trailing_singleton_channel) ... ok
+test_read_nifti_mask_integer_valued_float_passes_all_readers (__main__.TestMimicsBridgeBufferMapping.test_read_nifti_mask_integer_valued_float_passes_all_readers)
+F23: float dtype with integral values (0/1, 0/255) stays accepted. ... ok
+test_read_nifti_mask_non_3d_raises (__main__.TestMimicsBridgeBufferMapping.test_read_nifti_mask_non_3d_raises) ... ok
+test_read_nifti_mask_rejects_fractional_probability_map (__main__.TestMimicsBridgeBufferMapping.test_read_nifti_mask_rejects_fractional_probability_map)
+F23: an undeclared probability map must not be silently thresholded. ... ok
+test_read_nifti_mask_rejects_nonfinite_values (__main__.TestMimicsBridgeBufferMapping.test_read_nifti_mask_rejects_nonfinite_values)
+F23: NaN/Inf voxels must not become foreground via != 0. ... ok
+test_resample_image_to_grid_matches_target_shape (__main__.TestMimicsBridgeBufferMapping.test_resample_image_to_grid_matches_target_shape) ... ok
+test_resample_mask_to_image_grid_different_affine_identity (__main__.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_different_affine_identity)
+When affines are identity (pixdim-only), resample should be identity. ... ok
+test_resample_mask_to_image_grid_rejects_singular_affine (__main__.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_rejects_singular_affine) ... ok
+test_resample_mask_to_image_grid_same_affine (__main__.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_same_affine) ... ok
+test_resample_mask_to_image_grid_unusable_affine_fallback (__main__.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_unusable_affine_fallback)
+When mask affine is zero (unusable), should return mask as-is. ... ok
+test_unit_axis (__main__.TestMimicsBridgeBufferMapping.test_unit_axis) ... ok
+test_unit_axis_zero_spacing_raises (__main__.TestMimicsBridgeBufferMapping.test_unit_axis_zero_spacing_raises) ... ok
+test_valid_identity_affine_is_not_silently_voxel_aligned (__main__.TestMimicsBridgeBufferMapping.test_valid_identity_affine_is_not_silently_voxel_aligned) ... ok
+test_affine_mismatch_fails_closed (__main__.TestVerifyMedicalGeometry.test_affine_mismatch_fails_closed) ... ok
+test_matching_grid_passes (__main__.TestVerifyMedicalGeometry.test_matching_grid_passes) ... ok
+test_nrrd_mask_uses_lps_to_ras_conversion (__main__.TestVerifyMedicalGeometry.test_nrrd_mask_uses_lps_to_ras_conversion) ... ok
+test_reference_mask_dice (__main__.TestVerifyMedicalGeometry.test_reference_mask_dice) ... ok
+test_shape_mismatch_fails_closed (__main__.TestVerifyMedicalGeometry.test_shape_mismatch_fails_closed) ... ok
+test_unreadable_source_geometry_raises (__main__.TestVerifyMedicalGeometry.test_unreadable_source_geometry_raises) ... ok
+test_dicom_missing_uid_distinct_series_number_same_grid (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_distinct_series_number_same_grid) ... ok
+test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed) ... ok
+test_dicom_missing_uid_interleaved_series_fails_closed (__main__.TestBridgeDicomLoading.test_dicom_missing_uid_interleaved_series_fails_closed) ... ok
+test_dicom_series_number_zero_is_real_value (__main__.TestBridgeDicomLoading.test_dicom_series_number_zero_is_real_value) ... ok
+test_dicom_single_missing_uid_series_still_selects (__main__.TestBridgeDicomLoading.test_dicom_single_missing_uid_series_still_selects) ... ok
+test_dicom_sort_key (__main__.TestBridgeDicomLoading.test_dicom_sort_key) ... ok
+test_dicom_uid_series_exempt_from_duplicate_position_check (__main__.TestBridgeDicomLoading.test_dicom_uid_series_exempt_from_duplicate_position_check) ... ok
+test_apply_intensity_transform_clinical (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_clinical)
+Path B: Clinical HU2GV transform (slope=1, intercept=1024). ... ok
+test_apply_intensity_transform_identity (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_identity)
+Path B: Identity slope/intercept → GV = HU (no transformation). ... ok
+test_apply_intensity_transform_missing_params (__main__.TestSourceImagePathEquivalence.test_apply_intensity_transform_missing_params)
+Path B: Missing slope/intercept → no transform applied. ... ok
+test_both_paths_produce_same_values_clinical_dicom (__main__.TestSourceImagePathEquivalence.test_both_paths_produce_same_values_clinical_dicom)
+For clinical DICOM (RescaleSlope=1, Intercept=-1024): both paths match. ... ok
+test_both_paths_produce_same_values_derived_dicom (__main__.TestSourceImagePathEquivalence.test_both_paths_produce_same_values_derived_dicom)
+For derived DICOM (slope=1, intercept=0): both paths = HU. ... ok
+test_call_mimics_bridge_nonzero_exit_reports_stderr (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_nonzero_exit_reports_stderr) ... ok
+test_call_mimics_bridge_pumps_gui_during_wait (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_pumps_gui_during_wait) ... ok
+test_call_mimics_bridge_timeout_kills_and_raises (__main__.TestSourceImagePathEquivalence.test_call_mimics_bridge_timeout_kills_and_raises) ... ok
+test_derived_dicom_identity_transform (__main__.TestSourceImagePathEquivalence.test_derived_dicom_identity_transform)
+Path A: Mimics imports derived DICOM → GV = stored_pixel = HU. ... ok
+test_derived_dicom_stores_original_hu_values (__main__.TestSourceImagePathEquivalence.test_derived_dicom_stores_original_hu_values)
+Path A: DICOM slices encapsulate the image data correctly. ... ok
+test_dicom_pixel_roundtrip (__main__.TestSourceImagePathEquivalence.test_dicom_pixel_roundtrip)
+NIfTI → DICOM → read pixel → preserves voxel values within int16 range. ... ok
+test_hu_gv_conversion_is_modality_specific (__main__.TestSourceImagePathEquivalence.test_hu_gv_conversion_is_modality_specific) ... ok
+test_hu_to_gv_transform_computation (__main__.TestSourceImagePathEquivalence.test_hu_to_gv_transform_computation)
+Simulate _hu_to_mimics_gv_transform() computation for derived DICOM. ... ok
+test_load_image_nifti_returns_float32_hu (__main__.TestSourceImagePathEquivalence.test_load_image_nifti_returns_float32_hu)
+Path B: load_image_nifti returns float32 values from NIfTI. ... ok
+test_mri_rescale_restoration_preserves_negative_background_contract (__main__.TestSourceImagePathEquivalence.test_mri_rescale_restoration_preserves_negative_background_contract) ... ERROR
+test_official_model_source_alignment_is_deferred_by_default (__main__.TestSourceImagePathEquivalence.test_official_model_source_alignment_is_deferred_by_default) ... ok
+test_official_model_sync_alignment_still_available_when_configured (__main__.TestSourceImagePathEquivalence.test_official_model_sync_alignment_still_available_when_configured) ... ok
+test_prediction_context_errors_point_to_real_repair_paths (__main__.TestSourceImagePathEquivalence.test_prediction_context_errors_point_to_real_repair_paths) ... ok
+test_prediction_failure_offers_repair_on_geometry_mismatch (__main__.TestSourceImagePathEquivalence.test_prediction_failure_offers_repair_on_geometry_mismatch) ... ok
+test_source_image_missing_file_is_not_silent_fallback (__main__.TestSourceImagePathEquivalence.test_source_image_missing_file_is_not_silent_fallback)
+Valid source metadata with a missing file should fail unless fallback is explicit. ... ok
+test_task_model_auto_mode_never_probes_unc_source_on_mimics_thread (__main__.TestSourceImagePathEquivalence.test_task_model_auto_mode_never_probes_unc_source_on_mimics_thread) ... ok
+test_task_model_explicit_mimics_mode_ignores_source_fallback_switch (__main__.TestSourceImagePathEquivalence.test_task_model_explicit_mimics_mode_ignores_source_fallback_switch) ... ok
+test_task_model_local_source_alignment_is_deferred_to_external_worker (__main__.TestSourceImagePathEquivalence.test_task_model_local_source_alignment_is_deferred_to_external_worker) ... ok
+test_task_model_missing_source_uses_portable_mimics_buffer (__main__.TestSourceImagePathEquivalence.test_task_model_missing_source_uses_portable_mimics_buffer) ... ok
+test_task_model_mri_buffer_restores_source_values_from_mcs_metadata (__main__.TestSourceImagePathEquivalence.test_task_model_mri_buffer_restores_source_values_from_mcs_metadata) ... ok
+test_task_model_mri_uint16_quantization_preserves_zscore_input (__main__.TestSourceImagePathEquivalence.test_task_model_mri_uint16_quantization_preserves_zscore_input) ... ERROR
+test_task_model_old_mcs_reads_mri_rescale_from_dicom_tags (__main__.TestSourceImagePathEquivalence.test_task_model_old_mcs_reads_mri_rescale_from_dicom_tags) ... ok
+test_task_model_strict_source_does_not_silently_fallback (__main__.TestSourceImagePathEquivalence.test_task_model_strict_source_does_not_silently_fallback) ... ok
+test_collect_health_empty_project (__main__.TestSystemHealthPanel.test_collect_health_empty_project) ... <repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+ok
+test_collect_health_reports_environment_issues (__main__.TestSystemHealthPanel.test_collect_health_reports_environment_issues) ... ok
+test_env_guidance_entry_exists (__main__.TestSystemHealthPanel.test_env_guidance_entry_exists) ... ok
+test_health_panel_entry_exists (__main__.TestSystemHealthPanel.test_health_panel_entry_exists) ... ok
+test_held_lock_shows_live_with_owner (__main__.TestSystemHealthPanel.test_held_lock_shows_live_with_owner) ... ok
+test_locks_live_vs_stale_classification (__main__.TestSystemHealthPanel.test_locks_live_vs_stale_classification) ... ok
+test_offscreen_panel_renders (__main__.TestSystemHealthPanel.test_offscreen_panel_renders) ... qt.qpa.fonts: Populating font family aliases took 121 ms. Replace uses of missing font family "Segoe UI" with one that exists to avoid this cost.
+ok
+test_processes_include_liveness_and_locks (__main__.TestSystemHealthPanel.test_processes_include_liveness_and_locks) ... ok
+test_queue_state_classification (__main__.TestSystemHealthPanel.test_queue_state_classification) ... ok
+test_server_state_live_and_dead (__main__.TestSystemHealthPanel.test_server_state_live_and_dead) ... ok
+test_all_ok_is_false_when_a_real_import_fails (__main__.TestEnvironmentRepairSemantics.test_all_ok_is_false_when_a_real_import_fails)
+F08: find_spec only proves presence - a Windows DLL problem makes ... ok
+test_flexict_inference_does_not_require_the_backbone_files (__main__.TestEnvironmentRepairSemantics.test_flexict_inference_does_not_require_the_backbone_files)
+F06: the inference environment claimed the pretrained backbone ... ok
+test_repair_translates_import_names_to_pip_names (__main__.TestEnvironmentRepairSemantics.test_repair_translates_import_names_to_pip_names)
+F07: the check reports import names; pip needs distributions. ... ok
+test_torch_is_installed_as_a_pinned_pair (__main__.TestEnvironmentRepairSemantics.test_torch_is_installed_as_a_pinned_pair)
+F12: torch and torchvision must move as a pair from the PyTorch ... ok
+test_clamp_contrast_points (__main__.TestWindowLevel.test_clamp_contrast_points) ... ok
+test_hu_to_gv_roundtrip (__main__.TestWindowLevel.test_hu_to_gv_roundtrip)
+Simulate HU2GV integer conversion logic. ... ok
+test_image_min_max_default_fallback (__main__.TestWindowLevel.test_image_min_max_default_fallback)
+When no Mimics API, _image_min_max falls back to (0, 4095). ... ok
+test_load_presets_returns_defaults_when_no_file (__main__.TestWindowLevel.test_load_presets_returns_defaults_when_no_file) ... ok
+test_parse_valid_range (__main__.TestWindowLevel.test_parse_valid_range) ... ok
+test_preset_calculation (__main__.TestWindowLevel.test_preset_calculation)
+WW=400, WL=50 → low_hu=-150, high_hu=250 ... ok
+test_preset_keyword_matching (__main__.TestWindowLevel.test_preset_keyword_matching) ... ok
+test_bridge_discovery_follows_profile_mask_dirs (__main__.TestDatasetProfiles.test_bridge_discovery_follows_profile_mask_dirs) ... ok
+test_bridge_discovery_tables_follow_profile (__main__.TestDatasetProfiles.test_bridge_discovery_tables_follow_profile) ... ok
+test_discover_single_source_flags_sibling_mask_suppression (__main__.TestDatasetProfiles.test_discover_single_source_flags_sibling_mask_suppression) ... ok
+test_discover_single_source_rejects_dataset_root (__main__.TestDatasetProfiles.test_discover_single_source_rejects_dataset_root) ... ok
+test_discover_single_source_still_accepts_real_cases (__main__.TestDatasetProfiles.test_discover_single_source_still_accepts_real_cases) ... ok
+test_discovery_equivalence_on_ts_like_fixture (__main__.TestDatasetProfiles.test_discovery_equivalence_on_ts_like_fixture)
+The profile-driven discovery must match the historical hard-coded result. ... ok
+test_fallback_matches_ts_like_byte_for_byte (__main__.TestDatasetProfiles.test_fallback_matches_ts_like_byte_for_byte) ... ok
+test_generic_profile_makes_no_assumptions (__main__.TestDatasetProfiles.test_generic_profile_makes_no_assumptions) ... ok
+test_loader_returns_normalized_ts_like_by_default (__main__.TestDatasetProfiles.test_loader_returns_normalized_ts_like_by_default) ... ok
+test_loader_unknown_id_falls_back_to_default (__main__.TestDatasetProfiles.test_loader_unknown_id_falls_back_to_default) ... ok
+test_summarize_dataset_normal_line_and_anomalies (__main__.TestDatasetProfiles.test_summarize_dataset_normal_line_and_anomalies) ... ok
+test_summarize_dataset_rejects_missing_root (__main__.TestDatasetProfiles.test_summarize_dataset_rejects_missing_root) ... ok
+test_summarize_dataset_warns_when_no_masks_found (__main__.TestDatasetProfiles.test_summarize_dataset_warns_when_no_masks_found) ... ok
+test_ambiguous_case_dir_is_skipped_and_reported (__main__.TestBatchPredictCommand.test_ambiguous_case_dir_is_skipped_and_reported) ... ok
+test_empty_root_raises (__main__.TestBatchPredictCommand.test_empty_root_raises) ... ok
+test_no_usable_model_reports_reasons_and_exits_2 (__main__.TestBatchPredictCommand.test_no_usable_model_reports_reasons_and_exits_2) ... No usable model matches 'no-such-model' in workspace <test-state>/workspace.
+ok
+test_requested_but_missing_case_raises (__main__.TestBatchPredictCommand.test_requested_but_missing_case_raises) ... ok
+
+======================================================================
+ERROR: test_mri_rescale_restoration_preserves_negative_background_contract (__main__.TestSourceImagePathEquivalence.test_mri_rescale_restoration_preserves_negative_background_contract)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 6903, in test_mri_rescale_restoration_preserves_negative_background_contract
+    from nninteractive_finetune.data import normalize_like_nninteractive
+ModuleNotFoundError: No module named 'nninteractive_finetune'
+
+======================================================================
+ERROR: test_task_model_mri_uint16_quantization_preserves_zscore_input (__main__.TestSourceImagePathEquivalence.test_task_model_mri_uint16_quantization_preserves_zscore_input)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 7220, in test_task_model_mri_uint16_quantization_preserves_zscore_input
+    from nninteractive_finetune.data import normalize_like_nninteractive
+ModuleNotFoundError: No module named 'nninteractive_finetune'
+
+----------------------------------------------------------------------
+Ran 120 tests in 6.157s
+
+FAILED (errors=2)
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <repo>
+============================================================
+Original image shape: (3, 4, 5)
+Exported Mask shape: (3, 4, 5)
+Original orientation: RAS
+Mask orientation: RAS
+Affine max abs delta: 5
+Foreground voxels: 1
+Grid match: FAIL
+Original image shape: (3, 4, 5)
+Exported Mask shape: (3, 4, 5)
+Original orientation: RAS
+Mask orientation: RAS
+Affine max abs delta: 0
+Foreground voxels: 1
+Grid match: PASS
+Original image shape: (3, 4, 5)
+Exported Mask shape: (5, 4, 3)
+Original orientation: RAS
+Mask orientation: LPS
+Affine max abs delta: 2
+Foreground voxels: 1
+Grid match: FAIL
+Original image shape: (3, 4, 5)
+Exported Mask shape: (3, 4, 5)
+Original orientation: RAS
+Mask orientation: RAS
+Affine max abs delta: 0
+Foreground voxels: 1
+Grid match: PASS
+Reference Dice: 1.000000
+Original image shape: (4, 4, 5)
+Exported Mask shape: (3, 4, 5)
+Original orientation: RAS
+Mask orientation: RAS
+Affine max abs delta: 0
+Foreground voxels: 1
+Grid match: FAIL

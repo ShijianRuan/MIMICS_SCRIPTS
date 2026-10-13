@@ -1,0 +1,119 @@
+test_annotated_row_gets_success_foreground (__main__.TestActiveLearningWindow.test_annotated_row_gets_success_foreground) ... <repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+qt.qpa.fonts: Populating font family aliases took 327 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+ok
+test_applied_request_message_survives_refresh (__main__.TestActiveLearningWindow.test_applied_request_message_survives_refresh) ... ok
+test_empty_state_offers_a_new_ranking_entry (__main__.TestActiveLearningWindow.test_empty_state_offers_a_new_ranking_entry) ... ok
+test_failed_request_message_survives_refresh (__main__.TestActiveLearningWindow.test_failed_request_message_survives_refresh) ... ok
+test_failed_run_stays_listed_with_its_error (__main__.TestActiveLearningWindow.test_failed_run_stays_listed_with_its_error)
+R62-10: a failed ranking run must not vanish from the job list; ... ok
+test_fresh_pending_request_gets_no_hint (__main__.TestActiveLearningWindow.test_fresh_pending_request_gets_no_hint)
+刚发出的请求（几秒内）不该被误报为监控未运行。 ... ok
+test_new_run_form_without_pair_explains_how_to_fix (__main__.TestActiveLearningWindow.test_new_run_form_without_pair_explains_how_to_fix) ... ok
+test_ranking_submit_error_is_surfaced (__main__.TestActiveLearningWindow.test_ranking_submit_error_is_surfaced) ... ok
+test_real_rows_populate_without_nameerror (__main__.TestActiveLearningWindow.test_real_rows_populate_without_nameerror) ... ok
+test_running_ranking_shows_progress_then_autorefreshes (__main__.TestActiveLearningWindow.test_running_ranking_shows_progress_then_autorefreshes) ... ok
+test_stale_pending_request_gets_monitor_hint (__main__.TestActiveLearningWindow.test_stale_pending_request_gets_monitor_hint)
+P2-2：请求一直无结果（Mimics 侧监控未运行）时，状态栏必须 ... ok
+test_submit_new_run_creates_al_job_from_pair (__main__.TestActiveLearningWindow.test_submit_new_run_creates_al_job_from_pair) ... ok
+test_submit_new_run_requires_pool_before_dispatch (__main__.TestActiveLearningWindow.test_submit_new_run_requires_pool_before_dispatch) ... ok
+test_viewed_case_not_counted_as_annotated (__main__.TestActiveLearningWindow.test_viewed_case_not_counted_as_annotated)
+UI14/F05 验收：叠加（查看）后已标注数不变；状态列为"已查看"， ... ok
+test_dispatch_timeout_guides_against_double_submit (__main__.TestBatchPredictionWindow.test_dispatch_timeout_guides_against_double_submit)
+R62-8: the timeout message must warn that dispatched jobs keep ... ok
+test_missing_folders_are_rejected_before_dispatch (__main__.TestBatchPredictionWindow.test_missing_folders_are_rejected_before_dispatch) ... ok
+test_remote_backend_marks_requests_and_drops_cpu_flag (__main__.TestBatchPredictionWindow.test_remote_backend_marks_requests_and_drops_cpu_flag)
+R72-C1 (=R62-5): the batch window can dispatch to a remote ... ok
+test_submit_dispatches_per_case_jobs_and_reports_skips (__main__.TestBatchPredictionWindow.test_submit_dispatches_per_case_jobs_and_reports_skips) ... ok
+test_submit_passes_modality_and_cpu_flags_to_jobs (__main__.TestBatchPredictionWindow.test_submit_passes_modality_and_cpu_flags_to_jobs)
+R62-5: the batch window must not bypass the modality guardrail ... ok
+test_unusable_models_stay_visible_with_reason (__main__.TestBatchPredictionWindow.test_unusable_models_stay_visible_with_reason)
+R62-7: a registered model whose files are gone must be listed ... ok
+test_batch_drop_import_stop_routes_to_queue_marker (__main__.TestBatchStatusWindow.test_batch_drop_import_stop_routes_to_queue_marker)
+R66 audit P2: a batch drop-import row's Stop must write the ... ok
+test_missing_dirs_window_is_empty_not_crashing (__main__.TestBatchStatusWindow.test_missing_dirs_window_is_empty_not_crashing) ... ok
+test_real_refresh_click_does_not_crash (__main__.TestBatchStatusWindow.test_real_refresh_click_does_not_crash)
+F34: a real clicked signal passes checked=False as its first ... ok
+test_single_case_drop_import_stop_keeps_own_marker (__main__.TestBatchStatusWindow.test_single_case_drop_import_stop_keeps_own_marker)
+Per-case drop imports poll their own worker marker — unchanged. ... ok
+test_window_builds_and_refreshes_rows (__main__.TestBatchStatusWindow.test_window_builds_and_refreshes_rows) ... ok
+test_editor_builds_and_lists_configs (__main__.TestConfigEditorWindow.test_editor_builds_and_lists_configs) ... ok
+test_editor_readonly_keys_not_editable (__main__.TestConfigEditorWindow.test_editor_readonly_keys_not_editable) ... ok
+test_local_stop_calls_stop_job_without_dialog (__main__.TestFlexictStopBehaviour.test_local_stop_calls_stop_job_without_dialog) ... ok
+test_remote_known_state_uses_plain_stop (__main__.TestFlexictStopBehaviour.test_remote_known_state_uses_plain_stop) ... ok
+test_remote_unknown_stop_asks_then_abandons (__main__.TestFlexictStopBehaviour.test_remote_unknown_stop_asks_then_abandons) ... ok
+test_remote_unknown_stop_cancelled_does_nothing (__main__.TestFlexictStopBehaviour.test_remote_unknown_stop_cancelled_does_nothing) ... ok
+test_stop_button_label_reflects_abandonable_state (__main__.TestFlexictStopBehaviour.test_stop_button_label_reflects_abandonable_state) ... ok
+test_drop_window_output_follows_each_new_dataset (__main__.TestIoPathOutputNotSticky.test_drop_window_output_follows_each_new_dataset) ... ok
+test_io_path_setup_prefills_only_user_chosen_output (__main__.TestIoPathOutputNotSticky.test_io_path_setup_prefills_only_user_chosen_output) ... ok
+test_candidate_checkboxes_sync_with_name_field (__main__.TestIoPathSetupDebounce.test_candidate_checkboxes_sync_with_name_field) ... ok
+test_candidate_click_keeps_other_candidates_visible (__main__.TestIoPathSetupDebounce.test_candidate_click_keeps_other_candidates_visible) ... ok
+test_export_radio_pairs_do_not_cross_uncheck (__main__.TestIoPathSetupDebounce.test_export_radio_pairs_do_not_cross_uncheck) ... ok
+test_no_import_mode_branches_remain (__main__.TestIoPathSetupDebounce.test_no_import_mode_branches_remain) ... ok
+test_action_buttons_follow_selection (__main__.TestModelManagerWindow.test_action_buttons_follow_selection)
+Use This Model / Remove Broken Entry were permanently disabled ... ok
+test_cells_carry_full_text_tooltip (__main__.TestModelManagerWindow.test_cells_carry_full_text_tooltip)
+F15：长模型 ID 被列宽省略成 "..."，悬停必须能看到完整内容， ... ok
+test_import_nnunet_bundle_never_passes_set_current (__main__.TestModelManagerWindow.test_import_nnunet_bundle_never_passes_set_current)
+nnU-Net 的导入子命令没有 --set-current（每次预测时才选模型）； ... ok
+test_import_worker_surfaces_system_exit_as_error (__main__.TestModelManagerWindow.test_import_worker_surfaces_system_exit_as_error)
+import_bundle 内部已把 SystemExit 转成 RuntimeError；工作线程的 ... ok
+test_manager_builds_with_default_workspaces (__main__.TestModelManagerWindow.test_manager_builds_with_default_workspaces) ... ok
+test_source_column_shows_remote_provenance (__main__.TestModelManagerWindow.test_source_column_shows_remote_provenance)
+AUD 5.3: the source column must say where a model came from ... ok
+test_use_button_disabled_for_usable_nnunet_rows (__main__.TestModelManagerWindow.test_use_button_disabled_for_usable_nnunet_rows)
+AUD 5.2: nnU-Net picks its model at predict time; "use this ... ok
+test_use_clicked_switches_recommended_model (__main__.TestModelManagerWindow.test_use_clicked_switches_recommended_model) ... ok
+test_application_icon_does_not_crash_process (__main__.TestTrainingSetupPathMemory.test_application_icon_does_not_crash_process)
+P0: PySide6 6.11 dropped drawPolygon's varargs overload; the old ... ok
+test_flexict_batch_size_override_reaches_request (__main__.TestTrainingSetupPathMemory.test_flexict_batch_size_override_reaches_request) ... ok
+test_flexict_case_table_shows_unusable_cases (__main__.TestTrainingSetupPathMemory.test_flexict_case_table_shows_unusable_cases) ... ok
+test_flexict_continue_training_reaches_request_and_allows_remote (__main__.TestTrainingSetupPathMemory.test_flexict_continue_training_reaches_request_and_allows_remote) ... ok
+test_flexict_empty_train_split_submission_is_rejected (__main__.TestTrainingSetupPathMemory.test_flexict_empty_train_split_submission_is_rejected) ... ok
+test_flexict_overlap_policy_reaches_request (__main__.TestTrainingSetupPathMemory.test_flexict_overlap_policy_reaches_request) ... ok
+test_flexict_rescan_keeps_manual_split_selection (__main__.TestTrainingSetupPathMemory.test_flexict_rescan_keeps_manual_split_selection) ... ok
+test_flexict_single_case_submission_is_rejected (__main__.TestTrainingSetupPathMemory.test_flexict_single_case_submission_is_rejected) ... ok
+test_flexict_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_flexict_window_prefills_remembered_paths) ... ok
+test_nnunet_form_fields_carry_one_line_explanations (__main__.TestTrainingSetupPathMemory.test_nnunet_form_fields_carry_one_line_explanations) ... ok
+test_nnunet_training_group_collapsed_by_default (__main__.TestTrainingSetupPathMemory.test_nnunet_training_group_collapsed_by_default) ... ok
+test_nnunet_val_cases_semantics (__main__.TestTrainingSetupPathMemory.test_nnunet_val_cases_semantics) ... ok
+test_nnunet_window_context_overrides_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_context_overrides_remembered_paths) ... ok
+test_nnunet_window_prefills_remembered_paths (__main__.TestTrainingSetupPathMemory.test_nnunet_window_prefills_remembered_paths) ... ok
+test_task_name_folding_is_caught_in_ui (__main__.TestTrainingSetupPathMemory.test_task_name_folding_is_caught_in_ui) ... ok
+test_training_windows_carry_cross_family_hint (__main__.TestTrainingSetupPathMemory.test_training_windows_carry_cross_family_hint)
+AUD 3.1: each family window must tell the annotator when to use ... ok
+test_training_wizards_warn_on_duplicate_task (__main__.TestTrainingSetupPathMemory.test_training_wizards_warn_on_duplicate_task) ... ok
+test_batch_viewer_background_refresh_applies_without_freezing (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_background_refresh_applies_without_freezing) ... ok
+test_batch_viewer_collect_error_does_not_break_window (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_collect_error_does_not_break_window) ... ok
+test_closed_viewer_windows_stop_their_refreshers (__main__.TestViewerNonBlockingRefresh.test_closed_viewer_windows_stop_their_refreshers)
+R75 P1: a closed viewer window must stop collecting. The hidden ... ok
+test_flexict_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_collects_on_worker_thread) ... ok
+test_flexict_viewer_shows_model_source (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_shows_model_source)
+R62-9: same contract for the FlexiCT status viewer. ... ok
+test_flexict_viewer_shows_training_curve (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_shows_training_curve) ... ok
+test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct (__main__.TestViewerNonBlockingRefresh.test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct)
+Hidden/minimized windows poll at the heartbeat rate, not 2s. ... ok
+test_nnunet_validation_dice_reads_fold_summary (__main__.TestViewerNonBlockingRefresh.test_nnunet_validation_dice_reads_fold_summary)
+AUD 5.1: the models tab must surface the fold validation Dice ... ok
+test_nnunet_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_collects_on_worker_thread) ... ok
+test_nnunet_viewer_shows_model_source (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_shows_model_source)
+R62-9: the models tab must distinguish remote-trained downloads ... ok
+test_shown_viewer_keeps_fast_interval (__main__.TestViewerNonBlockingRefresh.test_shown_viewer_keeps_fast_interval)
+A visible (or non-widget) parent keeps the configured interval. ... ok
+test_al_refresh_scans_off_gui_thread (__main__.TestWindowClampedToSmallScreen.test_al_refresh_scans_off_gui_thread)
+R76: find_al_jobs stats every job directory — it must run on a ... ok
+test_al_window_opens_on_small_screen (__main__.TestWindowClampedToSmallScreen.test_al_window_opens_on_small_screen)
+The AL window itself must construct with its minimum clamped to ... ok
+test_clamp_keeps_minimum_on_large_screen (__main__.TestWindowClampedToSmallScreen.test_clamp_keeps_minimum_on_large_screen) ... ok
+test_clamp_lowerers_minimum_to_available_geometry (__main__.TestWindowClampedToSmallScreen.test_clamp_lowerers_minimum_to_available_geometry) ... ok
+test_secondary_windows_clamp_on_small_screen (__main__.TestWindowClampedToSmallScreen.test_secondary_windows_clamp_on_small_screen)
+P2-1：nnU-Net/FlexiCT 状态、批量状态窗口的硬最小尺寸都要 ... ok
+test_status_viewers_speak_chinese (__main__.TestWindowClampedToSmallScreen.test_status_viewers_speak_chinese)
+P3-1：状态窗口的实时标记和作业状态词必须是中文—— ... ok
+test_preset_editor_builds_and_shows_current_presets (__main__.TestWindowLevelPresetEditor.test_preset_editor_builds_and_shows_current_presets) ... ok
+test_preset_editor_edit_updates_row (__main__.TestWindowLevelPresetEditor.test_preset_editor_edit_updates_row) ... ok
+
+----------------------------------------------------------------------
+Ran 82 tests in 3.961s
+
+OK

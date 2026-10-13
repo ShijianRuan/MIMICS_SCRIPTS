@@ -1,0 +1,727 @@
+{
+  "schema": "mimics_cross_functional_revalidation.v1",
+  "date": "2026-10-13",
+  "branch": "al-review-loop",
+  "previous_commit": "92a260064a1d37e1700e806d226e484fcce519e6",
+  "source_commit": "96448aee155f2009624b5a93fc08e64e31b41c6e",
+  "remote_commits_pulled": 24,
+  "changed_files": 42,
+  "business_code_modified_in_this_review": false,
+  "scope": "Read-only source/Qt/synthetic workflow audit, not exhaustive proof of all defects or native validation.",
+  "issues": [
+    {
+      "id": "R01",
+      "priority": "P2",
+      "status": "open",
+      "title": "任务标识二次归一化会丢掉区分摘要",
+      "previous_ids": [
+        "UI19",
+        "F22"
+      ],
+      "observations": [
+        "task_id_roundtrip",
+        "ascii_task_collision"
+      ],
+      "sources": [
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 37
+        },
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 43
+        },
+        {
+          "file": "tools/nnunet_jobs.py",
+          "line": 74
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "标注者输入两个同前缀的长任务名，GUI 创建请求后再交给作业管理器；模型、缓存目录还会继续处理该标识。",
+      "observed": "96 个 a 加“肝脏”或“肾脏”，首次得到两个不同的 105 字符 ID；create_job 落盘后均变成相同的 96 个 a。纯 ASCII 超长名字也碰撞。短中文名称的新增摘要方向是正确的。",
+      "root_cause": "safe_identifier 截断到 96 字符，stable_task_identifier 在截断后追加摘要；再次处理已生成的 ASCII 标识时又截断，且超长 ASCII 输入不追加摘要。",
+      "impact": "不同任务可能归入同一个模型或缓存目录，用户看到的名称仍不同；局部单次调用测试不能保证全链路唯一性。",
+      "implementation": "在长度预算内预留摘要空间；任何有损规范化（截断、替换、去除）都要检测。明确“显示名称”和“已生成内部 ID”的类型边界，规范化必须幂等；后续目录函数不可再次破坏有效 ID。注册时发现 ID 与原始名称不一致应拒绝或要求迁移，保持已有英文任务可加载。",
+      "acceptance": [
+        "中文短名称、97 字符 ASCII、96 字符前缀加不同中文尾部均不串任务。",
+        "GUI→create_job→本地/远程请求→模型注册→缓存路径，ID 完全一致；二次 normalize_request 不变化。",
+        "旧英文任务加载、改显示名称、同名重建、重启后仍能定位同一任务。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R02",
+      "priority": "P1",
+      "status": "open",
+      "title": "批量导入预检漏掉完全没有 Mask 的病例",
+      "previous_ids": [
+        "UI24"
+      ],
+      "observations": [
+        "maskless_case_warning",
+        "mask_case_sensitive_ui"
+      ],
+      "sources": [
+        {
+          "file": "tools/io_path_setup_ui.py",
+          "line": 310
+        },
+        {
+          "file": "tools/io_path_setup_ui.py",
+          "line": 389
+        },
+        {
+          "file": "tools/import_drop_window.py",
+          "line": 174
+        },
+        {
+          "file": "tools/single_case_import_worker.py",
+          "line": 83
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "同一数据集 CaseA 有 Liver、CaseB 没有 segmentations、CaseC 有 Spleen；用户按名称选择导入。",
+      "observed": "真实扫描结果有 3 例，case_mask_names 却只有 A/C。选 Liver 只警告 C；选 Liver 与 Spleen 时完全不警告，实际 GUI 已走到提交边界。CaseB 会成为仅图像病例。界面按大小写精确比较，worker 则忽略大小写，另有误报。",
+      "root_cause": "病例映射只在发现 Mask 时创建项；警告只遍历已有映射。预检与执行的名称匹配规则不同。当前提示只检测“所选集合一个也没有”，不能呈现多器官部分缺失。",
+      "impact": "标注者以为已完整导入多器官标签，后续复核或训练才发现缺失；也可能被不必要的警告打断。",
+      "implementation": "扫描到每个可导入病例即初始化空列表；预检与 worker 共用名称规范化规则。预览逐例的将导入标签、缺失标签、仅图像与拒绝原因，明确部分缺失策略。复用现有表格/摘要，默认取消异常确认；不要通过额外泛化入口解决。",
+      "acceptance": [
+        "上述三例选择 Liver 时明确显示 B/C；选择 Liver+Spleen 时仍显示 B，且呈现 A/C 的部分缺失。",
+        "不同大小写与前后空白，预检结果和实际 worker 一致。",
+        "批量、单病例、显式多文件三条路径都验证；用户取消不得创建作业，允许仅图像后结果页也必须保留该事实。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R03",
+      "priority": "P2",
+      "status": "open",
+      "title": "导入 worker 改写状态后，自定义目录回执再次失踪",
+      "previous_ids": [
+        "UI28",
+        "F30"
+      ],
+      "observations": [
+        "receipt_after_worker_update"
+      ],
+      "sources": [
+        {
+          "file": "tools/single_case_import_worker.py",
+          "line": 42
+        },
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 73
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "用户导入到自定义输出目录，成功后立即点击“撤销上次导入”。",
+      "observed": "启动状态含 output_path 时能找到目录；真实 _write_status 写入 completed/output_mcs 后，output_path 消失，_recent_drop_output_dirs 返回不了该目录。回执文件存在但 find_latest_receipt 返回空。",
+      "root_cause": "新检索入口读取 bootstrap 的 output_path；worker 的状态更新整份替换 JSON，实际完成记录只保留 output_mcs。新增单测使用手写 completed+output_path，跳过真实生命周期。",
+      "impact": "“撤销”存在但刚完成的任务无法撤销；显示搜索范围也不能恢复丢失的定位信息。",
+      "implementation": "固定任务上下文（源、输出目录、最终工程、回执路径）在全部状态转换中保留；或从 output_mcs 推导并兼容旧记录/选择文件。目录去重后再截取最近条目，涵盖默认 mask_exports 和自定义路径。结果页直接提供回执位置及对应工程，重 I/O 不在 Mimics 回调内遍历。",
+      "acceptance": [
+        "真实 bootstrap→worker preparing/running/completed/failed 全部状态写入后，回执检索仍正确。",
+        "默认目录、自定义本地/UNC、重复目录、多任务、重启、移动源目录分别测试。",
+        "撤销定位失败给可复制目录和下一步，不能显示“成功”或误用另一个任务的回执。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R04",
+      "priority": "P2",
+      "status": "open",
+      "title": "主动学习写锁在 Mimics 主线程等待约两秒",
+      "previous_ids": [
+        "UI31",
+        "F45"
+      ],
+      "observations": [
+        "mimics_guard_contention"
+      ],
+      "sources": [
+        {
+          "file": "runtime_py35/flexict_mimics.py",
+          "line": 1484
+        },
+        {
+          "file": "runtime_py35/flexict_mimics.py",
+          "line": 1567
+        },
+        {
+          "file": "runtime_py35/flexict_mimics.py",
+          "line": 1929
+        },
+        {
+          "file": "tools/flexict_active_learning_ui.py",
+          "line": 142
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "外部复核窗口持有状态锁，Mimics 刚应用分歧叠加并写入 viewed。",
+      "observed": "持有真实 OS 文件锁时，_al_mark_viewed 回调约 2.0 秒后返回，viewed 写入被跳过；并非注释和销项说明中的“best-effort、不阻塞 GUI”。锁内重读合并确实改善丢更新。",
+      "root_cause": "默认 wait_seconds=2.0，通过循环 time.sleep(0.02) 等待；该调用由 _al_finish_conversion 同步发起。外部窗口 set_case_state 也同步等待。",
+      "impact": "切片滚动、提示操作和宿主交互会短暂停住；最终状态又可能少一条查看记录。网络盘的 open/read/write 延迟还未测。",
+      "implementation": "Mimics 内采用不等待的尝试，失败交给后续定时 tick/外部写者重试；重 I/O 在外部进程。外部 UI 后台执行状态写入，并在成功回执后更新行状态。保留轻量 JSON 与跨进程互斥，无需数据库。",
+      "acceptance": [
+        "持锁期间 Mimics 标记回调没有 sleep/轮询，能及时返回，延迟事件在解锁后补写。",
+        "独立进程、两个窗口、并发不同病例、重复点击、进程退出和磁盘只读，不丢显式 annotated/skipped。",
+        "Windows msvcrt 与实际 UNC 目标机验证；UI 未持久化前不得显示标记成功。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R05",
+      "priority": "P2",
+      "status": "open",
+      "title": "折叠的远程设置摘要漏掉容器镜像与工作目录",
+      "previous_ids": [
+        "UI29"
+      ],
+      "observations": [
+        "hidden_remote_identity"
+      ],
+      "sources": [
+        {
+          "file": "tools/remote_compute_ui.py",
+          "line": 47
+        },
+        {
+          "file": "tools/remote_compute_ui.py",
+          "line": 254
+        },
+        {
+          "file": "tools/remote_compute_ui.py",
+          "line": 390
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "管理员载入非默认镜像或远程工作目录，标注者沿用该服务器开展任务。",
+      "observed": "仅 runtime_image/remote_root 非默认时 _non_default_summary 返回空，折叠标题仍为“高级运行设置”，用户不能从摘要知道计算环境与存储位置已变化。",
+      "root_cause": "摘要枚举没有包含这两个实际隐藏控件；保存/字段编辑后的摘要更新还应统一，不能只在加载时更新。",
+      "impact": "同一个服务器显示名可能指向不同运行环境或输出位置，排错、缓存复用及结果定位困难。",
+      "implementation": "用同一份高级字段定义生成默认值比较和摘要；覆盖 runtime_image、remote_root 及已有校验/缓存项。切换、新建、编辑和保存后同步摘要；常规页只显示关键环境身份与变更数量，全文可展开/复制。",
+      "acceptance": [
+        "仅改镜像、仅改目录、两项都改、载入旧配置，折叠状态均提示非默认值。",
+        "编辑后即更新；保存、切换服务器、重开后值与摘要不矛盾。",
+        "长镜像与 UNC/远程目录能读全文，不能把所有参数重新摊开挤压主操作。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R06",
+      "priority": "P1",
+      "status": "open",
+      "title": "中文多器官名称仍被误判成同一个标签或别名",
+      "previous_ids": [
+        "UI19",
+        "UI25"
+      ],
+      "observations": [
+        "chinese_multi_organ_labels"
+      ],
+      "sources": [
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 533
+        },
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 546
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "标注者直接选择 Mimics 的“肝脏”“脾脏”作为 nnU-Net 的两个训练标签；任务名称也用中文。",
+      "observed": "任务名改动已允许中文，但 normalize_labels 将两个标签都归一化成 item，报 Mask alias ... assigned to both；真实训练设置窗口显示红色英文异常，无法提交。",
+      "root_cause": "用于路径安全的 ASCII slug 被同时用于人类标签/别名的语义唯一性检查；显示命名与文件命名未分开。friendly_error 没有覆盖这个异常。",
+      "impact": "通用工具的常见中文多器官标注流程被阻断；用户被迫改名，容易损伤标签映射和既有工程习惯。",
+      "implementation": "标签语义比较采用明确的 Unicode 规范化、strip/casefold；文件安全名另用 numeric label ID/无碰撞内部键。保留原名与 aliases 到清单和导出映射；真实重复名/交叉别名要按语义报中文错误并指向对应行。",
+      "acceptance": [
+        "中文、英文加中文别名、混合语言、长名称均可提交且映射不串器官。",
+        "跨标签共享真实别名时拒绝，行内说明两个冲突目标；同一标签内重复别名只去重。",
+        "MCS 选标签→准备训练→dataset.json→预测回写/导出使用相同映射，不只是验证 request 文本。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R07",
+      "priority": "P1",
+      "status": "open",
+      "title": "FlexiCT 最后重写拆分仍把旧验证病例放入训练",
+      "previous_ids": [
+        "UI30",
+        "F16"
+      ],
+      "observations": [
+        "frozen_validation_after_retrain"
+      ],
+      "sources": [
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 397
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 540
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 453
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "用户增加新病例或继续同一任务训练，希望保留上一版验证集合进行可比评估。",
+      "observed": "真实准备流程先保留旧验证 c0，随后 _write_flexict_splits 改成 val=c3、train 含 c0。新增空集合拒绝有效，但并未修正最终拆分与已有验证契约。",
+      "root_cause": "共享原始数据准备与 FlexiCT 最终拆分有两个权威写者，后者重新抽样并覆盖前者；冻结验证集合没有贯穿最终出口。",
+      "impact": "模型优劣对比不再可比；原验证病例进入训练可使后续验证结论失真。标注者看见可提交无法得知最终换了病例。",
+      "implementation": "最终拆分只生成一次，明确区分新建、增加病例、继续训练与用户主动重新划分。保留旧验证键/患者组并验证互斥；本地/远程实际 trainer 读取同一份冻结清单。UI 提交前显示最终组数量与变化原因，若需重分必须显式选择。",
+      "acceptance": [
+        "新建、新增病例、重排扫描顺序、继续训练，冻结 c0 不得静默进入 train。",
+        "显式改验证选择、整组扩展、旧病例删除各有确定规则；最终 splits_final.json 与 UI 预览一致。",
+        "检查实际调用顺序和 trainer 读取文件，不能仅测 _split_train_val 单函数。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R08",
+      "priority": "P1",
+      "status": "open",
+      "title": "远程 FlexiCT 打包/重建病例丢掉患者分组",
+      "previous_ids": [
+        "F16",
+        "UI30"
+      ],
+      "observations": [
+        "remote_patient_group_handoff"
+      ],
+      "sources": [
+        {
+          "file": "tools/remote_training_controller.py",
+          "line": 1565
+        },
+        {
+          "file": "tools/remote_training_controller.py",
+          "line": 1618
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 902
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 470
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "同一患者 A 有 c0/c1 两期影像，患者 B 有 c2/c3；选 c0 验证，任务改在远程 GPU 训练。",
+      "observed": "本地验证 c0/c1、训练 c2/c3；真实远程 prepared_cases 只携带 case_id/image/label/fingerprint。请求顶层 patient_groups 虽保留，prepared 分支与拆分未消费它，远程变成验证 c0、训练 c1/c2/c3，患者 A 跨两侧。",
+      "root_cause": "患者分组信息在远程序列化和容器 rows 重建两处丢失；拆分只读取每行 patient_group。局部保留顶层字段不代表下游使用。",
+      "impact": "同患者多期/复查数据泄漏到训练和验证，验证结果可能乐观；本地与远程同一请求行为不同。",
+      "implementation": "序列化时保留 patient_group，容器重建时恢复，并统一从请求映射补全/校验。优先直接携带已经确定的最终拆分及摘要，拒绝组跨侧或分组信息不一致。病例身份、原网格与标签映射也作为同一 prepared-case 契约。",
+      "acceptance": [
+        "两患者四扫描本地与远程最终 split 相同，A 不跨两侧。",
+        "只含顶层映射、只含行字段、二者冲突、中文病例键、旧 prepared 请求均有明确兼容/拒绝规则。",
+        "完整 prepare→remote_request→容器 run_training→实际 splits 文件验证，不依赖手写 row fixture。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R09",
+      "priority": "P1",
+      "status": "open",
+      "title": "非等距和重复位置 DICOM 仍被制造成规则网格",
+      "previous_ids": [
+        "UI16",
+        "F01"
+      ],
+      "observations": [
+        "dicom_irregular_geometry"
+      ],
+      "sources": [
+        {
+          "file": "mimics_bridge.py",
+          "line": 1693
+        },
+        {
+          "file": "mimics_bridge.py",
+          "line": 1754
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "数据来自补扫、拼接、归档覆盖或重复导出；同一个 Series 内层面位置不均匀或重复。",
+      "observed": "模拟真实 DICOM header 输入 z=[0,1,3]，函数给出规则 z=[0,1.5,3]；输入 [0,1,1] 给出 [0,1,2]，两者都不拒绝。使用真实头解析/几何函数，dcmread 是受控边界，未声称真实影像已错位。",
+      "root_cause": "用整体跨度/单一层距推断规则 affine，缺少逐层位置、方向、重复性和完整性检查。",
+      "impact": "导入、Mask 对齐、AI 输入和导出可能共用一份错误物理网格；后续 shape 一致也不能证明解剖位置正确。",
+      "implementation": "按位置排序并验证方向一致、唯一层面及容差内等距，检查缺字段/混合维度/多帧。无法表示为规则体时先明确拒绝；如增加重采样，必须保留原始定位、变换与标签最近邻恢复，不能静默猜测。优先借助 Mimics 原生已正确载入影像并核对外部源映射。",
+      "acceptance": [
+        "规则、倒序、斜位、非等距、重复位置、缺失层、多序列、多帧、混合尺寸逐项验证。",
+        "原始 header→外部体→Mimics 所选 Image→Mask 导出，角点与已知标志位置一致。",
+        "无法安全转换时提交前给出具体系列/问题层与处理建议，原文件和工程不变。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R10",
+      "priority": "P0",
+      "status": "open",
+      "title": "预测结果发布仍先覆盖旧文件，再考虑有效性",
+      "previous_ids": [
+        "UI17",
+        "F43"
+      ],
+      "observations": [
+        "remote_output_overwrite"
+      ],
+      "sources": [
+        {
+          "file": "tools/remote_training_controller.py",
+          "line": 2849
+        },
+        {
+          "file": "tools/remote_training_controller.py",
+          "line": 2868
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 1267
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 1316
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "输出目录已有人工复核后的 prediction.nii.gz，用户重跑或下载远程预测；另一个任务可能也使用该目标。",
+      "observed": "真实远程发布函数用无效 NIfTI 的合成字节成功覆盖原结果，未要求确认/版本选择，未验证几何；固定 .remote-part 还可被并发任务共用。本地管线仍向最终路径写入后才验证。",
+      "root_cause": "下载/预测与最终发布未分离，os.replace 只保证替换原子性，不保证旧内容保护或语义有效性；有多个远程完成出口需统一处理。",
+      "impact": "较新人工结果或可用预测被丢失；失败也可能留下无效最终文件。本项继承 F43 的最高优先级，仅为合成复现，没有证据表明真实病例已经受损。",
+      "implementation": "每个 job 使用唯一 staging 文件；先校验格式、shape/affine、标签值、病例/输入指纹，再发布。目标已存在时默认生成新版本或由明确选择替换；在发布临界区复核目标版本，冲突保留两份。统一所有本地/远程路径，失败保留旧文件与可诊断临时结果。",
+      "acceptance": [
+        "已有结果、无效下载、几何错配、磁盘满、取消/重试、两任务同输出目标，旧文件内容保持可恢复。",
+        "用户授权替换后若原文件又被改动，拒绝静默覆盖并保留新旧结果。",
+        "最终状态仅在验证和发布完成后成功；验收函数真实写入顺序及多个完成分支。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R11",
+      "priority": "P1",
+      "status": "open",
+      "title": "nnInteractive 显示的写入方式可能与当前会话实际方式相反",
+      "previous_ids": [
+        "UI18"
+      ],
+      "observations": [
+        "nninteractive_write_mode_caption"
+      ],
+      "sources": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 1995
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 2749
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "之前选择生成副本，后来开启一个已定为 in_place 的当前会话或配置路径；标注者继续提交提示。",
+      "observed": "全局记忆 derived_copy、当前 state.write_mode=in_place 时，菜单说“创建可编辑副本”，目标选择函数实际复用当前 Mask。提示文案存在，但不代表其描述的就是有效方式。",
+      "root_cause": "菜单读取全局 _SESSION_WRITE_MODE，实际应用优先读取当前 state；同一个语义有两个不同解析顺序。",
+      "impact": "标注者可能以为原 Mask 被保留，却将结果应用到现有 Mask；增加后续人工修改与恢复成本。此探针确认目标选择，不替代真实手改保护端到端验收。",
+      "implementation": "显示与应用共用 effective write-mode/target 解析；区分“当前会话方式”和“下次会话默认”。明确当前目标名称、所在 Image 与副本行为；如提供切换，更新状态并再次显示有效方式。保持后续手工修正保护。",
+      "acceptance": [
+        "全局副本+当前原位、全局原位+当前副本、choose_on_first、新/已有/空白 Mask 和配置覆盖均显示与应用一致。",
+        "跨病例/工程、第二轮提示、撤销/重开后的记忆边界明确。",
+        "真实 Mimics 手改后不会因模式显示或切换而绕过保护；实际新增/复用的 Mask 与文案一致。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R12",
+      "priority": "P2",
+      "status": "open",
+      "title": "交互模型选择器的长版本号仍不可见、不可键盘复制",
+      "previous_ids": [
+        "UI20"
+      ],
+      "observations": [],
+      "sources": [
+        {
+          "file": "tools/nninteractive_task_model_chooser.py",
+          "line": 84
+        },
+        {
+          "file": "tools/nninteractive_task_model_chooser.py",
+          "line": 158
+        }
+      ],
+      "evidence_level": "A：实际 Qt 渲染与控件测量（非 Windows 原生截图）",
+      "scenario": "两个模型有相同长前缀，关键区别在 version_A/version_B 的尾部；用户用小窗口或键盘选模型。",
+      "observed": "853×440 实际 Qt 截图中摘要尾部被裁掉；版本文本约 1154 像素，摘要只有 805 像素，minimumSizeHint 约 1573 像素。QLabel 的完整字符串存在但长 token 未换行，且未开启键盘选择。",
+      "root_cause": "QLabel.setWordWrap 不能保证长且无断点的版本 ID 在受限宽度内可读；新增测试只检查全文是否出现在字符串中。",
+      "impact": "不同版本仍无法凭界面分辨，复制身份反馈也困难；视觉修复尚未达到 UI20 的“全文可见、键盘可读”标准。",
+      "implementation": "复用已实现的只读全文详情控件，采用 WrapAnywhere、可滚动并可选择/复制；列表用简短显示名+版本时间，详情保留完整 ID。保证正文与主按钮在最小屏幕中可达，不依赖 tooltip 或无限扩窗。",
+      "acceptance": [
+        "同长前缀不同尾部、超长无空格 ID、中文名称、125%/150% 字体，尾部能看到或滚动复制。",
+        "键盘可进入详情并复制全文；切换模型时内容同步。",
+        "按真实 contentRect/可见区域和截图验收，不能仅 assertIn(model_id, label.text())。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R13",
+      "priority": "P2",
+      "status": "open",
+      "title": "训练结束导航指向另一个标签页中默认隐藏的版本",
+      "previous_ids": [
+        "UI21"
+      ],
+      "observations": [],
+      "sources": [
+        {
+          "file": "tools/nninteractive_task_model_center.py",
+          "line": 1947
+        },
+        {
+          "file": "tools/nninteractive_task_model_center.py",
+          "line": 2376
+        }
+      ],
+      "evidence_level": "A：实际 Qt 状态刷新与过滤；模型登记行是隔离 fixture",
+      "scenario": "训练完成但未超过当前模型，新版本 state=not_improved；标注者想查看失败原因或明确试用该版本。",
+      "observed": "当前“训练进度”页写“新版本保留在本页的模型列表中，可手动启用”；列表实际在“模型版本”页，默认 show_failed=False 会过滤 not_improved，实际表格 0 行。",
+      "root_cause": "新增完成文案未核对当前标签页、模型过滤与可操作状态；“未通过质量检查”还需区分未改善、验证缺失和不兼容。",
+      "impact": "用户找不到刚完成的成果，容易重新训练或误以为模型丢失；入口保留本身合理，但导航闭环仍未完成。",
+      "implementation": "完成卡给“查看这个版本”并直接切到版本页、显式展现/定位新版本；若仅用文案则准确说明标签页与“显示失败与未改进”开关。显示保留旧模型的具体原因；可用但未改善、未验证和损坏版本的动作不同。",
+      "acceptance": [
+        "new_model_selected/current_model_retained/unverified/failed/incompatible 各终态都有准确下一步。",
+        "从完成页一次导航能定位对应版本；默认过滤不造成死路。",
+        "不可用版本不允许启用，可用未改善版本需明确知情选择，详情不把验证指标当当前患者准确率。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R14",
+      "priority": "P1",
+      "status": "open",
+      "title": "目录签名缓存会把被原位更新的影像当成旧数据",
+      "previous_ids": [],
+      "observations": [
+        "in_place_directory_mutation"
+      ],
+      "sources": [
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 324
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 646
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "采集目录未换名，某个 DICOM slice 被补扫/修复或同步工具原位更新，随后再次准备训练/预测数据。",
+      "observed": "修改子文件内容及大小后父目录 mtime 不变，path_signature 仍返回旧签名；关闭签名缓存后得到新签名。默认目录签名缓存最长 604800 秒。",
+      "root_cause": "缓存用目录自身元信息作有效性依据，不能代表子文件内容/元信息没变化；下游 prepared cache 使用该签名判断可复用。",
+      "impact": "新数据可能继续使用旧转换结果，重新扫描/训练看起来成功却未消费用户修正的源影像。探针确认签名边界，未运行真实模型训练。",
+      "implementation": "明确不可变数据契约；对于可变源扫描，重算子文件元信息 manifest 或使用可靠的数据版本。保留快速缓存但提供真实“重新验证源数据”入口，刷新必须穿透目录签名和下游 prepared cache；不得只重启 GUI。先采用轻量 manifest，避免每次无差别全文件内容哈希。",
+      "acceptance": [
+        "原位写同名子文件、大小相同/不同、嵌套目录变更、数据搬迁、UNC 同步后都按正确策略失效。",
+        "转换 image 的内容/指纹随源变更；本地缓存、远程归档、预处理缓存不因父目录 mtime 未变继续复用。",
+        "显式刷新显示重新检查范围；不可变模式清楚说明输入要求，用户取消保留旧成果。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R15",
+      "priority": "P1",
+      "status": "open",
+      "title": "主动学习只核对体素形状，没有核对两个预测的物理网格",
+      "previous_ids": [
+        "F01",
+        "F20"
+      ],
+      "observations": [
+        "uncertainty_affine_mismatch"
+      ],
+      "sources": [
+        {
+          "file": "integrations/flexict-finetune/uncertainty/uncertainty.py",
+          "line": 84
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 1503
+        },
+        {
+          "file": "tools/flexict_pipeline.py",
+          "line": 1609
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "2D/3D 两模型结果来自缓存或不同转换路径，数组形状相同，但其中一份平移/方向/间距错误。",
+      "observed": "两份 2×2×2 NIfTI，其中一份 x 平移 100 mm，load_masks 仍接受并以第一份 affine 返回。AL 文件夹预测出口未像单例预测那样逐个校验与输入的物理网格。",
+      "root_cause": "分歧计算把同形状数组直接视为同网格；最后合成辅助带只保留一个 affine，之后 Mimics 检查该带也看不出第二份来源有误。",
+      "impact": "排序与辅助提示位置可能失真，标注者浪费时间检查错误区域；分歧本来也只能提示不一致，不能等同模型准确率。",
+      "implementation": "每个模型预测与该病例输入分别验证 shape/affine、病例指纹、标签映射；一致后才比较。错配默认拒绝并指向失败模型/病例；若允许重采样，必须记录变换与明确策略。结果清单记录两模型身份及输入版本。",
+      "acceptance": [
+        "同形状平移、翻轴、spacing 不同、同网格异病例、过期预测、标签 ID 不同都在生成排名前拒绝或明确处理。",
+        "正常同网格模型正常计算；失败病例列为失败/跳过原因，不能伪装为已复核。",
+        "真实 Mimics 辅助带位置与输入一致，查看不自动标注，重复计算不污染人工 Mask。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R16",
+      "priority": "P2",
+      "status": "open",
+      "title": "保留名 background 会覆盖 nnU-Net 的零背景定义",
+      "previous_ids": [],
+      "observations": [
+        "reserved_background_label"
+      ],
+      "sources": [
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 496
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 934
+        }
+      ],
+      "evidence_level": "A：当前生产函数的隔离复现",
+      "scenario": "开放工具从 UI、配置或 CLI 导入自定义标签映射，其中一个输出标签叫 background 且 ID 为 1。",
+      "observed": "normalize_request 接受该标签，真实 dataset.json 最终是 {\"background\":1}，零背景项被覆盖。",
+      "root_cause": "标签合法性只检查名称非空、ID 范围与连续性，没有保护 nnU-Net 元数据的保留名称。",
+      "impact": "准备看似成功但训练/数据完整性失败；异常需要用户理解框架格式。官方 nnU-Net 数据格式要求背景为 0。",
+      "implementation": "在请求/标签编辑入口拒绝保留输出名，并解释它是背景保留项；语义名称和序列化格式区分。生成 dataset.json 前再次验证背景为 0、标签映射完整；非法请求不产生半成品注册记录。",
+      "acceptance": [
+        "background 保留名被明确拒绝，普通器官、多标签映射仍保留零背景。",
+        "非法/非连续/重复 ID、仅背景标签、空数据、旧映射导入均给出清楚处理路径。",
+        "测试实际生成的 dataset.json 和 nnU-Net 完整性检查，而非只检查 normalize_request 返回值。"
+      ],
+      "target_environment_validation": "not_run"
+    },
+    {
+      "id": "R17",
+      "priority": "P1",
+      "status": "open",
+      "title": "撤销导入仍会删除导入后被人工修正的 Mask",
+      "previous_ids": [
+        "UI15",
+        "F18",
+        "F19"
+      ],
+      "observations": [
+        "edited_owned_mask_undo"
+      ],
+      "sources": [
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 308
+        },
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 279
+        },
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 462
+        },
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 524
+        }
+      ],
+      "evidence_level": "A/B：当前检查与删除调度复现；原生 Mimics 删除和事务为边界桩",
+      "scenario": "用户导入外部肝脏 Mask 后移动少量前景体素进行修正，GUID/名称/数量保持不变；随后撤销导入。",
+      "observed": "实际 _session_diverged 返回 False，随后 _delete_owned_masks 调度删除该 Mask。探针以相同前景体积的编辑对象模拟手工修正，原生 delete/transaction 为边界桩；源码中删除发生在保存和 fingerprint 检查前。",
+      "root_cause": "所有权证明不等于内容未改变。会话检查只看对象清单、GUID/token；事后工程文件 fingerprint 最多决定文件是否保留，已删的手工内容无法补救。v1 唯一同名也不足以证明所有权。",
+      "impact": "撤销可能把标注者已经修正的器官一并删除；仅保留工程文件不是可靠恢复。",
+      "implementation": "在导入回执保留对象、所属 Image、导入内容指纹；删除前比较当前 Mask 内容（等体积位置变更也可识别）。有手改时默认保留或生成可恢复副本，并列出影响后再操作。旧 v1 缺少证明时关闭自动删除，提供明确手动/备份流程；异常不消费回执。",
+      "acceptance": [
+        "未保存和已保存的原 Mask 内容修正、等体积位移、增删对象、同名跨 Image、重新打开 GUID 漂移均保护人工工作。",
+        "真实 Mimics 中先编辑再撤销，人工内容能从明确恢复点找回；不能只看 .mcs 仍存在。",
+        "删除/保存/回执写入失败和重试不扩大删除范围；没有强身份证明的旧记录不自动删对象。"
+      ],
+      "target_environment_validation": "not_run"
+    }
+  ],
+  "changed_issue_assessments": [
+    {
+      "id": "UI14",
+      "title": "新 viewed 写入有效；历史状态语义待迁移",
+      "status": "correct_local",
+      "reason": "叠加不再新增 annotated；旧 annotated 无法证明已复核，不能批量自动改状态。"
+    },
+    {
+      "id": "UI18",
+      "title": "ScribblePrompt 改动有效；nnInteractive 仍错示",
+      "status": "partial",
+      "reason": "R11：当前状态优先于全局记忆；目标机手改保护未验收。"
+    },
+    {
+      "id": "UI19",
+      "title": "中文任务基本可用；内部 ID/中文标签仍有缺陷",
+      "status": "partial",
+      "reason": "R01/R06：幂等、截断和标签语义不完整。"
+    },
+    {
+      "id": "UI20",
+      "title": "全文字符串与未验证提示有了；实际可读性未通过",
+      "status": "partial",
+      "reason": "R12：长 ID 尾部仍裁切，键盘全文读取缺失。"
+    },
+    {
+      "id": "UI21",
+      "title": "增加了下一步文案；实际导航仍有死路",
+      "status": "partial",
+      "reason": "R13：目标在其他标签页且被默认过滤。"
+    },
+    {
+      "id": "UI24",
+      "title": "部分缺失提示有效；完全无 Mask 的病例漏检",
+      "status": "partial",
+      "reason": "R02：用真实扫描结果/真实提交复现。"
+    },
+    {
+      "id": "UI25",
+      "title": "已知提交错误翻译有效；并非所有异常闭环",
+      "status": "partial",
+      "reason": "R06 英文冲突仍出现；运行中、持久失败和恢复路径继续验收。"
+    },
+    {
+      "id": "UI28",
+      "title": "能读启动状态的自选目录；完成后字段丢失",
+      "status": "partial",
+      "reason": "R03：worker 状态覆盖导致回执失踪。"
+    },
+    {
+      "id": "UI29",
+      "title": "部分非默认项提示有效；关键隐藏字段漏报",
+      "status": "partial",
+      "reason": "R05：镜像、工作目录不在摘要。"
+    },
+    {
+      "id": "UI30",
+      "title": "空训练/验证阻止有效；最终拆分契约未闭环",
+      "status": "partial",
+      "reason": "R07/R08：旧验证重写和远程患者分组丢失。"
+    },
+    {
+      "id": "UI31",
+      "title": "互斥合并能保护写回；主线程等待违反目标",
+      "status": "partial",
+      "reason": "R04：真实锁下約两秒等待，失败不补写 viewed。"
+    }
+  ],
+  "evidence_dir": "2026-10-13-evidence",
+  "regression_results": "2026-10-13-evidence/regression-results.json",
+  "limitations": [
+    "Windows/Mimics native API",
+    "GPU/torch/checkpoint execution",
+    "SSH server end-to-end"
+  ]
+}

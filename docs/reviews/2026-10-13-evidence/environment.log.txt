@@ -1,0 +1,38 @@
+test_failed_setup_state_is_reported (__main__.TestEnvGuidance.test_failed_setup_state_is_reported) ... ok
+test_flexict_config_override_silences_weights_issue (__main__.TestEnvGuidance.test_flexict_config_override_silences_weights_issue) ... ok
+test_flexict_missing_weights_is_informational (__main__.TestEnvGuidance.test_flexict_missing_weights_is_informational) ... ok
+test_incomplete_setup_lists_failed_packages (__main__.TestEnvGuidance.test_incomplete_setup_lists_failed_packages) ... ok
+test_installed_official_model_silences_issue (__main__.TestEnvGuidance.test_installed_official_model_silences_issue) ... ok
+test_live_and_relative_paths_are_not_migration_issues (__main__.TestEnvGuidance.test_live_and_relative_paths_are_not_migration_issues) ... ok
+test_missing_official_model_is_reported_bad (__main__.TestEnvGuidance.test_missing_official_model_is_reported_bad) ... ok
+test_missing_python_reports_setup_action (__main__.TestEnvGuidance.test_missing_python_reports_setup_action) ... ok
+test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root) ... FAIL
+test_official_model_config_key_override (__main__.TestEnvGuidance.test_official_model_config_key_override) ... ok
+test_official_model_env_var_override (__main__.TestEnvGuidance.test_official_model_env_var_override) ... ok
+test_scribbleprompt_default_checkpoint_is_checked_without_config (__main__.TestEnvGuidance.test_scribbleprompt_default_checkpoint_is_checked_without_config)
+B regression (R66 audit P1): the shipped JSON no longer carries ... ok
+test_scribbleprompt_missing_checkpoint_is_reported (__main__.TestEnvGuidance.test_scribbleprompt_missing_checkpoint_is_reported) ... ok
+test_scribbleprompt_present_checkpoint_silences_issue (__main__.TestEnvGuidance.test_scribbleprompt_present_checkpoint_silences_issue) ... ok
+test_scribbleprompt_relative_path_is_anchored_at_root (__main__.TestEnvGuidance.test_scribbleprompt_relative_path_is_anchored_at_root) ... ok
+test_scribbleprompt_unconfigured_is_not_an_issue (__main__.TestEnvGuidance.test_scribbleprompt_unconfigured_is_not_an_issue) ... ok
+test_stale_setup_state_ignored (__main__.TestEnvGuidance.test_stale_setup_state_ignored) ... ok
+
+======================================================================
+FAIL: test_moved_checkout_detected_with_old_root (__main__.TestEnvGuidance.test_moved_checkout_detected_with_old_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 13939, in test_moved_checkout_detected_with_old_root
+    self.assertEqual(old_root, detected)
+AssertionError: '<test-state>/oldmachine/MIMICS_SCRIPTS' != ''
+- <test-state>/oldmachine/MIMICS_SCRIPTS
+
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.059s
+
+FAILED (failures=1)
+Mimics-Script Comprehensive Tests
+============================================================
+Python: 3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]
+Project: <repo>
+============================================================

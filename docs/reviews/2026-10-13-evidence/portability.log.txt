@@ -1,0 +1,247 @@
+EEEEEEEE<repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+EE..Eqt.qpa.fonts: Populating font family aliases took 264 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+.EEEEEEEE
+======================================================================
+ERROR: test_backbone_roundtrip_installs_on_bare_workstation (__main__.FlexictBackboneBundleTests.test_backbone_roundtrip_installs_on_bare_workstation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 692, in test_backbone_roundtrip_installs_on_bare_workstation
+    _flexict_model_dir(source, "flexict_bb", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_bundle_without_backbone_still_imports (__main__.FlexictBackboneBundleTests.test_bundle_without_backbone_still_imports)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 847, in test_bundle_without_backbone_still_imports
+    _flexict_model_dir(source, "flexict_plain", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_existing_backbone_is_verified_not_overwritten (__main__.FlexictBackboneBundleTests.test_existing_backbone_is_verified_not_overwritten)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 753, in test_existing_backbone_is_verified_not_overwritten
+    _flexict_model_dir(source, "flexict_bb2", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_mismatched_existing_backbone_is_rejected (__main__.FlexictBackboneBundleTests.test_mismatched_existing_backbone_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 799, in test_mismatched_existing_backbone_is_rejected
+    _flexict_model_dir(source, "flexict_bb3", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_flexict_import_rejects_corrupt_checkpoint (__main__.FlexictBundleTests.test_flexict_import_rejects_corrupt_checkpoint)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 515, in test_flexict_import_rejects_corrupt_checkpoint
+    _flexict_model_dir(source, "flexict_bad", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_flexict_multiclass_bundle_roundtrip (__main__.FlexictBundleTests.test_flexict_multiclass_bundle_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 591, in test_flexict_multiclass_bundle_roundtrip
+    _flexict_model_dir(
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_flexict_pair_bundle_roundtrip (__main__.FlexictBundleTests.test_flexict_pair_bundle_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 464, in test_flexict_pair_bundle_roundtrip
+    _flexict_model_dir(source, "flexict_2d_v1", "2d", "pair_a", 1700000000.0)
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_flexict_single_model_bundle_roundtrip (__main__.FlexictBundleTests.test_flexict_single_model_bundle_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 553, in test_flexict_single_model_bundle_roundtrip
+    _flexict_model_dir(source, "flexict_solo", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_collect_rows_covers_all_three_families (__main__.ModelManagerTests.test_collect_rows_covers_all_three_families)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 946, in test_collect_rows_covers_all_three_families
+    _nninteractive_model(nnint_ws)
+  File "<repo>/tests/test_model_portability.py", line 47, in _nninteractive_model
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_import_dispatches_by_bundle_family (__main__.ModelManagerTests.test_import_dispatches_by_bundle_family)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 906, in test_import_dispatches_by_bundle_family
+    _flexict_model_dir(source, "flexict_mgr", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_manager_shows_multiclass_flexict_target (__main__.ModelManagerTests.test_manager_shows_multiclass_flexict_target)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 1027, in test_manager_shows_multiclass_flexict_target
+    _flexict_model_dir(
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_removing_recommended_flexict_model_clears_pointer (__main__.ModelManagerTests.test_removing_recommended_flexict_model_clears_pointer)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 1045, in test_removing_recommended_flexict_model_clears_pointer
+    _flexict_model_dir(workspace, "flexict_a", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_set_recommended_and_remove_for_flexict (__main__.ModelManagerTests.test_set_recommended_and_remove_for_flexict)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 999, in test_set_recommended_and_remove_for_flexict
+    _flexict_model_dir(workspace, "flexict_a", "2d", "")
+  File "<repo>/tests/test_model_portability.py", line 417, in _flexict_model_dir
+    _torch_checkpoint_bytes(
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nninteractive_bundle_import_rebuilds_local_registry (__main__.ModelPortabilityTests.test_nninteractive_bundle_import_rebuilds_local_registry)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 111, in test_nninteractive_bundle_import_rebuilds_local_registry
+    model = _nninteractive_model(source)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 47, in _nninteractive_model
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nninteractive_registry_survives_workspace_relocation (__main__.ModelPortabilityTests.test_nninteractive_registry_survives_workspace_relocation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 70, in test_nninteractive_registry_survives_workspace_relocation
+    model = _nninteractive_model(source)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 47, in _nninteractive_model
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nninteractive_import_rejects_corrupt_checkpoint (__main__.NnunetBundleTests.test_nninteractive_import_rejects_corrupt_checkpoint)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 215, in test_nninteractive_import_rejects_corrupt_checkpoint
+    model = _nninteractive_model(source)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 47, in _nninteractive_model
+    checkpoint.write_bytes(_torch_checkpoint_bytes())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_bundle_roundtrip (__main__.NnunetBundleTests.test_nnunet_bundle_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 272, in test_nnunet_bundle_roundtrip
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "<repo>/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_import_rejects_corrupt_checkpoint (__main__.NnunetBundleTests.test_nnunet_import_rejects_corrupt_checkpoint)
+A truncated checkpoint must fail at import, not at inference.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 353, in test_nnunet_import_rejects_corrupt_checkpoint
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "<repo>/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_nnunet_import_rejects_wrong_family (__main__.NnunetBundleTests.test_nnunet_import_rejects_wrong_family)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_model_portability.py", line 320, in test_nnunet_import_rejects_wrong_family
+    _nnunet_model_dir(source, "liver_task", "nnunet_v1")
+  File "<repo>/tests/test_model_portability.py", line 181, in _nnunet_model_dir
+    (fold / "checkpoint_final.pth").write_bytes(_torch_checkpoint_bytes())
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_model_portability.py", line 32, in _torch_checkpoint_bytes
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+----------------------------------------------------------------------
+Ran 22 tests in 0.754s
+
+FAILED (errors=19)
