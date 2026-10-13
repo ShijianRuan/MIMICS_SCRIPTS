@@ -5726,3 +5726,82 @@ test_all 全量，连续多轮 fast 绿不代表 full 绿。
 `.mimics_runtime/regression/20261010T224923_full.json`——test_all 942.5s
 （621 例全过）、training_convergence 1389.5s、全部集成/流程/压测套件通过。
 R77/R78/R79 三轮改动经全量验证关闭。
+
+## R80（2026-10-12/13）：2026-10-12 UI 审查销项轮
+
+**主题**：用户指令核查 2026-10-12 UI 与入口审查
+（`docs/reviews/2026-10-12-ui-review.md`，33 卡）的代码更新是否
+正确，并修复本机可解决的真实问题。前半轮（本机合入前）已修
+UI01–13/34/35 + UI14/18；本轮（a79026b..3be3dc4，9 修复 commit +
+9 docs commit）修复 UI19/24/25/28/29/30/31/20/21。
+
+### 逐卡修复摘要
+
+| 卡 | 严重度 | 问题 | 修复 | commit |
+|---|---|---|---|---|
+| UI19 | P1 | 中文任务名不可提交 | 任务标识生成容忍中文（内部标识自动生成） | a79026b |
+| UI24 | P1 | 批量按名筛选 Mask 逐例缺失静默 | submit 前 `cases_missing_selected_masks` 逐例检查、提交前可见 | d90a60d |
+| UI25 | P2 | 提交失败甩英文异常 | `ui_theme.friendly_error` 中文转换接入全部失败路径 | ce263f0 |
+| UI28 | P1 | 自定义输出目录回执找不到撤销入口 | 回执搜索边界扩展 | 61156cb |
+| UI29 | P2 | 远程非默认高级设置折叠后不可知 | 折叠标题常显非默认摘要 | d06be40 |
+| UI30 | P1 | 训练/验证拆分可为空（F16 组扩展） | 管线 `_split_train_val` 三出口统一 `_split()` 空侧校验 + UI 提交预检 | 21efad3 |
+| UI31 | P1 | 标注状态跨进程写回互踩（F45） | 单字节 guard 锁两侧双实现（Py3.13 UI fail-closed / Py3.5 Mimics best-effort），锁内重读合并 | 77412a8 |
+| UI20 | P2 | 交互选择器模型版本不可辨识 | 摘要补全文 model_id + 未验证标记 | 44f3cfc |
+| UI21 | P2 | 训练完成不知模型去向 | 完成文案指名"使用自定义模型标注"入口 | 5f374f8 |
+
+### 关键设计决策
+
+- **UI30**：拆分契约点在管线 `_split_train_val`（本地/远程共用），
+  三个出口（显式 val_case_ids / <8 例排序 / SI 分层）统一经
+  `_split()` 校验空侧 fail-closed。UI 侧只做预检（`request.get(...)
+  is not None` 兼容 mock 无键），不做第二套拆分逻辑。曾考虑的
+  "val_cases ≥ len(cases) 阻止"检查已撤回——管线会把 val_cases
+  钳制到 len−1，该检查误报。
+- **UI31**：两个跨进程读改写者无锁互踩是 F45 的根因。guard 锁协议
+  复用 `runtime_common._open_resource_guard`（单字节 msvcrt/fcntl、
+  guard 文件持久防两把锁身份），Py3.5 侧本地实现（不能 import
+  tools 包，双实现协议一致性为有意维护面）。**语义不对称为有意
+  设计**：UI 侧 fail-closed（显式 annotated/skipped 不可丢），
+  Mimics 侧 best-effort 跳过（铁律 1 不阻塞宿主；viewed 丢失可
+  接受）。
+- **UI21**：不合并入口（卡片明言"直接删除会断工作流"），只补完成
+  文案导航，与 runtime 既有指引同风格。
+
+### 验证
+
+- 每卡：失败路径测试 + 定向测试组 + smoke 门禁 + commit + 审查
+  卡片状态同步（md + json）。
+- 新增防回归测试 ~14 个：空拆分 ValueError ×2、UI 空训练集提交被拒、
+  并发不丢条目 / 锁竞争 TimeoutError / Mimics 尊重 UI 锁、
+  cases_missing_selected_masks、friendly_error、回执搜索边界、
+  折叠摘要、选择器全文版本（源码契约）、完成文案导航（源码契约）、
+  中文任务名。
+- **fast 门禁 30/30 全绿**：工件
+  `.mimics_runtime/regression/20261013T095802_fast.json`（含
+  flexict_pkg 233.5s、remote_training 51.2s、全部 UI/流程/压测套件），
+  覆盖本轮全部 9 个修复 commit。
+
+### 净代码变化
+
++978/−96 净 +882（产品 +550/−84 / 测试 +428/−12 / 文档 +40/−13）。
+新增维护面：新函数 ~6（`_split`、`_annotation_state_guard`/
+`_release_annotation_state_guard` ×2 双实现、`cases_missing_
+selected_masks`、`friendly_error`），0 新文件/配置项/依赖/UI 入口。
+
+### 遗留与去路
+
+- **UI15/16/17（深后端 P1）**：撤回手工修改保护（F18/F19）、DICOM
+  来源确认（F01）、结果路径冲突原子保存（F43/F28）——均为深管线
+  改造，按风险不对称原则拆小/待用户决策立项，已入 improvement_
+  backlog R80 节。
+- **UI22/23/32/33**：待目标机（Windows 真实 Mimics + 真实 DPI/
+  跨屏/多工程场景）验证，本机不关闭。
+- **UI26/27**：整体验收规范类（可访问性、精美度规范），无单点
+  代码可修，待规范成文后逐窗口落实。
+- UI20/21/24/25/28/30 的 partial 遗留部分已在审查卡片 fixed_note
+  中逐条记录（深管线契约 / 目标机措辞确认）。
+
+### 外部资源使用
+
+本轮未使用远程服务器与真实数据集（纯本机 UI/管线修复），
+无清理义务。
