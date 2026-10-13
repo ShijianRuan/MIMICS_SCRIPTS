@@ -1937,18 +1937,22 @@ class ModelCenter:
         elif state == "completed":
             outcome = str(status.get("selection_outcome") or "")
             quality = status.get("quality") or {}
+            # UI21: the completion copy names where the model is used next,
+            # so the annotator does not guess directories after training.
             if outcome == "new_model_selected":
                 detail = (
-                    "验证通过。新模型已用于此任务"
-                    "（AUC {:+.1f}%）。"
+                    "验证通过。新模型已用于此任务（AUC {:+.1f}%）。"
+                    "打开 nnInteractive 菜单的 使用自定义模型标注 即可用它标注。"
                 ).format(float(quality.get("delta_auc") or 0.0) * 100.0)
             elif outcome == "current_model_retained":
                 detail = (
                     "训练完成，但因未通过质量检查，当前标注模型保持不变。"
+                    "新版本保留在本页的模型列表中，可手动启用。"
                 )
             else:
                 detail = (
                     "训练完成。因未提供足够的验证集，此版本已保存但未自动启用。"
+                    "需要时在本页的模型列表中手动启用。"
                 )
         elif state == "paused":
             detail = "训练已暂停，GPU 显存已释放。"
