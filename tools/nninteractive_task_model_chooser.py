@@ -155,9 +155,20 @@ class Chooser:
             if delta is not None
             else "无自动验证对比"
         )
+        # UI20: the full model_id rides in the summary (not only a tooltip)
+        # so keyboard users can tell two long same-prefix versions apart,
+        # and an unverified model is named as such — the AUC is a validation
+        # range, never a promise about the current case.
+        unverified = (
+            " · 未验证"
+            if str(model.get("state") or "").strip().lower() == "unverified"
+            else ""
+        )
         self.summary.setText(
-            "{} · 点提示 · 训练 {} 例 + 验证 {} 例 · {}".format(
+            "{}\n版本：{}{}\n点提示 · 训练 {} 例 + 验证 {} 例 · {}".format(
                 strategy_display_name(model.get("strategy")),
+                str(model.get("model_id") or ""),
+                unverified,
                 model.get("train_case_count", 0),
                 model.get("validation_case_count", 0),
                 validation,

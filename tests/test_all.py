@@ -5779,6 +5779,18 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
         self.assertIn(
             "显示未改进的模型", inspect.getsource(chooser))
 
+    def test_task_model_chooser_summary_names_full_id_and_state(self):
+        # UI20: the chooser summary must carry the FULL model_id (two long
+        # same-prefix versions are otherwise indistinguishable without a
+        # mouse) and mark an unverified model as such — the AUC line is a
+        # validation range, never a promise about the current case.
+        import nninteractive_task_model_chooser as chooser
+
+        source = inspect.getsource(chooser.Chooser.refresh_summary)
+        self.assertIn("model_id", source)
+        self.assertIn("版本：", source)
+        self.assertIn("未验证", source)
+
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline
 
