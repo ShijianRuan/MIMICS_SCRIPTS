@@ -315,12 +315,13 @@
     {
       "id": "UI30",
       "priority": "P2",
-      "status": "open",
+      "status": "partial_fixed_local",
       "evidence_level": "已确认行为 / F16,F44",
       "problem": "训练/验证拆分与失败恢复未形成用户可读闭环",
       "impact": "FlexiCT 的最终拆分可能与界面所选不同，整组病例迁移后可能训练集为空；用户界面看起来能提交并不保证请求合理。",
       "implementation": "以最终拆分为提交契约；显示各组数量及变动原因；空训练/验证先阻止；继续训练回显恢复来源。UI 与流水线共同修复。",
-      "acceptance": "整组移动、手动锁定拆分、重复扫描、继续训练；最终清单与界面一致，不能把原验证组静默放入训练。"
+      "acceptance": "整组移动、手动锁定拆分、重复扫描、继续训练；最终清单与界面一致，不能把原验证组静默放入训练。",
+      "fixed_note": "空训练/验证集已 fail-closed（2026-10-13，本机）：管线 _split_train_val 三个出口统一校验空侧并抛中文可读错误（commit 21efad3，测试 test_group_expansion_emptying_train_split_is_rejected / test_normal_split_still_succeeds_with_groups）；UI _submit 后台校验阻止全部病例只勾验证的请求（测试 test_flexict_empty_train_split_submission_is_rejected）。\"以最终拆分为提交契约/组数量变动原因/继续训练回显\"涉及更深的管线改动，按风险不对称原则留待后续评估。"
     },
     {
       "id": "UI31",
