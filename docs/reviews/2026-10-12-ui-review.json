@@ -211,12 +211,13 @@
     {
       "id": "UI20",
       "priority": "P2",
-      "status": "open",
+      "status": "partial_fixed_local",
       "evidence_level": "设计缺口",
       "problem": "模型选择的全文与选择依据仍不一致",
       "impact": "管理器可复制全文，但交互选择器、版本页主要靠提示；模型验证 AUC/Dice 也不能直接当当前患者准确率。",
       "implementation": "各选择器统一提供选中模型摘要：目标、模态、版本、来源、验证范围、是否未验证。保证键盘也能读全文；显示推荐原因，不能承诺当前病例正确。",
-      "acceptance": "长 ID 同前缀的两模型能分辨；未验证模型可明确识别；切换模型后摘要同步。"
+      "acceptance": "长 ID 同前缀的两模型能分辨；未验证模型可明确识别；切换模型后摘要同步。",
+      "fixed_note": "选择器全文与未验证标记已补齐（2026-10-13，本机）：交互选择器摘要显示全文 model_id 与\"未验证\"标记（commit 44f3cfc，测试 test_task_model_chooser_summary_names_full_id_and_state）；模型中心表列 1 本就显示全文 model_id（注册行无 display_name）并有 toolTip 兜底；预测页/管理器全文可见性已在 UI25 轮覆盖。\"验证 AUC/Dice 不当当前患者准确率\"的措辞审查与推荐原因显示需目标机走查。"
     },
     {
       "id": "UI21",
