@@ -6413,6 +6413,125 @@ class TestEdgeCases(unittest.TestCase):
             np.all(np.isfinite(get_image_affine_from_dicom(clean)))
         )
 
+    def test_dicom_helpers_refuse_irregular_slice_positions(self):
+        """R09: padded/rescan/overwritten series used to be squashed onto a
+        fabricated regular grid (z=[0,1,3] -> step 1.5, [0,1,1] -> [0,1,2])
+        and that wrong geometry silently propagated into masks and exports.
+        Every non-uniform-stack input must be rejected with the specific
+        problem named, on both the shape and the affine reader."""
+        import pydicom
+        from pydicom.dataset import FileDataset, FileMetaDataset
+        from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
+        from mimics_bridge import get_image_affine_from_dicom, get_image_shape_from_dicom
+
+        def write_series(folder, z_values, iop=None):
+            os.makedirs(folder)
+            uid = generate_uid()
+            for k, z in enumerate(z_values):
+                file_meta = FileMetaDataset()
+                file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                file_meta.MediaStorageSOPClassUID = CTImageStorage
+                file_meta.MediaStorageSOPInstanceUID = generate_uid()
+                ds = FileDataset(
+                    os.path.join(folder, f"s{k:04d}.dcm"), {},
+                    file_meta=file_meta, preamble=b"\0" * 128,
+                )
+                ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+                ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+                ds.SeriesInstanceUID = uid
+                ds.Rows = ds.Columns = 4
+                ds.PixelSpacing = [1.0, 1.0]
+                ds.SliceThickness = 10.0
+                ds.Modality = "CT"
+                ds.ImageOrientationPatient = (
+                    iop if iop is not None
+                    else [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+                ds.ImagePositionPatient = [0.0, 0.0, float(z)]
+                ds.save_as(ds.filename, enforce_file_format=True)
+
+        def expect_rejected(folder, message_part):
+            for helper in (get_image_affine_from_dicom,
+                           get_image_shape_from_dicom):
+                with self.assertRaises(ValueError) as caught:
+                    helper(folder)
+                self.assertIn(message_part, str(caught.exception))
+
+        # Non-uniform spacing (padded/rescan stitch): [0,1,3] must not
+        # become a fabricated regular [0,1.5,3] grid.
+        write_series(os.path.join(self.tmp, "uneven"), [0.0, 1.0, 3.0])
+        expect_rejected(
+            os.path.join(self.tmp, "uneven"), "not evenly spaced")
+        # Duplicated position (archive overwrite / duplicate export): the
+        # duplicate slice must not silently widen the volume.
+        write_series(
+            os.path.join(self.tmp, "dup"), [0.0, 1.0, 1.0, 2.0])
+        expect_rejected(
+            os.path.join(self.tmp, "dup"), "duplicated slice positions")
+        # Every slice at the same position: not a volume at all.
+        write_series(os.path.join(self.tmp, "flat"), [1.0, 1.0, 1.0])
+        expect_rejected(
+            os.path.join(self.tmp, "flat"), "same position")
+        # Mixed orientations inside one series UID: no single normal.
+        mixed_iop = os.path.join(self.tmp, "mixed_iop")
+        os.makedirs(mixed_iop)
+        uid = generate_uid()
+        for k, (z, iop) in enumerate([
+            (0.0, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            (10.0, [0.0, 1.0, 0.0, 1.0, 0.0, 0.0]),
+            (20.0, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+        ]):
+            file_meta = FileMetaDataset()
+            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            file_meta.MediaStorageSOPClassUID = CTImageStorage
+            file_meta.MediaStorageSOPInstanceUID = generate_uid()
+            ds = FileDataset(
+                os.path.join(mixed_iop, f"s{k:04d}.dcm"), {},
+                file_meta=file_meta, preamble=b"\0" * 128,
+            )
+            ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+            ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+            ds.SeriesInstanceUID = uid
+            ds.Rows = ds.Columns = 4
+            ds.PixelSpacing = [1.0, 1.0]
+            ds.SliceThickness = 10.0
+            ds.Modality = "CT"
+            ds.ImageOrientationPatient = iop
+            ds.ImagePositionPatient = [0.0, 0.0, z]
+            ds.save_as(ds.filename, enforce_file_format=True)
+        expect_rejected(mixed_iop, "slice orientations")
+
+        # Regular grids still pass, including reversed order and a
+        # tilt-compatible slice step with an in-plane offset (classic
+        # gantry tilt moves IPP sideways between slices).
+        for name, z_values in (
+            ("regular", [0.0, 10.0, 20.0]),
+            ("reversed", [20.0, 10.0, 0.0]),
+        ):
+            folder = os.path.join(self.tmp, name)
+            write_series(folder, z_values)
+            self.assertEqual(
+                (4, 4, len(z_values)), get_image_shape_from_dicom(folder))
+            self.assertTrue(
+                np.all(np.isfinite(get_image_affine_from_dicom(folder))))
+
+        # Classic gantry tilt: identical IOP, IPP stepping sideways with z.
+        tilt = os.path.join(self.tmp, "tilt_like")
+        write_series(tilt, [0.0, 10.0, 20.0])  # positional base grid
+        # Rewrite IPPs to add the same in-plane x shift per slice.
+        for k, shift in enumerate([0.0, 2.0, 4.0]):
+            path = os.path.join(tilt, f"s{k:04d}.dcm")
+            ds = pydicom.dcmread(str(path))
+            ds.ImagePositionPatient = [shift, 0.0, float(k) * 10.0]
+            ds.save_as(str(path), enforce_file_format=True)
+        self.assertEqual((4, 4, 3), get_image_shape_from_dicom(tilt))
+        tilt_affine = get_image_affine_from_dicom(tilt)
+        self.assertTrue(np.all(np.isfinite(tilt_affine)))
+        # The slice step keeps its sideways (tilt) component.
+        self.assertGreater(
+            abs(float(tilt_affine[0, 2])), 1e-6,
+            "gantry-tilt slice step lost its in-plane component",
+        )
+
     # -- resource lock edge cases --
     def test_lock_release_wrong_token(self):
         import runtime_common

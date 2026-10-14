@@ -1687,7 +1687,97 @@ def _read_dicom_series_headers(dicom_folder: str) -> list:
             "the DICOM series mixes in-plane sizes {0}; refusing to guess a "
             "grid".format(sorted(shapes))
         )
+    _validate_dicom_slice_grid(headers)
     return headers
+
+
+def _validate_dicom_slice_grid(headers: list) -> None:
+    """Refuse non-uniform / duplicated / reversed slice positions (R09).
+
+    The geometry helpers summarize a series as origin + one slice step, so
+    any series that is not a uniform stack along a single normal would be
+    silently squashed onto a fabricated regular grid and that wrong grid
+    would propagate into masks, AI input, and exports. Fail closed with the
+    specific problem named instead. Series without position tags keep the
+    legacy count-based geometry (the caller still refuses mixed series,
+    sizes, and multi-frame input above).
+    """
+    positions = []
+    for ds in headers:
+        ipp = getattr(ds, "ImagePositionPatient", None)
+        if ipp is None:
+            continue
+        try:
+            positions.append(
+                (ds, np.array([float(v) for v in ipp], dtype=float)))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "unparseable ImagePositionPatient in DICOM series: {}"
+                .format(getattr(ds, "filename", "<unknown>"))
+            )
+    if len(positions) < 2:
+        # 0 or 1 positioned slice cannot be non-uniform; missing tags fall
+        # back to the count-based legacy geometry.
+        return
+
+    iops = {
+        tuple(np.round(np.asarray(
+            [float(v) for v in getattr(ds, "ImageOrientationPatient", [])],
+            dtype=float), 6))
+        for ds, _ in positions
+        if getattr(ds, "ImageOrientationPatient", None) is not None
+    }
+    if len(iops) > 1:
+        raise ValueError(
+            "the DICOM series mixes slice orientations ({0} distinct "
+            "ImageOrientationPatient values); refusing to guess a grid"
+            .format(len(iops))
+        )
+
+    first = positions[0][0]
+    iop = [float(v) for v in getattr(
+        first, "ImageOrientationPatient",
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])]
+    row_cosine = np.asarray(iop[0:3], dtype=float)
+    column_cosine = np.asarray(iop[3:6], dtype=float)
+    slice_dir = np.cross(row_cosine, column_cosine)
+    norm = float(np.linalg.norm(slice_dir))
+    if norm <= 1e-9:
+        raise ValueError(
+            "degenerate DICOM slice orientation (parallel row/column "
+            "cosines); refusing to guess a grid"
+        )
+    slice_dir = slice_dir / norm
+
+    projections = [
+        float(np.dot(pos, slice_dir)) for _, pos in positions
+    ]
+    if max(projections) - min(projections) <= 1e-6:
+        # All slices sit at the same position: duplicates, not a volume.
+        raise ValueError(
+            "the DICOM series has {0} slices all at the same position; "
+            "duplicated exports cannot form a volume".format(len(positions))
+        )
+    ordered = sorted(
+        range(len(projections)), key=lambda i: projections[i])
+    steps = [projections[ordered[i]] - projections[ordered[i - 1]]
+             for i in range(1, len(ordered))]
+    if min(steps) <= 1e-6:
+        raise ValueError(
+            "the DICOM series contains duplicated slice positions "
+            "(expected step {0:.6g} mm); re-exported or overlapping series "
+            "cannot form a regular volume".format(float(np.median(steps)))
+        )
+    expected = float(np.median(steps))
+    tolerance = max(1e-4, abs(expected) * 1e-3)
+    for value in steps:
+        if abs(value - expected) > tolerance:
+            raise ValueError(
+                "the DICOM series is not evenly spaced (slice steps differ "
+                "by more than {0:.6g} mm); rescan/padded/irregular series "
+                "cannot be represented as a regular volume".format(
+                    abs(value - expected))
+            )
 
 
 def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
