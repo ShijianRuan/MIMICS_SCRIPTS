@@ -16858,6 +16858,63 @@ class TestFlexiCTActiveLearningApply(unittest.TestCase):
             self.assertEqual("applied", marked[0][0])
             self.assertFalse(os.path.exists(bridge_root))
 
+    def test_al_mark_viewed_never_blocks_gui_thread_on_lock(self):
+        """R04 失败路径：外部窗口持锁时，Mimics 侧 viewed 写入不等待。
+
+        旧实现 _annotation_state_guard 默认 wait_seconds=2.0，由 Mimics
+        主线程（monitor tick -> _al_finish_conversion -> _al_mark_viewed）
+        同步等待——切片滚动/提示操作停顿约 2 秒。修复契约：锁被持有时
+        立即返回（无 sleep/轮询），条目进入待重试队列，下一个 tick
+        解锁后补写成功；重复条目不堆积。
+        """
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = os.path.join(tmp, "job")
+            os.makedirs(job_dir)
+            state_path = os.path.join(job_dir, "annotation_state.json")
+            # 外部复核窗口持有锁（另一进程/线程的写入中）。两侧 guard
+            # 遵循同一协议（同一个 .guard 文件的 1 字节 msvcrt 锁）。
+            held = flexict_mimics._annotation_state_guard(
+                state_path, wait_seconds=0.0)
+            self.assertIsNotNone(held)
+            try:
+                # 锁被持有时：单次尝试立即返回，条目入待重试队列。
+                started = time.time()
+                flexict_mimics._AL_PENDING_VIEWED[:] = []
+                flexict_mimics._al_mark_viewed(job_dir, "caseA")
+                self.assertLess(time.time() - started, 0.5)
+                self.assertIn(
+                    (job_dir, "caseA"), flexict_mimics._AL_PENDING_VIEWED)
+                self.assertFalse(os.path.exists(state_path))
+                # 同一条目重复失败不堆积。
+                flexict_mimics._al_mark_viewed(job_dir, "caseA")
+                self.assertEqual(
+                    1, len(flexict_mimics._AL_PENDING_VIEWED))
+            finally:
+                flexict_mimics._release_annotation_state_guard(held)
+            # 解锁后下一个 tick 补写成功且清空队列。
+            flexict_mimics._al_tick()
+            self.assertEqual([], flexict_mimics._AL_PENDING_VIEWED)
+            with open(state_path, "r", encoding="utf-8") as handle:
+                state = json.load(handle)
+            self.assertEqual("viewed", state["cases"]["caseA"]["state"])
+
+    def test_al_mark_viewed_writes_directly_when_lock_free(self):
+        """R04 正常路径：无争用时直接写入（不经过重试队列）。"""
+        import flexict_mimics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = os.path.join(tmp, "job")
+            os.makedirs(job_dir)
+            flexict_mimics._AL_PENDING_VIEWED[:] = []
+            flexict_mimics._al_mark_viewed(job_dir, "caseB")
+            self.assertEqual([], flexict_mimics._AL_PENDING_VIEWED)
+            state_path = os.path.join(job_dir, "annotation_state.json")
+            with open(state_path, "r", encoding="utf-8") as handle:
+                state = json.load(handle)
+            self.assertEqual("viewed", state["cases"]["caseB"]["state"])
+
     def test_al_conversion_failure_marks_request_failed(self):
         import flexict_mimics
 

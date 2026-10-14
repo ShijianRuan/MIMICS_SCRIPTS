@@ -1286,6 +1286,13 @@ def _start_active_learning():
 
 _AL_MONITOR_KEY = "flexict_al_requests"
 _AL_APPLY_TRANSACTIONS = {}
+# R04: 'viewed' writes that lost the guard race (the external review window
+# held the lock) wait here and retry on a later monitor tick instead of
+# blocking the Mimics GUI thread. Same process-local lifetime as
+# _AL_APPLY_TRANSACTIONS: a Mimics restart drops a pending best-effort
+# 'viewed' entry — acceptable, the external window re-writes state on any
+# explicit action.
+_AL_PENDING_VIEWED = []
 
 
 def _al_request_dir(job_dir):
@@ -1347,6 +1354,14 @@ def _al_tick():
         return
     _AL_APPLY_TRANSACTIONS["busy"] = True
     try:
+        # R04: retry 'viewed' entries that lost the guard race (each retry
+        # is the same non-blocking single attempt; entries that keep losing
+        # stay pending for the next tick).
+        if _AL_PENDING_VIEWED:
+            retries = _AL_PENDING_VIEWED[:]
+            del _AL_PENDING_VIEWED[:]
+            for job_dir, case_id in retries:
+                _al_mark_viewed(job_dir, case_id)
         transaction = _AL_APPLY_TRANSACTIONS.get("conversion")
         if transaction is not None:
             # Stage two: the background thread wrote result.json when the
@@ -1490,8 +1505,10 @@ def _annotation_state_guard(path, wait_seconds=2.0):
     one-byte msvcrt/fcntl lock on <path>.guard follows the same protocol as
     runtime_common._open_resource_guard (kept local so Py3.5 never imports
     from the tools package). Returns None when contended past the wait —
-    callers then skip the write (viewed is best-effort) rather than block
-    the Mimics GUI (iron rule 1)."""
+    callers then skip the write (viewed is best-effort, queued for a later
+    tick retry) rather than block the Mimics GUI (iron rule 1). The Mimics
+    caller passes wait_seconds=0 (R04): one non-blocking attempt; the
+    bounded wait exists for callers off the GUI thread."""
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         try:
@@ -1565,10 +1582,16 @@ def _al_mark_viewed(job_dir, case_id):
     concurrent UI write (e.g. the annotator marking another case annotated
     in the review window) is never clobbered."""
     path = os.path.join(job_dir, "annotation_state.json")
-    guard = _annotation_state_guard(path)
+    # R04: this runs on the Mimics GUI thread (from _al_finish_conversion
+    # via the monitor tick), so the guard is tried once without waiting —
+    # the old 2 s bounded wait froze slicing/tooltips whenever the external
+    # review window held the lock. On contention the entry goes to the
+    # pending list and the next tick retries it.
+    guard = _annotation_state_guard(path, wait_seconds=0.0)
     if guard is None:
-        # Best-effort marker; losing one 'viewed' entry to contention beats
-        # blocking the Mimics GUI thread on a lock.
+        pending = (job_dir, case_id)
+        if pending not in _AL_PENDING_VIEWED:
+            _AL_PENDING_VIEWED.append(pending)
         return
     try:
         payload = _read_json(path, {}) or {}
