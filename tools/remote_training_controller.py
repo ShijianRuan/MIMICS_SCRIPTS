@@ -1340,6 +1340,11 @@ def _prepare_nnunet(
                 "image": "/job/input/{}/image.nii.gz".format(case_id),
                 "label": "/job/labels/{}/label.nii.gz".format(case_id),
                 "fingerprint": str(row.get("fingerprint") or ""),
+                # R08: patient grouping must survive the serialization —
+                # the remote split reads per-row patient_group; dropping it
+                # made the same patient's scans straddle train/val remotely
+                # while the local split kept them together.
+                "patient_group": str(row.get("patient_group") or ""),
             }
         )
         _status_update(
@@ -1617,6 +1622,12 @@ def _prepare_flexict(
                 "image": "/job/input/{}/image.nii.gz".format(case_id),
                 "label": "/job/labels/{}/label.nii.gz".format(case_id),
                 "fingerprint": str(row.get("fingerprint") or ""),
+                # R08: patient grouping must survive the serialization —
+                # the FlexiCT split on the remote side reads per-row
+                # patient_group; dropping it here made the same patient's
+                # multi-phase scans straddle train/val remotely while the
+                # local split kept them together.
+                "patient_group": str(row.get("patient_group") or ""),
             }
         )
         _status_update(

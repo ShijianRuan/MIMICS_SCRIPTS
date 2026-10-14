@@ -982,29 +982,9 @@ def run_training(job_dir: Path) -> int:
             # cases into /job/input and /job/labels with per-case paths in
             # prepared_cases. Running prepare_source_grid_cases here would
             # search for alias-named label files and find none.
-            rows = []
-            for raw in request.get("prepared_cases") or []:
-                image = Path(raw["image"])
-                label = Path(raw["label"])
-                if not image.is_file() or not label.is_file():
-                    raise RuntimeError(
-                        "Prepared remote case is incomplete: {}".format(raw)
-                    )
-                rows.append(
-                    {
-                        "case_id": str(raw["case_id"]),
-                        "image": image,
-                        "label": label,
-                        "fingerprint": str(
-                            raw.get("fingerprint")
-                            or stable_digest({
-                                "image": path_signature(image),
-                                "label": path_signature(label),
-                            })
-                        ),
-                        "cache_hit": True,
-                    }
-                )
+            from nnunet_pipeline import _prepared_rows_from_request
+
+            rows = _prepared_rows_from_request(request)
         else:
             # prepare_source_grid_cases re-runs the nnU-Net request
             # normalizer, which only accepts concrete configurations; hand

@@ -2062,6 +2062,54 @@ def _sweep_runtime_and_cache(workspace: str | Path,
     }
 
 
+def _prepared_rows_from_request(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild pipeline rows from a remote prepared-case bundle (R08).
+
+    The controller materializes /job/input/<case>/image.nii.gz and
+    /job/labels/<case>/label.nii.gz before the container starts. The
+    per-row ``patient_group`` ships with the prepared case because the
+    train/val split reads it per row; older bundles carry only the
+    top-level ``patient_groups`` mapping, which fills the gap. A conflict
+    between the two fails closed rather than splitting a patient across
+    train/val either way.
+    """
+    top_level_groups = {
+        str(key): str(value).strip()
+        for key, value in dict(request.get("patient_groups") or {}).items()
+        if str(value).strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for raw in request.get("prepared_cases") or []:
+        image = Path(raw["image"])
+        label = Path(raw["label"])
+        if not image.is_file() or not label.is_file():
+            raise RuntimeError(
+                "Prepared remote case is incomplete: {}".format(raw)
+            )
+        case_id = str(raw["case_id"])
+        row_group = str(raw.get("patient_group") or "").strip()
+        mapped_group = top_level_groups.get(case_id, "")
+        if row_group and mapped_group and row_group != mapped_group:
+            raise RuntimeError(
+                "病例 {0} 的患者分组前后不一致（行字段“{1}”与请求映射"
+                "“{2}”）。患者分组决定训练/验证不泄漏，冲突时拒绝执行。".format(
+                    case_id, row_group, mapped_group)
+            )
+        rows.append(
+            {
+                "case_id": case_id,
+                "image": image,
+                "label": label,
+                "fingerprint": str(raw.get("fingerprint") or stable_digest({
+                    "image": path_signature(image), "label": path_signature(label)
+                })),
+                "patient_group": row_group or mapped_group,
+                "cache_hit": True,
+            }
+        )
+    return rows
+
+
 def run_training(job_dir: Path) -> int:
     request_path = job_dir / "request.json"
     status_path = job_dir / "status.json"
@@ -2091,23 +2139,7 @@ def run_training(job_dir: Path) -> int:
     )
     try:
         if request["label_source"] == "prepared":
-            rows = []
-            for raw in request.get("prepared_cases") or []:
-                image = Path(raw["image"])
-                label = Path(raw["label"])
-                if not image.is_file() or not label.is_file():
-                    raise RuntimeError("Prepared remote case is incomplete: {}".format(raw))
-                rows.append(
-                    {
-                        "case_id": str(raw["case_id"]),
-                        "image": image,
-                        "label": label,
-                        "fingerprint": str(raw.get("fingerprint") or stable_digest({
-                            "image": path_signature(image), "label": path_signature(label)
-                        })),
-                        "cache_hit": True,
-                    }
-                )
+            rows = _prepared_rows_from_request(request)
         else:
             rows = prepare_source_grid_cases(
                 request, staging, status_path, control_path

@@ -2943,6 +2943,282 @@ class TestRemoteExecution(unittest.TestCase):
             # The local materialization scratch folder is cleaned up.
             self.assertFalse((bundle / "prepared_local").exists())
 
+    def test_prepare_flexict_serializes_patient_group_per_row(self):
+        """R08: the remote split reads per-row patient_group; the controller
+        dropping it made the same patient's multi-phase scans straddle
+        train/val remotely while the local split kept them together."""
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = []
+            for case_id, group in (("case_1", "patientA"),
+                                   ("case_2", "patientA"),
+                                   ("case_3", "patientB"),
+                                   ("case_4", "patientB")):
+                image = root / case_id / "image.nii.gz"
+                label = root / case_id / "label.nii.gz"
+                image.parent.mkdir(parents=True)
+                image.write_bytes(b"image")
+                label.write_bytes(b"label")
+                rows.append({
+                    "case_id": case_id,
+                    "image": image,
+                    "label": label,
+                    "fingerprint": "fingerprint_" + case_id,
+                    "patient_group": group,
+                })
+            request = fp.normalize_flexict_request(
+                _training_request("X:/d", str(root / "workspace")))
+            spec, bundle = self._prepare_spec(tmp, request)
+            with mock.patch(
+                "tools.flexict_pipeline.prepare_source_grid_cases",
+                return_value=rows,
+            ):
+                controller._prepare_flexict(spec, bundle)
+            payload = json.loads(
+                (bundle / "remote_request.json").read_text(encoding="utf-8"))
+            remote_request = payload["pipeline_request"]
+            self.assertEqual(remote_request["label_source"], "prepared")
+            groups = {
+                row["case_id"]: row.get("patient_group")
+                for row in remote_request["prepared_cases"]
+            }
+            self.assertEqual(
+                groups,
+                {"case_1": "patientA", "case_2": "patientA",
+                 "case_3": "patientB", "case_4": "patientB"},
+                "patient groups must survive the remote serialization")
+
+    def test_remote_prepared_split_matches_local_split(self):
+        """R08 acceptance: two patients, four scans — the remote container
+        rebuild (prepared rows) and the local row flow must produce the
+        SAME final splits, and patient A must not straddle train/val.
+
+        Runs the real container-side entry: _prepare_flexict stages the
+        bundle, then run_training(label_source="prepared") consumes the
+        staged files (the /job container paths are mapped back onto the
+        local bundle, which is exactly what the container mounts do).
+        """
+        controller = self._controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_root = root / "dataset"
+            for case_id in ("case_1", "case_2", "case_3", "case_4"):
+                _make_case(dataset_root, case_id)
+            groups = {"case_1": "patientA", "case_2": "patientA",
+                      "case_3": "patientB", "case_4": "patientB"}
+
+            # -- local reference run: dataset_masks + top-level groups ----
+            local_ws = root / "local_workspace"
+            local_request = fp.normalize_flexict_request(_training_request(
+                str(dataset_root), str(local_ws),
+                ["case_1", "case_2", "case_3", "case_4"],
+                patient_groups=groups))
+            local_job = root / "jobs" / local_request["job_id"]
+            local_job.mkdir(parents=True, exist_ok=True)
+            from nnunet_common import write_json_atomic
+
+            write_json_atomic(local_job / "request.json", local_request)
+            write_json_atomic(local_job / "control.json", {"action": "run"})
+            write_json_atomic(
+                local_job / "status.json",
+                {"schema_version": fp.SCHEMA_VERSION,
+                 "job_id": local_request["job_id"], "kind": "train",
+                 "status": "launching", "phase": "launching",
+                 "created_at_epoch": time.time(),
+                 "updated_at_epoch": time.time()},
+            )
+
+            def fake_worker(stage, params, request, roots, configuration,
+                            *args, **kwargs):
+                if stage == "train":
+                    model_dir = fp._flexict_model_dir(
+                        roots, request, configuration)
+                    (model_dir / "fold_0").mkdir(parents=True, exist_ok=True)
+                    (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+                    (model_dir / "fold_0" / "checkpoint_final.pth").write_bytes(b"x")
+                    (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+                    (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+                else:
+                    preprocessed = roots["preprocessed"] / fp._dataset_name(
+                        request)
+                    (preprocessed / params["configuration"]).mkdir(
+                        parents=True, exist_ok=True)
+                return {"status": "ok", "result": {"trained": stage == "train"}}
+
+            with mock.patch.object(fp, "_spawn_flexict_worker",
+                                   side_effect=fake_worker), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                self.assertEqual(fp.run_training(local_job), 0)
+
+            # -- remote flow: controller prepare, then container rebuild ---
+            remote_ws = root / "remote_workspace"
+            request = fp.normalize_flexict_request(_training_request(
+                str(dataset_root), str(remote_ws),
+                ["case_1", "case_2", "case_3", "case_4"],
+                patient_groups=groups))
+            spec, bundle = self._prepare_spec(tmp, request)
+            with mock.patch(
+                "tools.flexict_pipeline.prepare_source_grid_cases",
+                return_value=[
+                    {
+                        "case_id": case_id,
+                        "image": dataset_root / case_id / "ct.nii.gz",
+                        "label": dataset_root / case_id / "kidney_left.nii.gz",
+                        "fingerprint": "fp_" + case_id,
+                        "patient_group": groups[case_id],
+                    }
+                    for case_id in sorted(groups)
+                ],
+            ):
+                controller._prepare_flexict(spec, bundle)
+            remote_request = json.loads(
+                (bundle / "remote_request.json").read_text(
+                    encoding="utf-8"))["pipeline_request"]
+            self.assertEqual(remote_request["label_source"], "prepared")
+
+            # The container mounts the bundle at /job; map the /job and
+            # /remote-cache paths back onto local dirs for this test.
+            container_request = json.loads(json.dumps(remote_request))
+            job_prefix = str(bundle).replace("\\", "/")
+            cache_root = root / "remote_cache"
+            for row in container_request["prepared_cases"]:
+                for key in ("image", "label"):
+                    row[key] = row[key].replace("/job", job_prefix)
+            container_request["workspace"] = str(remote_ws)
+            container_request["runtime_roots"] = {
+                key: str(cache_root / value.rsplit("/", 1)[-1])
+                for key, value in remote_request["runtime_roots"].items()
+            }
+
+            container_job = root / "jobs" / container_request["job_id"]
+            container_job.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(container_job / "request.json",
+                              container_request)
+            write_json_atomic(container_job / "control.json",
+                              {"action": "run"})
+            write_json_atomic(
+                container_job / "status.json",
+                {"schema_version": fp.SCHEMA_VERSION,
+                 "job_id": container_request["job_id"], "kind": "train",
+                 "status": "launching", "phase": "launching",
+                 "created_at_epoch": time.time(),
+                 "updated_at_epoch": time.time()},
+            )
+            with mock.patch.object(fp, "_spawn_flexict_worker",
+                                   side_effect=fake_worker), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_training(container_job)
+            self.assertEqual(exit_code, 0)
+
+            def _split_ids(workspace):
+                pre = Path(workspace) / "runtime" / "nnUNet_preprocessed"
+                raw = Path(workspace) / "runtime" / "nnUNet_raw"
+                datasets = sorted(
+                    d.name for d in pre.glob("Dataset7[5-9][0-9]_*")
+                    if d.is_dir())
+                self.assertEqual(len(datasets), 1)
+                splits = json.loads(
+                    (pre / datasets[0] / "splits_final.json").read_text(
+                        encoding="utf-8"))
+                manifest = json.loads(
+                    (raw / datasets[0] / "mimics_dataset_manifest.json")
+                    .read_text(encoding="utf-8"))
+                id_by_key = {
+                    entry["nnunet_case_id"]: entry["case_id"]
+                    for entry in manifest["cases"]
+                }
+                return {
+                    "train": sorted(id_by_key[key]
+                                    for key in splits[0]["train"]),
+                    "val": sorted(id_by_key[key]
+                                  for key in splits[0]["val"]),
+                }
+
+            local_split = _split_ids(local_ws)
+            # The container run resolved its runtime_roots onto the mapped
+            # cache dir, so read the split from those actual roots.
+            remote_pre = sorted(
+                (cache_root / "preprocessed").glob("Dataset7[5-9][0-9]_*"))
+            remote_raw = sorted(
+                (cache_root / "raw").glob("Dataset7[5-9][0-9]_*"))
+            self.assertEqual(len(remote_pre), 1)
+            self.assertEqual(len(remote_raw), 1)
+            splits = json.loads(
+                (remote_pre[0] / "splits_final.json").read_text(
+                    encoding="utf-8"))
+            manifest = json.loads(
+                (remote_raw[0] / "mimics_dataset_manifest.json").read_text(
+                    encoding="utf-8"))
+            id_by_key = {
+                entry["nnunet_case_id"]: entry["case_id"]
+                for entry in manifest["cases"]
+            }
+            remote_split = {
+                "train": sorted(id_by_key[key]
+                                for key in splits[0]["train"]),
+                "val": sorted(id_by_key[key] for key in splits[0]["val"]),
+            }
+            self.assertEqual(
+                local_split, remote_split,
+                "local and remote splits differ: {} vs {}".format(
+                    local_split, remote_split))
+            # val_cases=1 picks the last case (case_4); its patient group
+            # B follows it into val, patient A stays whole in train.
+            self.assertEqual(remote_split["val"], ["case_3", "case_4"])
+            self.assertEqual(remote_split["train"], ["case_1", "case_2"])
+
+    def test_prepared_rows_patient_group_rules(self):
+        """R08 contract for the container-side row rebuild: row field wins,
+        top-level mapping fills the gap, conflict rejects, legacy bundles
+        (neither source) keep case-level independence, Chinese keys work."""
+        from nnunet_pipeline import _prepared_rows_from_request
+
+        def prepare(case_id, row_group=None, top_level=None):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                image = root / "input" / case_id / "image.nii.gz"
+                label = root / "labels" / case_id / "label.nii.gz"
+                image.parent.mkdir(parents=True)
+                label.parent.mkdir(parents=True)
+                image.write_bytes(b"image")
+                label.write_bytes(b"label")
+                request = {
+                    "label_source": "prepared",
+                    "patient_groups": top_level or {},
+                    "prepared_cases": [{
+                        "case_id": case_id,
+                        "image": str(image),
+                        "label": str(label),
+                        "fingerprint": "fp",
+                        **({"patient_group": row_group}
+                           if row_group is not None else {}),
+                    }],
+                }
+                return _prepared_rows_from_request(request)
+
+        # Row field alone.
+        rows = prepare("病例甲", row_group="patientA")
+        self.assertEqual(rows[0]["patient_group"], "patientA")
+        # Top-level mapping alone (legacy bundle without per-row field).
+        rows = prepare("病例乙", top_level={"病例乙": "patientB"})
+        self.assertEqual(rows[0]["patient_group"], "patientB")
+        # Both agree -> same group.
+        rows = prepare(
+            "case_1", row_group="patientA", top_level={"case_1": "patientA"})
+        self.assertEqual(rows[0]["patient_group"], "patientA")
+        # Conflict -> fail closed with the readable Chinese error.
+        with self.assertRaisesRegex(
+                RuntimeError, "患者分组前后不一致"):
+            prepare(
+                "case_2", row_group="patientA",
+                top_level={"case_2": "patientB"})
+        # Legacy: neither source -> no group (case-level independence).
+        rows = prepare("case_3")
+        self.assertEqual(rows[0]["patient_group"], "")
+
     def test_prepare_flexict_rejects_non_training_request(self):
         controller = self._controller()
         with tempfile.TemporaryDirectory() as tmp:

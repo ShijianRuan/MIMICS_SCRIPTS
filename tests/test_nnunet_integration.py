@@ -2652,6 +2652,121 @@ class JobLifecycleTests(unittest.TestCase):
             self.assertTrue(payload["pipeline_request"]["gpu_lock_managed_externally"])
             self.assertEqual(prepared["train_count"], 1)
             self.assertTrue(prepared["remote_artifact_relative"].startswith("output/models/"))
+            # R08: patient grouping must survive the serialization — the
+            # remote split reads per-row patient_group; dropping it made the
+            # same patient's scans straddle train/val remotely while the
+            # local split kept them together.
+            prepared_cases = payload["pipeline_request"]["prepared_cases"]
+            self.assertIn("patient_group", prepared_cases[0])
+
+    def test_remote_training_prepare_serializes_patient_groups(self):
+        """R08: every staged case must carry its patient_group so the
+        container-side split keeps same-patient scans on one side."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = root / "job"
+            bundle = root / "bundle"
+            job.mkdir()
+            bundle.mkdir()
+            rows = []
+            for case_id, group in (("case_1", "patientA"),
+                                   ("case_2", "patientA"),
+                                   ("case_3", "patientB"),
+                                   ("case_4", "patientB")):
+                image = root / case_id / "image.nii.gz"
+                label = root / case_id / "label.nii.gz"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"image")
+                label.write_bytes(b"label")
+                rows.append(
+                    {
+                        "case_id": case_id,
+                        "image": image,
+                        "label": label,
+                        "fingerprint": "fp_" + case_id,
+                        "patient_group": group,
+                    }
+                )
+            request_path = job / "request.json"
+            status_path = job / "status.json"
+            common.write_json_atomic(
+                request_path,
+                {
+                    "operation": "train",
+                    "job_id": "remote_train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": str(root / "workspace"),
+                    "dataset_root": str(root),
+                    "labels": [{"name": "Liver", "id": 1}],
+                },
+            )
+            common.write_json_atomic(status_path, {"status": "preparing_remote"})
+            common.write_json_atomic(job / "control.json", {"action": "run"})
+            spec = {
+                "job_dir": str(job),
+                "status_path": str(status_path),
+                "request_path": str(request_path),
+            }
+            with mock.patch(
+                "tools.nnunet_pipeline.prepare_source_grid_cases", return_value=rows
+            ):
+                remote._prepare_nnunet(spec, bundle)
+            payload = common.read_json(bundle / "remote_request.json")
+            groups = {
+                row["case_id"]: row.get("patient_group")
+                for row in payload["pipeline_request"]["prepared_cases"]
+            }
+            self.assertEqual(
+                groups,
+                {"case_1": "patientA", "case_2": "patientA",
+                 "case_3": "patientB", "case_4": "patientB"},
+            )
+
+    def test_prepared_rows_patient_group_contract(self):
+        """R08 container-side rebuild: row field wins, top-level mapping
+        fills the gap, a conflict fails closed, legacy bundles (neither
+        source) keep case-level independence, Chinese keys work."""
+        def prepare(case_id, row_group=None, top_level=None):
+            with tempfile.TemporaryDirectory() as temp:
+                image = Path(temp) / "input" / case_id / "image.nii.gz"
+                label = Path(temp) / "labels" / case_id / "label.nii.gz"
+                image.parent.mkdir(parents=True)
+                label.parent.mkdir(parents=True)
+                image.write_bytes(b"image")
+                label.write_bytes(b"label")
+                request = {
+                    "label_source": "prepared",
+                    "patient_groups": top_level or {},
+                    "prepared_cases": [
+                        {
+                            "case_id": case_id,
+                            "image": str(image),
+                            "label": str(label),
+                            "fingerprint": "fp",
+                            **(
+                                {"patient_group": row_group}
+                                if row_group is not None
+                                else {}
+                            ),
+                        }
+                    ],
+                }
+                return pipeline._prepared_rows_from_request(request)
+
+        rows = prepare("病例甲", row_group="patientA")
+        self.assertEqual(rows[0]["patient_group"], "patientA")
+        rows = prepare("病例乙", top_level={"病例乙": "patientB"})
+        self.assertEqual(rows[0]["patient_group"], "patientB")
+        rows = prepare(
+            "case_1", row_group="patientA", top_level={"case_1": "patientA"})
+        self.assertEqual(rows[0]["patient_group"], "patientA")
+        with self.assertRaisesRegex(RuntimeError, "患者分组前后不一致"):
+            prepare(
+                "case_2", row_group="patientA",
+                top_level={"case_2": "patientB"})
+        rows = prepare("case_3")
+        self.assertEqual(rows[0]["patient_group"], "")
 
 
 class FakeMask:
