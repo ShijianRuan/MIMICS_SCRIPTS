@@ -4891,17 +4891,91 @@ class TestNNInteractiveMimicsParsing(unittest.TestCase):
 
         source = inspect.getsource(nninteractive_mimics._async_prompt_menu)
         self.assertIn('apply_note', source)
-        # The branch: first result pops the session-remembered destination
-        # dialog (R61-10) only under choose_on_first_result.
-        self.assertIn(
-            'state and state.get("write_mode") == "choose_on_first_result"',
-            source,
-        )
+        # R11: the caption must come from the same resolver the application
+        # path uses (_effective_write_mode), never from the global session
+        # memory directly.
+        self.assertIn("_effective_write_mode(state)", source)
         # The ask-once copy must exist and the automatic copy must be the
         # fallback (else), not the only message.
         self.assertIn("第一个结果会询问一次", source)
         self.assertIn("自动应用", source)
         self.assertIn("else", source)
+
+    def test_effective_write_mode_matches_application_semantics(self):
+        """R11: display and application must resolve the write mode the same
+        way. The old caption read the global _SESSION_WRITE_MODE directly,
+        so a config/session write_mode=in_place with a remembered
+        derived_copy showed '创建可编辑副本' while results applied in place
+        — the caption said the opposite of what happened."""
+        import nninteractive_mimics as nim
+
+        original = nim._SESSION_WRITE_MODE
+        try:
+            cases = [
+                # (state write_mode, session memory, expected)
+                ("choose_on_first_result", None, "ask_once"),
+                ("choose_on_first_result", "in_place", "in_place"),
+                ("choose_on_first_result", "derived_copy", "derived_copy"),
+                # A concrete session mode wins over the global memory —
+                # this is the pair the review caught lying in the caption.
+                ("in_place", "derived_copy", "in_place"),
+                ("derived_copy", "in_place", "derived_copy"),
+                ("new_empty", "derived_copy", "new_empty"),
+                (None, "derived_copy", "in_place"),
+            ]
+            for state_mode, memory, expected in cases:
+                nim._SESSION_WRITE_MODE = memory
+                self.assertEqual(
+                    expected,
+                    nim._effective_write_mode(
+                        {"write_mode": state_mode} if state_mode else {}),
+                    "state={!r} memory={!r}".format(state_mode, memory),
+                )
+        finally:
+            nim._SESSION_WRITE_MODE = original
+
+    def test_async_prompt_menu_caption_matches_effective_mode(self):
+        """R11 end to end: the caption shown for each effective mode must
+        name the way _choose_completed_result_target will actually apply."""
+        import nninteractive_mimics as nim
+
+        original_box = nim.mimics.dialogs.question_box
+        captured = {}
+
+        def fake_question_box(message="", buttons="", title="", ui_blocking=None, **kw):
+            captured["message"] = message
+            return "完成"
+
+        try:
+            nim.mimics.dialogs.question_box = fake_question_box
+            for memory, state_mode, expected_fragment in [
+                # No memory + choose: dialog asks; caption must say so.
+                (None, "choose_on_first_result", "第一个结果会询问一次"),
+                # Remembered derived copy: caption names the copy.
+                ("derived_copy", "choose_on_first_result", "创建可编辑副本"),
+                # Remembered in place: caption names in-place update.
+                ("in_place", "choose_on_first_result", "更新所选掩膜"),
+                # Concrete session mode beats the global memory (the pair
+                # that used to display the opposite of what applied).
+                ("derived_copy", "in_place", "更新所选掩膜"),
+                ("in_place", "derived_copy", "创建可编辑副本"),
+            ]:
+                nim._SESSION_WRITE_MODE = memory
+                state = {"write_mode": state_mode, "interactions": [{}]}
+                profile = {"validated_prompt_types": ["point"]}
+                nim._async_prompt_menu("target", state, profile=profile)
+                self.assertIn(
+                    expected_fragment,
+                    captured["message"],
+                    "memory={!r} state={!r} message={!r}".format(
+                        memory, state_mode, captured["message"]),
+                )
+                # Every non-ask caption names the current mode explicitly.
+                if state_mode != "choose_on_first_result" or memory is not None:
+                    self.assertIn("当前方式", captured["message"])
+        finally:
+            nim.mimics.dialogs.question_box = original_box
+            nim._SESSION_WRITE_MODE = None
 
     def test_owned_server_sweep_accepts_current_schema(self):
         """C6-1: the bridge writes nninteractive_owned_server.v3; the Mimics

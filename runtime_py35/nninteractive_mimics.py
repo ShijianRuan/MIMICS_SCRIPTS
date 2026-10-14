@@ -1992,6 +1992,22 @@ def _set_mask_from_u8(mask, path, shape, transaction_name=None):
 _SESSION_WRITE_MODE = None
 
 
+def _effective_write_mode(state):
+    """The write mode the NEXT result of this session will actually use (R11).
+
+    Display and application must resolve the same way: a session whose
+    write_mode is already concrete (in_place/derived_copy/new_empty, e.g. set
+    by the config's existing_mask_result_mode) applies that mode and the
+    session memory never overrides it. Only "choose_on_first_result"
+    sessions consult the remembered choice; "ask_once" means no memory is
+    stored yet, so the first result still pops the destination dialog.
+    """
+    mode = str((state or {}).get("write_mode") or "in_place")
+    if mode != "choose_on_first_result":
+        return mode
+    return _SESSION_WRITE_MODE or "ask_once"
+
+
 def _choose_completed_result_target(image, target, state, result):
     global _SESSION_WRITE_MODE
     if state.get("write_mode") != "choose_on_first_result":
@@ -2755,24 +2771,24 @@ def _async_prompt_menu(target, state, source=None, profile=None):
     if state and state.get("interactions"):
         buttons.extend([BUTTON_UNDO, BUTTON_RESET])
     buttons.append(BUTTON_FINISH)
-    apply_note = (
-        # First result on a non-empty Mask asks once where to apply
-        # (Update Selected Mask / Create Editable Copy); the choice then
-        # sticks for the whole Mimics session (R61-10). Every other case
-        # applies without asking. The menu copy must say which one applies.
-        "第一个结果会询问一次应用到何处"
-        "（该选择将在本次 Mimics 会话中记住）；后续"
-        "结果将自动应用。"
-        if state and state.get("write_mode") == "choose_on_first_result"
-        # UI18: a remembered session choice must be visible, not silent.
-        else "结果就绪后将自动应用（当前方式：{0}）。".format(
-            "更新所选掩膜"
-            if _SESSION_WRITE_MODE in (None, "in_place")
-            else "创建可编辑副本"
+    # R11: display must resolve the same way _choose_completed_result_target
+    # applies. The session's own concrete mode always wins over the global
+    # session memory; only "ask_once" (choose_on_first_result with no
+    # remembered choice) still pops the destination dialog.
+    effective_mode = _effective_write_mode(state)
+    if effective_mode == "ask_once":
+        apply_note = (
+            "第一个结果会询问一次应用到何处"
+            "（该选择将在本次 Mimics 会话中记住）；后续"
+            "结果将自动应用。"
         )
-        if _SESSION_WRITE_MODE is not None
-        else "结果就绪后将自动应用。"
-    )
+    else:
+        # UI18: which way results will apply must be visible, not silent.
+        apply_note = "结果就绪后将自动应用（当前方式：{0}）。".format(
+            "创建可编辑副本"
+            if effective_mode in ("derived_copy", "new_empty")
+            else "更新所选掩膜"
+        )
     return mimics.dialogs.question_box(
         message=(
             "源快照：{0}\n"
