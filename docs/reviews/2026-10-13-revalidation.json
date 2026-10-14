@@ -336,7 +336,7 @@
     {
       "id": "R09",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "非等距和重复位置 DICOM 仍被制造成规则网格",
       "previous_ids": [
         "UI16",
@@ -366,7 +366,9 @@
         "原始 header→外部体→Mimics 所选 Image→Mask 导出，角点与已知标志位置一致。",
         "无法安全转换时提交前给出具体系列/问题层与处理建议，原文件和工程不变。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "609a6b7",
+      "fix_note": "_read_dicom_series_headers 统一追加 _validate_dicom_slice_grid（shape/affine/mask 共同入口）：逐层投影后校验方向一致（混合 IOP 拒绝）、位置唯一（重复/全同位拒绝）、容差内等距（补扫拼接拒绝），报错带具体问题。规则网格含倒序与经典机架倾斜不受影响。失败路径测试 test_dicom_helpers_refuse_irregular_slice_positions 覆盖全部拒绝分支与合法变体；smoke 8/8。"
     },
     {
       "id": "R10",
