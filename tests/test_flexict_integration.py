@@ -2226,6 +2226,219 @@ class TestModelRegistration(unittest.TestCase):
             self.assertEqual(models[0]["model_id"], manifest["model_id"])
 
 
+class TestFrozenValidationContract(unittest.TestCase):
+    """R07: the dataset's previous fold-0 validation cases must survive the
+    final FlexiCT split rewrite.
+
+    The old flow froze the previous val inside _materialize_nnunet_raw and
+    then let _write_flexict_splits re-sample and overwrite it, silently
+    moving previously-validated cases into training. These tests run the
+    REAL call order in run_training (capture -> materialize -> final
+    rewrite) with only the stage workers mocked, and assert on the actual
+    splits_final.json the trainer reads — not just _split_train_val.
+    """
+
+    def _run_job(self, tmp, case_ids, dataset_root, overrides=None,
+                 expect_exit=0):
+        """Drive run_training over an existing dataset dir; returns the
+        final splits_final.json (decoded to case ids via the manifest)."""
+        workspace = Path(tmp) / "workspace"
+        request = fp.normalize_flexict_request(
+            _training_request(
+                str(dataset_root), str(workspace), list(case_ids),
+                **(overrides or {})))
+        job_dir = Path(tmp) / "jobs" / request["job_id"]
+        job_dir.mkdir(parents=True, exist_ok=True)
+        from nnunet_common import write_json_atomic
+
+        write_json_atomic(job_dir / "request.json", request)
+        write_json_atomic(job_dir / "control.json", {"action": "run"})
+        write_json_atomic(
+            job_dir / "status.json",
+            {"schema_version": fp.SCHEMA_VERSION, "job_id": request["job_id"],
+             "kind": "train", "status": "launching", "phase": "launching",
+             "created_at_epoch": time.time(), "updated_at_epoch": time.time()},
+        )
+        from flexict_common import workspace_paths
+
+        def fake_worker(stage, params, request, roots, configuration,
+                        *args, **kwargs):
+            if stage == "train":
+                model_dir = fp._flexict_model_dir(
+                    roots, request, configuration)
+                (model_dir / "fold_0").mkdir(parents=True, exist_ok=True)
+                (model_dir / "fold_0" / "checkpoint_best.pth").write_bytes(b"x")
+                (model_dir / "fold_0" / "checkpoint_final.pth").write_bytes(b"x")
+                (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+                (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+            else:
+                preprocessed = roots["preprocessed"] / fp._dataset_name(request)
+                (preprocessed / params["configuration"]).mkdir(
+                    parents=True, exist_ok=True)
+            return {"status": "ok", "result": {"trained": stage == "train"}}
+
+        with mock.patch.object(fp, "_spawn_flexict_worker",
+                               side_effect=fake_worker), \
+             mock.patch("nnunet_pipeline._acquire_local_gpu",
+                        return_value=None), \
+             mock.patch("flexict_pipeline._acquire_local_gpu",
+                        return_value=None):
+            exit_code = fp.run_training(job_dir)
+        from nnunet_common import read_json
+
+        status = read_json(job_dir / "status.json", {}) or {}
+        self.assertEqual(exit_code, expect_exit, status.get("error"))
+        return workspace, status
+
+    def _final_split_ids(self, workspace):
+        """The written splits_final.json translated back to case ids."""
+        from flexict_common import workspace_paths
+
+        paths = workspace_paths(str(workspace))
+        raw = sorted(paths["raw"].glob("Dataset7[5-9][0-9]_*"))
+        self.assertEqual(len(raw), 1, "exactly one dataset expected")
+        dataset = raw[0]
+        splits = json.loads(
+            (paths["preprocessed"] / dataset.name
+             / "splits_final.json").read_text(encoding="utf-8"))
+        manifest = json.loads(
+            (dataset / "mimics_dataset_manifest.json").read_text(
+                encoding="utf-8"))
+        id_by_key = {
+            entry["nnunet_case_id"]: entry["case_id"]
+            for entry in manifest["cases"]
+        }
+        return {
+            "train": sorted(id_by_key[key] for key in splits[0]["train"]),
+            "val": sorted(id_by_key[key] for key in splits[0]["val"]),
+        }
+
+    def test_retrain_with_new_cases_keeps_old_val_out_of_train(self):
+        """New cases + re-scanned order: the previously-validated case stays
+        in val in the FINAL split file the trainer reads."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for index in range(4):
+                _make_case(dataset_root, "case{:02d}".format(index))
+            first = self._run_job(tmp, ["case00", "case01",
+                                        "case02", "case03"], dataset_root)
+            first_split = self._final_split_ids(first[0])
+            self.assertEqual(len(first_split["val"]), 1)
+            frozen = first_split["val"][0]
+            # Grow the dataset and reverse the scan order — the heuristic
+            # re-sample must not move the frozen case into train.
+            for index in range(4, 6):
+                _make_case(dataset_root, "case{:02d}".format(index))
+            second = self._run_job(
+                tmp, ["case05", "case04", "case03", "case02",
+                      "case01", "case00"], dataset_root)
+            second_split = self._final_split_ids(second[0])
+            self.assertIn(
+                frozen, second_split["val"],
+                "old validation case {} left val: {}".format(
+                    frozen, second_split))
+            self.assertNotIn(
+                frozen, second_split["train"],
+                "old validation case {} silently entered training: {}".format(
+                    frozen, second_split))
+
+    def test_frozen_case_freezes_whole_patient_group(self):
+        """F16: freezing one scan of a patient freezes the whole group — the
+        sibling landing in train would reintroduce the leak."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01", "case02", "case03"):
+                _make_case(dataset_root, name)
+            first = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            frozen = self._final_split_ids(first[0])
+            self.assertEqual(frozen["val"], ["case00"])
+            # case01 joins case00's patient group on the rebuild.
+            dataset_root = Path(tmp) / "dataset"
+            request_values = {
+                "patient_groups": {"case00": "patientA",
+                                   "case01": "patientA"},
+            }
+            second, _ = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root, overrides=request_values)
+            second_split = self._final_split_ids(second)
+            for case in ("case00", "case01"):
+                self.assertIn(case, second_split["val"])
+                self.assertNotIn(case, second_split["train"])
+
+    def test_explicit_val_selection_replaces_frozen_contract(self):
+        """A deliberate re-split (val_case_ids) is the user's chosen new
+        contract; it replaces the frozen set instead of merging with it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01", "case02", "case03"):
+                _make_case(dataset_root, name)
+            first, _ = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            first_split = self._final_split_ids(first)
+            self.assertEqual(first_split["val"], ["case00"])
+            second, _ = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root, overrides={"val_case_ids": ["case03"]})
+            second_split = self._final_split_ids(second)
+            self.assertEqual(
+                second_split["val"], ["case03"],
+                "explicit selection must win, not merge: {}".format(
+                    second_split))
+            # The previously frozen case is back in training — by the
+            # user's explicit choice, not silently.
+            self.assertIn("case00", second_split["train"])
+
+    def test_frozen_group_emptying_train_side_fails_closed(self):
+        """A frozen val that swallows every case must fail before any GPU
+        lock or preprocessing burn, with a readable Chinese error.
+
+        First run validates case00. The rebuild groups case00+case01 as one
+        patient, so the frozen set expands to {case00, case01}; the
+        heuristic picks case02 for val, and pinning the frozen pair leaves
+        train empty — the frozen-contract guard must fire (not a silent
+        empty training run)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01", "case02"):
+                _make_case(dataset_root, name)
+            first, _ = self._run_job(
+                tmp, ["case00", "case01", "case02"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            self.assertEqual(self._final_split_ids(first)["val"], ["case00"])
+            _workspace, status = self._run_job(
+                tmp, ["case00", "case01", "case02"], dataset_root,
+                overrides={"patient_groups": {
+                    "case00": "patientA", "case01": "patientA"}},
+                expect_exit=1)
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("冻结验证集约束后", status["error"])
+            self.assertIn("训练 0 例", status["error"])
+
+    def test_previous_frozen_val_translates_chinese_case_keys(self):
+        """splits store nnU-Net case keys; a Chinese case id has key != id,
+        so the previous manifest must translate keys back to ids — otherwise
+        the freeze silently matches nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("病例甲", "病例乙", "病例丙", "病例丁"):
+                _make_case(dataset_root, name)
+            first = self._run_job(tmp, ["病例甲", "病例乙", "病例丙", "病例丁"],
+                                  dataset_root)
+            first_split = self._final_split_ids(first[0])
+            self.assertEqual(len(first_split["val"]), 1)
+            frozen = first_split["val"][0]
+            self.assertTrue(frozen.startswith("病例"))
+            second = self._run_job(tmp, ["病例甲", "病例乙", "病例丙", "病例丁"],
+                                   dataset_root)
+            second_split = self._final_split_ids(second[0])
+            self.assertIn(frozen, second_split["val"])
+            self.assertNotIn(frozen, second_split["train"])
+
+
 class TestJobLifecycle(unittest.TestCase):
     """run_training with all heavyweight stages mocked (no GPU, no nnU-Net)."""
 

@@ -538,14 +538,97 @@ def _split_train_val(rows: list[dict[str, Any]],
     return _split(validation)
 
 
+def _previous_flexict_frozen_val(roots: dict[str, Path],
+                                 dataset_name: str,
+                                 case_ids: list[str]) -> list[str]:
+    """Previous fold-0 val cases for this dataset, as case ids (R07).
+
+    Mirrors the nnU-Net materializer's frozen-validation read (F16): splits
+    store nnU-Net case keys, not original case ids, so translate keys back
+    to ids through the previous raw manifest before intersecting with the
+    current rows — otherwise a Chinese/lossy-slugged case freezes nothing
+    and a previously-validated case lands in training on rebuild.
+    """
+    previous_split = roots["preprocessed"] / dataset_name / "splits_final.json"
+    if not previous_split.is_file():
+        return []
+    frozen_val: set[str] = set()
+    try:
+        previous = read_json_file(previous_split, []) or []
+        if previous and isinstance(previous[0], dict):
+            frozen_val = {
+                str(value) for value in previous[0].get("val") or []
+            }
+    except Exception:
+        return []
+    if not frozen_val:
+        return []
+    previous_manifest = (
+        roots["raw"] / dataset_name / "mimics_dataset_manifest.json")
+    if previous_manifest.is_file():
+        try:
+            manifest = read_json_file(previous_manifest, {}) or {}
+            id_by_key = {
+                str(entry.get("nnunet_case_id")): str(entry.get("case_id"))
+                for entry in manifest.get("cases") or []
+                if isinstance(entry, dict)
+            }
+            frozen_val = {id_by_key.get(value, value) for value in frozen_val}
+        except Exception:
+            return []
+    return sorted(frozen_val & set(case_ids))
+
+
 def _write_flexict_splits(rows: list[dict[str, Any]],
                           request: dict[str, Any],
                           roots: dict[str, Path],
-                          dataset_name: str) -> list[dict[str, list[str]]]:
-    """Write a single-fold splits_final.json with the FlexiCT split."""
-    train, validation = _split_train_val(rows, request)
+                          dataset_name: str,
+                          frozen_val: list[str] | None = None) -> list[dict[str, list[str]]]:
+    """Write a single-fold splits_final.json with the FlexiCT split.
+
+    R07: ``frozen_val`` carries the dataset's previous fold-0 validation
+    cases (captured BEFORE the raw materializer rewrites the split file).
+    Those cases stay in val on every rebuild, so adding cases or retraining
+    never moves a previously-validated case into training and model
+    comparisons against earlier runs stay meaningful. An explicit
+    ``val_case_ids`` selection in the request is the user's deliberate
+    re-split: it replaces the frozen contract instead of being merged
+    with it.
+    """
+    explicit_selection = [
+        str(v) for v in (request.get("val_case_ids") or []) if str(v).strip()
+    ]
+    if explicit_selection:
+        frozen_val = None
+    frozen = {str(value) for value in (frozen_val or [])}
     case_key_by_id = unique_case_keys(
         [row["case_id"] for row in rows], fallback="case")
+    if frozen:
+        # Freezing a case freezes its whole patient group (F16): half of a
+        # patient's scans in val would reintroduce the leak.
+        group_by_case = {
+            str(row["case_id"]): str(row.get("patient_group") or "")
+            for row in rows
+        }
+        for case in list(frozen):
+            group = group_by_case.get(case) or case
+            for row in rows:
+                other = str(row["case_id"])
+                if (group_by_case.get(other) or other) == group:
+                    frozen.add(other)
+        frozen &= set(str(row["case_id"]) for row in rows)
+    train, validation = _split_train_val(rows, request)
+    if frozen:
+        # The heuristic split may not have picked every frozen case; pin
+        # them into val and pull them out of train. Empty sides stay the
+        # caller's fail-closed error (UI30).
+        validation = sorted(set(validation) | frozen)
+        train = [case for case in train if case not in frozen]
+        if not train or not validation:
+            raise ValueError(
+                "冻结验证集约束后训练/验证拆分为空（训练 {0} 例 / 验证 {1} 例）。"
+                "旧验证病例及其患者组必须留在验证侧，请增加病例或调整验证"
+                "病例的选择。".format(len(train), len(validation)))
     folds = [{
         "train": [case_key_by_id[value] for value in train],
         "val": [case_key_by_id[value] for value in validation],
@@ -936,10 +1019,22 @@ def run_training(job_dir: Path) -> int:
             request, status_path, control_path, log_path)
         try:
             _assert_dataset_id_available(roots, request)
+            # R07: capture the dataset's previous validation contract BEFORE
+            # the raw materializer rewrites splits_final.json — the old flow
+            # froze the previous val inside _materialize_nnunet_raw and then
+            # let _write_flexict_splits re-sample and overwrite it, silently
+            # moving previously-validated cases into training.
+            pending_dataset_name = "Dataset{:03d}_{}".format(
+                int(request["dataset_id"]),
+                safe_identifier(request["task_id"]))
+            frozen_val = _previous_flexict_frozen_val(
+                roots, pending_dataset_name,
+                [str(row["case_id"]) for row in rows])
             dataset_dir, dataset_fingerprint = _materialize_flexict_raw(
                 rows, request, roots)
             dataset_name = dataset_dir.name
-            _write_flexict_splits(rows, request, roots, dataset_name)
+            _write_flexict_splits(rows, request, roots, dataset_name,
+                                  frozen_val=frozen_val)
             # Pair/auto preprocessing must cover every configuration that will
             # be trained; check the cache per configuration.
             pending: list[tuple[str, str]] = []
