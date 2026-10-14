@@ -99,7 +99,7 @@
     {
       "id": "R03",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "导入 worker 改写状态后，自定义目录回执再次失踪",
       "previous_ids": [
         "UI28",
@@ -129,7 +129,9 @@
         "默认目录、自定义本地/UNC、重复目录、多任务、重启、移动源目录分别测试。",
         "撤销定位失败给可复制目录和下一步，不能显示“成功”或误用另一个任务的回执。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "806fb61",
+      "fix_note": "worker _write_status 改写前从上一份状态保留固定任务上下文（output_path/source_path），全部状态转换不丢；检索侧对存量状态从 output_mcs 推导输出目录兜底；目录先去重再截取最近条目。测试：test_worker_status_rewrites_preserve_bootstrap_context（真实状态序列）、test_recent_drop_output_dirs_derives_from_output_mcs（旧状态推导+去重）。验证：定向 4/4、smoke 8/8（工件 20261014T213215_smoke.json）。"
     },
     {
       "id": "R04",
