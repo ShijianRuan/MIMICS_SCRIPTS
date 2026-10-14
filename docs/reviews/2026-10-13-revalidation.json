@@ -181,7 +181,7 @@
     {
       "id": "R05",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "折叠的远程设置摘要漏掉容器镜像与工作目录",
       "previous_ids": [
         "UI29"
@@ -214,7 +214,9 @@
         "编辑后即更新；保存、切换服务器、重开后值与摘要不矛盾。",
         "长镜像与 UNC/远程目录能读全文，不能把所有参数重新摊开挤压主操作。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "85981b0",
+      "fix_note": "_non_default_summary 补齐 runtime_image/remote_root 两项非默认检查（镜像 X/工作目录 X，全文拼接）；8 个高级控件连接变更信号，编辑时折叠计数即时刷新；主对话框 hint 既有非默认摘要列表（:889-895）展示镜像/目录全文。测试：test_remote_advanced_fold_summarizes_non_defaults 扩展（仅镜像/仅目录/两项都改/载入旧配置不回归/编辑即时刷新）；smoke 8/8 工件 20261014T220658_smoke.json。"
     },
     {
       "id": "R06",
