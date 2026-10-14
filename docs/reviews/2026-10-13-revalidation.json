@@ -496,7 +496,7 @@
     {
       "id": "R13",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "训练结束导航指向另一个标签页中默认隐藏的版本",
       "previous_ids": [
         "UI21"
@@ -523,7 +523,9 @@
         "从完成页一次导航能定位对应版本；默认过滤不造成死路。",
         "不可用版本不允许启用，可用未改善版本需明确知情选择，详情不把验证指标当当前患者准确率。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "005da90",
+      "fix_note": "完成卡新增「查看这个版本」按钮：切到「模型版本」页、自动勾选「显示失败与未改进的版本」、定位并选中新版本行（model_id 通过按钮property 从 completed status 的 model.model_id 传入）。三个终态文案修正：current_model_retained 说明未超过现有模型+版本默认隐藏及查看方式；验证集不足场景同样给出按钮路径；不再有指向本页不存在列表的误导。测试：真实 Qt 行为测试覆盖 current_model_retained 全链路（文案、按钮可见、过滤提升、切页、选中行定位），source-assert 同步；smoke 8/8 工件 20261014T230649_smoke.json。"
     },
     {
       "id": "R14",
