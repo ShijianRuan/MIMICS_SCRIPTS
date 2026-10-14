@@ -320,29 +320,49 @@ def _candidate_label_dirs(label_root: Path, case_id: str) -> list[Path]:
     return [path for path in candidates if path.is_dir()]
 
 
+def _label_name_key(value: str) -> str:
+    """Unicode-aware comparable form of a label/alias/file name (R06).
+
+    Mimics exports label files named after the original Mask names, which
+    are freely Chinese (``肝脏.nii.gz``). ``safe_identifier`` folds every
+    non-ASCII character to "_", so both ``肝脏`` and ``脾脏`` keyed to
+    "item" and each alias matched the other organ's file — labels crossed
+    organs. Mirror ``mimics_export._canonical_mask_name`` instead: keep
+    Unicode, fold case, and treat space/-/./backslash as separators, so
+    the export-side filename and this lookup agree on identity.
+    """
+    text = str(value or "").strip().lower()
+    for ch in (" ", "-", "\\", "/", "."):
+        text = text.replace(ch, "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_")
+
+
 def _find_label_files(
     label_root: Path,
     case_id: str,
     aliases: list[str],
     source_mode: str = "alternatives",
 ) -> list[Path]:
-    wanted = {safe_identifier(value).lower() for value in aliases}
+    wanted = {_label_name_key(value) for value in aliases}
+    case_key = _label_name_key(case_id)
     matches: dict[str, Path] = {}
     for directory in _candidate_label_dirs(label_root, case_id):
         for path in sorted(directory.iterdir()):
             if not _is_medical_file(path):
                 continue
-            if safe_identifier(medical_stem(path)).lower() in wanted:
+            if _label_name_key(medical_stem(path)) in wanted:
                 matches[os.path.normcase(str(path.resolve()))] = path.resolve()
     if label_root.is_dir():
         for path in sorted(label_root.iterdir()):
             if not _is_medical_file(path):
                 continue
-            stem = safe_identifier(medical_stem(path)).lower()
+            stem = _label_name_key(medical_stem(path))
             for alias in wanted:
                 if stem in {
-                    "{}_{}".format(safe_identifier(case_id).lower(), alias),
-                    "{}__{}".format(safe_identifier(case_id).lower(), alias),
+                    "{}_{}".format(case_key, alias),
+                    "{}__{}".format(case_key, alias),
                 }:
                     matches[os.path.normcase(str(path.resolve()))] = path.resolve()
     paths = sorted(matches.values(), key=lambda path: os.path.normcase(str(path)))

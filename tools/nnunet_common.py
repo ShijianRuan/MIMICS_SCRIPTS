@@ -493,6 +493,21 @@ def load_label_sets(path: str | Path) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+def _semantic_label_key(value: object) -> str:
+    """Semantic identity of a label/alias name (R06).
+
+    ``safe_identifier`` folds every non-ASCII character to "_", so "肝脏" and
+    "脾脏" both became "item" and normalize_labels rejected any two Chinese
+    labels as duplicates. The ASCII slug is a file-name concern; label/alias
+    uniqueness is a human-language concern and must use Unicode
+    normalization (NFKC) + casefold, which keeps distinct organ names
+    distinct while still folding case/whitespace variants.
+    """
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", str(value or "").strip()).casefold()
+
+
 def normalize_labels(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         raise ValueError("At least one nnU-Net label must be configured.")
@@ -530,19 +545,18 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
         unique_aliases = []
         local_aliases = set()
         for alias in aliases:
-            canonical_alias = safe_identifier(alias).lower()
+            canonical_alias = _semantic_label_key(alias)
             if canonical_alias in local_aliases:
                 continue
             owner = aliases_seen.get(canonical_alias)
             if owner is not None:
                 raise ValueError(
-                    "Mask alias '{}' is assigned to both '{}' and '{}'.".format(
-                        alias, owner, name
-                    )
+                    "Mask 别名“{0}”同时分配给了标签“{1}”和“{2}”，"
+                    "请改为其中一个标签专用的名称。".format(alias, owner, name)
                 )
             local_aliases.add(canonical_alias)
             unique_aliases.append(alias)
-        canonical_name = safe_identifier(name).lower()
+        canonical_name = _semantic_label_key(name)
         if canonical_name in names:
             raise ValueError("标签名称重复：{}".format(name))
         if label_id in ids:

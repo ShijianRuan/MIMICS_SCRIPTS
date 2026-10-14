@@ -260,13 +260,98 @@ class ContractTests(unittest.TestCase):
             )
 
     def test_alias_cannot_map_to_two_output_labels(self):
-        with self.assertRaisesRegex(ValueError, "assigned to both"):
+        # R06: same conflict, English names — error is Chinese and names
+        # both labels so the annotator can fix the offending row.
+        with self.assertRaisesRegex(ValueError, "同时分配给了标签"):
             common.normalize_labels(
                 [
                     {"name": "Left kidney", "id": 1, "aliases": ["kidney"]},
                     {"name": "Right kidney", "id": 2, "aliases": ["Kidney"]},
                 ]
             )
+
+    def test_chinese_label_names_stay_distinct(self):
+        # R06: safe_identifier folded every Chinese character to "_", so
+        # "肝脏" and "脾脏" both keyed to "item" and normalize_labels
+        # rejected any two Chinese organ labels as duplicates.
+        labels = common.normalize_labels(
+            [
+                {"name": "肝脏", "id": 1},
+                {"name": "脾脏", "id": 2},
+            ]
+        )
+        self.assertEqual(["肝脏", "脾脏"], [row["name"] for row in labels])
+        # Mixed language and alias forms must not cross-wire either.
+        labels = common.normalize_labels(
+            [
+                {"name": "肝脏", "id": 1, "aliases": ["Liver"]},
+                {"name": "脾脏", "id": 2, "aliases": ["Spleen"]},
+            ]
+        )
+        self.assertEqual(
+            [["肝脏", "Liver"], ["脾脏", "Spleen"]],
+            [row["aliases"] for row in labels],
+        )
+
+    def test_chinese_alias_conflict_is_rejected_in_chinese(self):
+        # R06: a REAL shared alias across labels must still fail — but the
+        # error must name both conflicting labels in Chinese, not the old
+        # English "assigned to both".
+        with self.assertRaisesRegex(ValueError, "同时分配给了标签“肝脏”和“脾脏”"):
+            common.normalize_labels(
+                [
+                    {"name": "肝脏", "id": 1, "aliases": ["内脏"]},
+                    {"name": "脾脏", "id": 2, "aliases": ["内脏"]},
+                ]
+            )
+
+    def test_same_label_duplicate_alias_is_deduplicated_not_rejected(self):
+        # R06: repeating an alias within ONE label is a dedup, not a conflict.
+        labels = common.normalize_labels(
+            [{"name": "肝脏", "id": 1, "aliases": ["肝脏", "肝脏", "liver"]}]
+        )
+        self.assertEqual(["肝脏", "liver"], labels[0]["aliases"])
+
+    def test_label_name_key_keeps_chinese_organ_files_distinct(self):
+        # R06: the pipeline-side label-file lookup keyed file names by the
+        # ASCII slug too — every Chinese-named mask file keyed to "item", so
+        # a 肝脏 alias matched 脾脏.nii.gz and labels crossed organs. The
+        # lookup must key by the Unicode-aware form (mirroring
+        # mimics_export._canonical_mask_name).
+        from tools import nnunet_pipeline as pipeline
+
+        key = pipeline._label_name_key
+        self.assertNotEqual(key("肝脏"), key("脾脏"))
+        self.assertEqual(key("肝脏"), key("肝脏"))
+        # Case/separator folding still applies, same as the export side.
+        self.assertEqual(key("Liver Seg"), key("liver-seg"))
+        # The combined case_alias form stays consistent.
+        alias = key("肝脏")
+        case = key("病例甲")
+        combined = "{0}_{1}".format(case, alias)
+        self.assertEqual(combined, key("病例甲_肝脏"))
+
+    def test_find_label_files_matches_chinese_organ_by_unicode_name(self):
+        # R06 end-to-end: two Chinese organ files in the case's
+        # segmentations/ folder — the 肝脏 label must match ONLY 肝脏.nii.gz,
+        # never the sibling 脾脏.nii.gz that shares the same ASCII slug.
+        import tempfile
+
+        from tools import nnunet_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seg = Path(tmp) / "caseA" / "segmentations"
+            seg.mkdir(parents=True)
+            (seg / "肝脏.nii.gz").write_bytes(b"liver")
+            (seg / "脾脏.nii.gz").write_bytes(b"spleen")
+            liver = pipeline._find_label_files(
+                Path(tmp), "caseA", ["肝脏"])
+            self.assertEqual(1, len(liver))
+            self.assertEqual("肝脏.nii.gz", liver[0].name)
+            spleen = pipeline._find_label_files(
+                Path(tmp), "caseA", ["脾脏"])
+            self.assertEqual(1, len(spleen))
+            self.assertEqual("脾脏.nii.gz", spleen[0].name)
 
     def test_2d_patch_has_two_dimensions(self):
         with self.assertRaisesRegex(ValueError, "2 个正数"):
