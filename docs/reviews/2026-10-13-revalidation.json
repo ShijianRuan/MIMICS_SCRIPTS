@@ -609,7 +609,7 @@
     {
       "id": "R17",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "撤销导入仍会删除导入后被人工修正的 Mask",
       "previous_ids": [
         "UI15",
@@ -648,7 +648,9 @@
         "真实 Mimics 中先编辑再撤销，人工内容能从明确恢复点找回；不能只看 .mcs 仍存在。",
         "删除/保存/回执写入失败和重试不扩大删除范围；没有强身份证明的旧记录不自动删对象。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "d06c24e",
+      "fix_note": "回执 v2 新增导入时内容快照(pixel_count+sha256，工程关闭前经 _capture_mask_snapshot 捕获，复用 F21 分块摘要，大体积 Mask 不冻结 Mimics，缓冲不可读降级为计数)；_delete_owned_masks 删除前比对当前内容摘要，等体积编辑可检出，手改 Mask 默认保留并指名(undo_code 9)、回执保留可重试、同批不做部分删除；活缓冲不可读按已编辑处理(fail-closed)；v1 回执(仅名字、无身份证明)整体拒绝自动删除(undo_code 8)。失败路径测试：等体积编辑、降级计数、不可读缓冲、编辑不阻塞同批重试、回执快照写入、快照与撤销摘要逐字节一致；TestImportReceiptAndUndo 32 项 + review regressions 11 项全绿，smoke 8/8（工件 20261014T120213_smoke.json）。"
     }
   ],
   "changed_issue_assessments": [
