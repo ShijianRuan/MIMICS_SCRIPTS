@@ -3704,7 +3704,11 @@ class TestCreateMcsBatch(unittest.TestCase):
                         "case_id": "case_f30",
                         "mask_names": ["Liver"],
                         "manifest_data": {"source_fingerprint": "fp"},
-                        "mask_objects": [{"name": "Liver", "guid": "g1"}],
+                        "mask_objects": [{
+                            "name": "Liver", "guid": "g1",
+                            "pixel_count": 7,
+                            "sha256": "sha256:abc",
+                        }],
                     },
                 }
             create_mcs_batch.create_mcs_from_manifest = fake_create
@@ -3723,7 +3727,11 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertTrue(os.path.isfile(payload["mcs_path"]))
         self.assertEqual("mimics_import_receipt.v2", payload["schema_version"])
         self.assertEqual(
-            [{"name": "Liver", "guid": "g1"}], payload["created_masks_v2"])
+            [{
+                "name": "Liver", "guid": "g1", "pixel_count": 7,
+                "sha256": "sha256:abc",
+            }],
+            payload["created_masks_v2"])
 
     def test_publish_failure_leaves_no_consumable_receipt(self):
         """F30 failure path: when the publish (staging rename) fails, the
@@ -12865,10 +12873,19 @@ class TestImportReceiptAndUndo(unittest.TestCase):
                     self.metadata = _FakeMetadata(
                         {spec["token"]: "1"} if spec.get("token") else {}
                     )
+                    # R17: undo compares the live content digest against
+                    # the receipt snapshot. Default spec matches the
+                    # receipt snapshot below; spec["content"] edits it.
+                    self._content = spec.get("content", b"imported-content")
                 else:
                     self.name = spec
                     self.guid = ""
                     self.metadata = _FakeMetadata({})
+                    self._content = b"imported-content"
+                self.number_of_pixels = len(self._content)
+
+            def get_voxel_buffer(self):
+                return self._content
 
             def delete(self):
                 saved["deleted"].append(self.name)
@@ -12926,7 +12943,13 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
     def _write_v2_receipt(self, out_dir, mcs_path, masks, token="tok-1",
                            case_id="s0001", mcs_bytes=b"project-bytes"):
-        """v2 receipt on disk. `masks` is a list of (name, guid)."""
+        """v2 receipt on disk. `masks` is a list of (name, guid).
+
+        The content snapshot records "imported-content" - what
+        _install_v2_undo_env's un-edited fake masks hold - so a clean
+        undo passes the R17 content check. Tests that edit a mask pass
+        spec content=b"..." and the digest diverges.
+        """
         from create_mcs_batch import write_import_receipt
 
         os.makedirs(out_dir)
@@ -12936,6 +12959,11 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             def __init__(self, name, guid):
                 self.name = name
                 self.guid = guid
+                # Same snapshot _capture_mask_snapshot would record: the
+                # undo-side digest of the live fake masks must match it.
+                self.pixel_count = len(b"imported-content")
+                self.sha256 = "sha256:" + __import__("hashlib").sha256(
+                    b"imported-content").hexdigest()
         receipt_path = write_import_receipt(
             out_dir, case_id, mcs_path,
             [name for name, _guid in masks],
@@ -12945,18 +12973,24 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         return receipt_path
 
     def test_undo_roundtrip_file_rolled_back_when_fingerprint_matches(self):
+        """F18: with an extra manual mask in the session, the import's own
+        masks are deleted and the .mcs kept - deleting the file would
+        destroy the manual work once the session is saved."""
         import import_undo_mimics
-        from create_mcs_batch import write_import_receipt, _file_fingerprint
 
         out_dir = os.path.join(self.tmp, "out")
-        os.makedirs(out_dir)
         mcs_path = os.path.join(out_dir, "s0001.mcs")
-        with open(mcs_path, "wb") as handle:
-            handle.write(b"project-bytes")
-        receipt_path = write_import_receipt(
-            out_dir, "s0001", mcs_path, ["Bone", "Liver"], {}
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone"), ("Liver", "g-liver")]
         )
-        saved = self._install_undo_env(mcs_path, ["Bone", "Liver", "Skin"])
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "Bone", "guid": "g-bone", "token": "tok-1"},
+                {"name": "Liver", "guid": "g-liver", "token": "tok-1"},
+                {"name": "Skin", "guid": "g-skin"},  # manual, no token
+            ])],
+            mcs_path, save_writes=b"project-with-manual-work",
+        )
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [out_dir]):
             code = import_undo_mimics.undo_last_import(confirm=False)
@@ -12978,15 +13012,17 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         frozen window."""
         import logging as _logging
         import import_undo_mimics
-        from create_mcs_batch import write_import_receipt
 
         out_dir = os.path.join(self.tmp, "out")
-        os.makedirs(out_dir)
         mcs_path = os.path.join(out_dir, "s0001.mcs")
-        with open(mcs_path, "wb") as handle:
-            handle.write(b"project-bytes")
-        write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
-        saved = self._install_undo_env(mcs_path, ["Bone", "Skin"])
+        self._write_v2_receipt(out_dir, mcs_path, [("Bone", "g-bone")])
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "Bone", "guid": "g-bone", "token": "tok-1"},
+                {"name": "Skin", "guid": "g-skin"},  # manual, no token
+            ])],
+            mcs_path, save_writes=b"project-with-manual-work",
+        )
 
         notices = []
         log_patch = mock.patch.object(
@@ -12999,15 +13035,15 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         # Snapshot the notice count at deletion time: the ordering claim is
         # "notice precedes deletion", which is only observable mid-flight.
         notice_count_at_deletion = []
-        real_delete = import_undo_mimics._delete_masks
+        real_delete = import_undo_mimics._delete_owned_masks
 
-        def _delete_and_record(mask_names):
+        def _delete_and_record(receipt):
             notice_count_at_deletion.append(len(notices))
-            return real_delete(mask_names)
+            return real_delete(receipt)
 
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [out_dir]), \
-                mock.patch.object(import_undo_mimics, "_delete_masks",
+                mock.patch.object(import_undo_mimics, "_delete_owned_masks",
                                   side_effect=_delete_and_record):
             code = import_undo_mimics.undo_last_import(confirm=False)
         self.assertEqual(0, code)
@@ -13024,18 +13060,18 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
     def test_undo_keeps_file_when_fingerprint_differs(self):
         import import_undo_mimics
-        from create_mcs_batch import write_import_receipt
 
         out_dir = os.path.join(self.tmp, "out")
-        os.makedirs(out_dir)
         mcs_path = os.path.join(out_dir, "s0001.mcs")
-        with open(mcs_path, "wb") as handle:
-            handle.write(b"project-bytes")
-        write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
-        # The project changed after the import (annotations, extra masks).
-        with open(mcs_path, "ab") as handle:
-            handle.write(b"-changed")
-        saved = self._install_undo_env(mcs_path, ["Bone"])
+        # Disk changed after the import (saved annotations, extra masks):
+        # mcs_bytes differ from what save_project will write.
+        self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone")], mcs_bytes=b"changed"
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [{"name": "Bone", "guid": "g-bone", "token": "tok-1"}])],
+            mcs_path, save_writes=b"project-bytes",
+        )
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [out_dir]):
             code = import_undo_mimics.undo_last_import(confirm=False)
@@ -13048,20 +13084,21 @@ class TestImportReceiptAndUndo(unittest.TestCase):
 
     def test_undo_deletion_failure_leaves_receipt(self):
         import import_undo_mimics
-        from create_mcs_batch import write_import_receipt
 
         out_dir = os.path.join(self.tmp, "out")
-        os.makedirs(out_dir)
         mcs_path = os.path.join(out_dir, "s0001.mcs")
-        with open(mcs_path, "wb") as handle:
-            handle.write(b"project-bytes")
-        receipt_path = write_import_receipt(out_dir, "s0001", mcs_path, ["Bone"], {})
-        saved = self._install_undo_env(mcs_path, ["Bone"])
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("Bone", "g-bone")]
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [{"name": "Bone", "guid": "g-bone", "token": "tok-1"}])],
+            mcs_path, save_writes=b"project-bytes",
+        )
 
         def boom(*_a, **_kw):
             raise RuntimeError("transaction failed")
 
-        with mock.patch.object(import_undo_mimics, "_delete_masks", side_effect=boom), \
+        with mock.patch.object(import_undo_mimics, "_delete_owned_masks", side_effect=boom), \
                 mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                   lambda: [out_dir]):
             code = import_undo_mimics.undo_last_import(confirm=False)
@@ -13270,9 +13307,12 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertIn("删除失败", summary_texts)
         self.assertNotIn("撤销完成", summary_texts)
 
-    def test_undo_v1_ambiguous_name_deletes_nothing(self):
-        """F19: a v1 receipt (names only) whose name now matches masks on
-        two images must not delete either - ownership cannot be proven."""
+    def test_undo_v1_receipt_refused_without_deleting(self):
+        """R17: a v1 receipt (names only) has no strong ownership proof and
+        no content snapshot - undo refuses it outright instead of running
+        the name-based delete. The ambiguous-name case (F19) is subsumed:
+        EVERY v1 receipt now stops before deleting, not just multi-holder
+        names."""
         import import_undo_mimics
         from create_mcs_batch import write_import_receipt
 
@@ -13288,13 +13328,14 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [out_dir]):
             code = import_undo_mimics.undo_last_import(confirm=False)
-        self.assertEqual(7, code)
+        self.assertEqual(8, code)
         self.assertEqual([], saved["deleted"], "nothing may be deleted")
         self.assertTrue(os.path.isfile(receipt_path),
                         "receipt must survive for manual resolution")
         self.assertTrue(os.path.isfile(mcs_path))
         summary_texts = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
-        self.assertIn("对应多个掩膜", summary_texts)
+        self.assertIn("无法证明", summary_texts)
+        self.assertIn("手动删除", summary_texts)
 
     def test_undo_summary_shows_reason_not_count(self):
         """F31: the file-kept summary renders the divergence reason in the
@@ -13321,11 +13362,11 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         # of the reason text.
         self.assertNotIn("（1）", summary_text)
 
-    def test_undo_v1_receipt_with_extra_mask_keeps_file(self):
-        """W02 旧receipt保守处理: a v1 receipt (names only) with an extra
-        manual mask in the session must not trigger the delete-file
-        rollback - v1 has no guid to prove the extra mask is manual, so
-        the conservative answer is to keep the file."""
+    def test_undo_v1_receipt_refused_single_name_too(self):
+        """R17: the v1 refusal covers the single-holder case as well - a
+        unique name is still not ownership proof (the imported mask may
+        have been deleted and a hand-made same-name mask created), and no
+        content snapshot exists to detect hand edits."""
         import import_undo_mimics
         from create_mcs_batch import write_import_receipt
 
@@ -13334,20 +13375,18 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         mcs_path = os.path.join(out_dir, "s0001.mcs")
         with open(mcs_path, "wb") as handle:
             handle.write(b"project-bytes")
-        # v1 receipt: no mask_objects -> no created_masks_v2.
         receipt_path = write_import_receipt(
             out_dir, "s0001", mcs_path, ["Bone"], {}
         )
         saved = self._install_undo_env(mcs_path, ["Bone", "Kidney"])
-        # The v1 env's save_project does not write to disk, so the file
-        # still matches the receipt fingerprint after save.
         with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
                                lambda: [out_dir]):
             code = import_undo_mimics.undo_last_import(confirm=False)
-        self.assertEqual(0, code)
-        self.assertEqual(sorted(["Bone"]), sorted(saved["deleted"]))
-        # Extra unaccounted mask in the session -> file kept (old code
-        # deleted it; the manual Kidney would have been destroyed).
+        self.assertEqual(8, code)
+        # Nothing is deleted on a v1 refusal - not even the single-name
+        # match the old code deleted blindly.
+        self.assertEqual([], saved["deleted"])
+        self.assertTrue(os.path.isfile(receipt_path))
         self.assertTrue(os.path.isfile(mcs_path))
 
     def test_undo_reports_when_no_receipt_exists(self):
@@ -13546,6 +13585,229 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         with open(drop, "r") as handle:
             source = handle.read()
         self.assertIn("import_drop_mimics", source)
+
+    def test_undo_r17_equal_volume_edit_keeps_mask_and_receipt(self):
+        """R17: the imported mask's content changed after import (same
+        pixel count - an equal-volume voxel edit), but guid/name/token all
+        still match. The old code deleted it as "owned"; now the content
+        digest detects the hand edit, the mask is kept, the receipt is
+        kept for a later retry, and the message names the mask."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("liver", "g-liver")]
+        )
+        # The annotator moved a boundary voxel: same count (16), different
+        # bytes. Ownership checks (guid/token/name) all still pass.
+        edited_bytes = b"E" * 16
+        self.assertEqual(len(b"imported-content"), len(edited_bytes))
+        saved = self._install_v2_undo_env(
+            [("im1", [{
+                "name": "liver", "guid": "g-liver", "token": "tok-1",
+                "content": edited_bytes,
+                "number_of_pixels": len(edited_bytes),
+            }])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(9, code)
+        self.assertEqual([], saved["deleted"], "the edited mask must survive")
+        self.assertTrue(os.path.isfile(receipt_path),
+                        "receipt must survive for a later retry")
+        self.assertTrue(os.path.isfile(mcs_path))
+        summary_texts = " ".join(str(a[0]) for a, _kw in saved["message_boxes"])
+        self.assertIn("修改过", summary_texts)
+        self.assertIn("liver", summary_texts)
+
+    def test_undo_r17_pixel_count_edit_without_sha_keeps_mask(self):
+        """R17 fallback: a receipt entry without a sha snapshot (buffer
+        unreadable at import time) degrades to the pixel-count check -
+        here the annotator added voxels, the count differs, the mask is
+        kept. A same-count edit under this fallback stays undetected (the
+        known, documented limit of the degraded path)."""
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        os.makedirs(out_dir)
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+
+        class _Mask:
+            def __init__(self, name, guid, pixel_count):
+                self.name = name
+                self.guid = guid
+                self.pixel_count = pixel_count
+                self.sha256 = ""  # import-time buffer was unreadable
+
+        # Import-time: 4 pixels. Now: 6 (annotator added voxels).
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["liver"],
+            {"source_fingerprint": "sf-1234567890abcdef"},
+            mask_objects=[_Mask("liver", "g-liver", 4)],
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [{
+                "name": "liver", "guid": "g-liver", "token": "tok-1",
+                "content": b"123456", "number_of_pixels": 6,
+            }])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(9, code)
+        self.assertEqual([], saved["deleted"])
+
+    def test_undo_r17_unreadable_live_digest_fails_closed(self):
+        """R17 fail-closed: the receipt records a sha, but the live mask's
+        buffer cannot be read (host glitch). The comparison cannot run, so
+        the mask is treated as edited and kept - never deleted on the
+        strength of an unverified assumption."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("liver", "g-liver")]
+        )
+
+        class _BrokenMask:
+            def __init__(self):
+                self.name = "liver"
+                self.guid = "g-liver"
+                self.number_of_pixels = 16
+
+            def get_voxel_buffer(self):
+                raise RuntimeError("host buffer unavailable")
+
+            def delete(self):
+                raise AssertionError("must not be reached")
+
+        class _Masks(list):
+            def delete(self, mask):
+                mask.delete()
+                self.remove(mask)
+
+        import create_mcs_batch
+
+        class _FakeMetadataItem:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+        class _FakeMetadata:
+            def find(self, name):
+                return None
+
+        broken = _BrokenMask()
+        broken.metadata = _FakeMetadata()
+        with mock.patch.object(import_undo_mimics.mimics.data, "masks",
+                               _Masks([broken])), \
+                mock.patch.object(import_undo_mimics.mimics.data, "images", [
+                    _FakeModule()]), \
+                mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                                  lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(9, code)
+        self.assertTrue(os.path.isfile(receipt_path))
+
+    def test_undo_r17_edited_mask_does_not_block_clean_siblings(self):
+        """R17 blast radius: with two imported masks where one is edited
+        and one is clean, nothing is deleted in that run (no partial
+        delete that would consume the receipt while leaving an edited
+        mask ambiguous for the retry)."""
+        import import_undo_mimics
+
+        out_dir = os.path.join(self.tmp, "out")
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        receipt_path = self._write_v2_receipt(
+            out_dir, mcs_path, [("liver", "g-liver"), ("spleen", "g-spleen")]
+        )
+        saved = self._install_v2_undo_env(
+            [("im1", [
+                {"name": "liver", "guid": "g-liver", "token": "tok-1",
+                 "content": b"E" * 16, "number_of_pixels": 16},
+                {"name": "spleen", "guid": "g-spleen", "token": "tok-1"},
+            ])],
+            mcs_path, save_writes=b"project-bytes",
+        )
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=False)
+        self.assertEqual(9, code)
+        # Neither mask deleted: the receipt stays consistent for a retry
+        # after the user resolves the edited one.
+        self.assertEqual([], saved["deleted"])
+        self.assertTrue(os.path.isfile(receipt_path))
+
+    def test_receipt_records_content_snapshot(self):
+        """R17 import side: write_import_receipt stores the pixel_count
+        and sha256 snapshot on every v2 entry, so undo can compare
+        content, not just ownership. This is the failure-path contract:
+        without the snapshot every future edit is undetectable."""
+        import hashlib
+        import import_undo_mimics  # noqa: F401 - ensures module pair loads
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "snap_out")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+
+        class _Mask:
+            def __init__(self, name, guid):
+                self.name = name
+                self.guid = guid
+                self.pixel_count = 5
+                self.sha256 = "sha256:" + hashlib.sha256(b"voxels").hexdigest()
+
+        receipt_path = write_import_receipt(
+            out_dir, "s0001", mcs_path, ["liver"],
+            {"source_fingerprint": "sf-1234567890abcdef"},
+            mask_objects=[_Mask("liver", "g-liver")],
+        )
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(
+            [{
+                "name": "liver", "guid": "g-liver", "pixel_count": 5,
+                "sha256": "sha256:" + hashlib.sha256(b"voxels").hexdigest(),
+            }],
+            payload["created_masks_v2"],
+        )
+
+    def test_capture_mask_snapshot_matches_live_digest(self):
+        """R17: the snapshot captured at import time and the digest the
+        undo path computes must agree byte-for-byte on the same content -
+        they run the same chunked digest over the same byte view, so an
+        unchanged mask can never be falsely flagged as edited."""
+        import hashlib
+        import import_undo_mimics as undo_mod
+        from create_mcs_batch import _capture_mask_snapshot
+
+        class _LiveMask:
+            name = "liver"
+            guid = "g-liver"
+            number_of_pixels = 3
+
+            def get_voxel_buffer(self):
+                return b"abc"
+
+        snapshot = _capture_mask_snapshot(_LiveMask())
+        expected = "sha256:" + hashlib.sha256(b"abc").hexdigest()
+        self.assertEqual("liver", snapshot.name)
+        self.assertEqual("g-liver", snapshot.guid)
+        self.assertEqual(3, snapshot.pixel_count)
+        self.assertEqual(expected, snapshot.sha256)
+        # The undo-side digest of the same live content agrees.
+        self.assertEqual(expected, undo_mod._mask_content_digest(_LiveMask()))
 
 
 # ============================================================================

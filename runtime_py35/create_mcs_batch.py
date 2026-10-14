@@ -187,17 +187,46 @@ def _stamp_mask_provenance(mask, token):
 
 
 class _MaskIdentity(object):
-    """Name+guid pair carried from create_mcs_from_manifest to the receipt.
+    """Name/guid/content-snapshot carried from create_mcs_from_manifest.
 
-    The receipt writer only reads .name/.guid from mask objects; by the time
+    The receipt writer reads .name/.guid/.pixel_count/.sha256; by the time
     the queue loop writes the receipt (after publish, F30), the live Mimics
     objects are gone with the closed project, so the identity travels as
-    plain data instead.
+    plain data instead. The content snapshot (R17) is what lets undo detect
+    a hand-edited imported mask before deleting it - ownership alone
+    (guid/token) cannot see an equal-volume voxel edit.
     """
 
-    def __init__(self, name, guid):
+    def __init__(self, name, guid, pixel_count=0, sha256=""):
         self.name = name
         self.guid = guid
+        self.pixel_count = pixel_count
+        self.sha256 = sha256
+
+
+def _capture_mask_snapshot(mask):
+    """R17: import-time content snapshot of a live mask, as a _MaskIdentity.
+
+    Must run BEFORE the project is closed - the live object's voxel buffer
+    is the only content source. Delegates the digest to the F21 chunked
+    implementation (buffer_byte_view + stream_buffer) so a large CT mask
+    cannot freeze Mimics; an unreadable buffer yields sha256 "" and undo
+    degrades to the pixel-count check instead of failing the import.
+    """
+    pixel_count = int(getattr(mask, "number_of_pixels", 0) or 0)
+    sha256 = ""
+    try:
+        view = mask.get_voxel_buffer()
+        raw = runtime_common.buffer_byte_view(view)
+        sha256 = runtime_common.stream_buffer(raw, compute_sha=True)
+    except Exception:
+        sha256 = ""
+    return _MaskIdentity(
+        str(getattr(mask, "name", "") or ""),
+        str(getattr(mask, "guid", "") or ""),
+        pixel_count,
+        sha256,
+    )
 
 
 def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DAYS):
@@ -236,6 +265,14 @@ def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_dat
     import mask is still found; the guid is also what lets undo detect an
     in-memory session that holds work beyond the import before it agrees
     to delete the .mcs file.
+
+    R17: each v2 entry also carries the import-time content snapshot
+    (pixel_count + sha256) captured while the masks were still live. Undo
+    compares it against the current mask content before deleting, so an
+    equal-volume hand edit (move a boundary voxel) is detected even though
+    guid/name/count all still match. The schema stays v2: older undo
+    builds ignore the extra keys, and the snapshot is treated as absent
+    (ownership-only proof) when missing.
     """
     prune_import_receipts(output_dir)
     receipt_path = os.path.join(
@@ -264,6 +301,8 @@ def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_dat
             {
                 "name": str(getattr(mask, "name", "") or name),
                 "guid": str(getattr(mask, "guid", "") or ""),
+                "pixel_count": int(getattr(mask, "pixel_count", 0) or 0),
+                "sha256": str(getattr(mask, "sha256", "") or ""),
             }
             for mask, name in zip(mask_objects, mask_names)
         ]
@@ -1131,10 +1170,7 @@ def create_mcs_from_manifest(work_dir, output_mcs):
         "mask_names": [mr["name"] for mr in mask_results],
         "manifest_data": dict(result),
         "mask_objects": [
-            {
-                "name": str(getattr(mask, "name", "") or ""),
-                "guid": str(getattr(mask, "guid", "") or ""),
-            }
+            _capture_mask_snapshot(mask)
             for mask in created_mask_objects
         ],
     }
@@ -1464,6 +1500,8 @@ def main(output_dir=None, runtime_dir=None):
                                     _MaskIdentity(
                                         item.get("name", ""),
                                         item.get("guid", ""),
+                                        int(item.get("pixel_count", 0) or 0),
+                                        str(item.get("sha256", "") or ""),
                                     )
                                     for item in receipt_data.get("mask_objects") or []
                                 ],

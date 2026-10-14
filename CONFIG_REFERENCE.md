@@ -133,13 +133,20 @@ path, and content fingerprints of the source image and of the saved `.mcs`.
 Receipts are the basis of **Data > Undo Last Import**
 (`01_Data/05_Undo_Last_Import.py`):
 
-- masks listed in the receipt are deleted in one transaction;
+- masks listed in the receipt are deleted in one transaction, and only
+  when the receipt can prove it created them (guid / provenance token)
+  and their content still matches the import-time snapshot (an
+  equal-volume hand edit changes the content digest while guid, name and
+  pixel count all stay identical — such masks are kept and reported);
 - the `.mcs` file itself is deleted only when its fingerprint still matches
   the receipt (a true rollback); if the project changed since the import
   (annotations, extra masks), the file is kept and only the masks are
   removed;
 - the receipt is consumed on success, so a second run cannot repeat the
-  undo.
+  undo;
+- receipts from the old v1 schema (names only, no ownership proof or
+  content snapshot) are refused: undo reports the mask names and the
+  user deletes them by hand.
 
 Receipt writing never fails an import: if the receipt cannot be written, a
 warning is logged and the import still succeeds.

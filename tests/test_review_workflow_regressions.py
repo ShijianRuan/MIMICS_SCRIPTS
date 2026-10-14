@@ -53,8 +53,9 @@ class TestDocumentedUndo(unittest.TestCase):
         self.assertEqual([],ambiguous)
     def test_delete_uses_container_api_without_mask_delete_method(self):
         with self.environment():
-            deleted, ambiguous = undo._delete_owned_masks(self.payload)
+            deleted, ambiguous, edited = undo._delete_owned_masks(self.payload)
         self.assertEqual(['liver'],deleted)
+        self.assertEqual([],edited)
         self.assertEqual([],self.masks)
     def test_confirm_uses_answered_question_not_message_return(self):
         with self.environment(), mock.patch.object(undo.mimics.dialogs,'message_box',return_value=None), mock.patch.object(undo.mimics.dialogs,'question_box',return_value='撤销') as question:
