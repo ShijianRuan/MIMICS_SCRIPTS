@@ -5874,13 +5874,18 @@ class TestNNInteractiveTaskDiagnostics(unittest.TestCase):
         self.assertIn("未验证", source)
 
     def test_training_completion_copy_names_where_the_model_is_used(self):
-        # UI21: after training finishes the annotator must be told where to
-        # use the model next, not left to guess menus or directories.
+        # UI21/R13: after training finishes the annotator must be told where
+        # to use the model next, and the directions must match the real UI —
+        # the version list lives on the「模型版本」tab with a default filter
+        # that hides not_improved rows, so the copy names that tab and its
+        # toggle, plus the one-click navigation button.
         import nninteractive_task_model_center as model_center
 
         source = inspect.getsource(model_center.ModelCenter)
         self.assertIn("使用自定义模型标注", source)
-        self.assertIn("模型列表中", source)
+        self.assertIn("模型版本", source)
+        self.assertIn("显示失败与未改进的版本", source)
+        self.assertIn("查看这个版本", source)
 
     def test_diagnose_job_cli_subcommand_exists(self):
         import nninteractive_finetune_pipeline as pipeline

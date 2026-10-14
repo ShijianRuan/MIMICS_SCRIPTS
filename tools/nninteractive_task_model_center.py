@@ -728,6 +728,16 @@ class ModelCenter:
         self.progress_detail = QtWidgets.QLabel("请在“训练设置”页开始训练。")
         self.progress_detail.setObjectName("hint")
         status_layout.addWidget(self.progress_detail)
+        # R13/UI21: one-click navigation from the completion card to the
+        # version it just produced — the model list lives on another tab and
+        # hides not_improved rows by default, so text-only directions
+        # dead-ended at an empty table.
+        self.view_completed_model_button = QtWidgets.QPushButton("查看这个版本")
+        self.view_completed_model_button.clicked.connect(
+            self.show_completed_model
+        )
+        self.view_completed_model_button.setVisible(False)
+        status_layout.addWidget(self.view_completed_model_button)
         self.diagnosis_title = QtWidgets.QLabel("失败诊断")
         self.diagnosis_title.setObjectName("section")
         self.diagnosis_title.setVisible(False)
@@ -1937,8 +1947,10 @@ class ModelCenter:
         elif state == "completed":
             outcome = str(status.get("selection_outcome") or "")
             quality = status.get("quality") or {}
-            # UI21: the completion copy names where the model is used next,
-            # so the annotator does not guess directories after training.
+            # UI21/R13: the completion copy names where the model is used
+            # next AND tells the truth about the「模型版本」tab — its default
+            # filter hides not_improved rows, so "see the model list" without
+            # a navigation button dead-ended at an empty table.
             if outcome == "new_model_selected":
                 detail = (
                     "验证通过。新模型已用于此任务（AUC {:+.1f}%）。"
@@ -1946,13 +1958,16 @@ class ModelCenter:
                 ).format(float(quality.get("delta_auc") or 0.0) * 100.0)
             elif outcome == "current_model_retained":
                 detail = (
-                    "训练完成，但因未通过质量检查，当前标注模型保持不变。"
-                    "新版本保留在本页的模型列表中，可手动启用。"
+                    "训练完成，但验证比对显示新版本未超过当前标注模型，"
+                    "当前模型保持不变。新版本可用但默认隐藏：点击下方"
+                    "「查看这个版本」定位它，或到「模型版本」页勾选"
+                    "「显示失败与未改进的版本」。"
                 )
             else:
                 detail = (
-                    "训练完成。因未提供足够的验证集，此版本已保存但未自动启用。"
-                    "需要时在本页的模型列表中手动启用。"
+                    "训练完成。因未提供足够的验证集，此版本已保存但未自动"
+                    "启用。点击下方「查看这个版本」定位它，确认无误后可在"
+                    "「模型版本」页手动启用。"
                 )
         elif state == "paused":
             detail = "训练已暂停，GPU 显存已释放。"
@@ -1973,6 +1988,20 @@ class ModelCenter:
                     archive_reused, archive_total
                 )
         self.progress_detail.setText(detail)
+        # R13: the button exists whenever the completed job registered a
+        # model — new_model_selected, current_model_retained, and the
+        # unverified outcome all leave a findable version behind.
+        completed_model_id = ""
+        if state == "completed":
+            completed_model_id = str(
+                (status.get("model") or {}).get("model_id") or ""
+            )
+        self.view_completed_model_button.setVisible(
+            bool(completed_model_id)
+        )
+        self.view_completed_model_button.setProperty(
+            "model_id", completed_model_id
+        )
         self._refresh_diagnosis(status, state)
         value = int(status.get("progress_percent") or 0)
         if state == "completed":
@@ -2574,6 +2603,30 @@ class ModelCenter:
             ],
             "模型导出",
         )
+
+    def show_completed_model(self):
+        # R13: navigate from the completion card to the version it produced.
+        # The「模型版本」table hides failed/not_improved rows by default, so
+        # the filter is lifted first — otherwise the target row would not be
+        # in the table to select.
+        model_id = str(
+            self.view_completed_model_button.property("model_id") or ""
+        )
+        if not model_id:
+            return
+        if not self.show_failed.isChecked():
+            self.show_failed.setChecked(True)  # triggers refresh_models
+        else:
+            self.refresh_models()
+        self.tabs.setCurrentWidget(self.models_tab)  # also refreshes
+        for row_index in range(self.model_table.rowCount()):
+            item = self.model_table.item(row_index, 1)
+            if item is not None and item.text() == model_id:
+                self.model_table.selectRow(row_index)
+                self.model_table.scrollToItem(
+                    item, self.QtWidgets.QAbstractItemView.PositionAtCenter
+                )
+                return
 
     def use_model(self, model_id):
         registry = load_registry(self.workspace)

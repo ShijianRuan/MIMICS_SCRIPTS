@@ -6,6 +6,7 @@ Windows font/DPI and native Mimics dialogs still require workstation acceptance.
 import ast
 import contextlib
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -413,6 +414,49 @@ class TestUiWorkflow(unittest.TestCase):
         APP.processEvents()
         self.assertEqual(button.visibleRegion().boundingRect().height(), button.height())
         self.assertGreaterEqual(w.model_table.height(), 170)
+
+    def test_training_completion_navigates_to_its_model_version(self):
+        # R13/UI21: a completed run's model lives on the「模型版本」tab, whose
+        # default filter hides not_improved rows — "see the model list" copy
+        # alone dead-ended at an empty table. One click must switch tabs,
+        # lift the filter, and select the finished version's row.
+        import nninteractive_task_model_center as ui
+        with mock.patch.object(ui, 'find_environment_python', return_value=sys.executable):
+            w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
+
+        model = dict(model_id='model_20261014T220000_ab12cd34',
+                     state='not_improved', strategy='baseline',
+                     created_at_epoch=1, train_case_count=2,
+                     validation_case_count=1)
+        status = dict(status='completed', phase='completed',
+                      selection_outcome='current_model_retained',
+                      quality={'delta_auc': -0.01},
+                      model=dict(model_id=model['model_id']))
+        w.current_job_dir = w.workspace / 'jobs' / 'job_001'
+        w.current_job_dir.mkdir(parents=True)
+        status['task_id'] = 'task'
+        status['updated_at_epoch'] = 2
+        (w.current_job_dir / 'status.json').write_text(
+            json.dumps(status), encoding='utf-8')
+        with mock.patch.object(ui, 'find_task', return_value={}), \
+             mock.patch.object(ui, 'selected_model', return_value=None), \
+             mock.patch.object(ui, 'model_rows', return_value=[model]), \
+             mock.patch.object(ui, 'model_is_usable', return_value=True):
+            w.tabs.setCurrentWidget(w.progress_tab)
+            w.refresh_status()
+            # The completion card tells the truth about the default-hidden
+            # list and offers the one-click way out.
+            self.assertIn('未超过当前标注模型', w.progress_detail.text())
+            self.assertIn('显示失败与未改进的版本', w.progress_detail.text())
+            self.assertTrue(w.view_completed_model_button.isVisible())
+            self.assertFalse(w.show_failed.isChecked())
+            w.view_completed_model_button.click()
+            self.assertTrue(w.show_failed.isChecked())
+            self.assertEqual(w.tabs.currentWidget(), w.models_tab)
+            self.assertEqual(1, w.model_table.rowCount())
+            self.assertEqual(
+                model['model_id'],
+                w.model_table.item(w.model_table.currentRow(), 1).text())
 
     def _drop_check(self, kind, chosen):
         import import_drop_window as ui
