@@ -418,7 +418,7 @@
     {
       "id": "R11",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "nnInteractive 显示的写入方式可能与当前会话实际方式相反",
       "previous_ids": [
         "UI18"
@@ -447,7 +447,9 @@
         "跨病例/工程、第二轮提示、撤销/重开后的记忆边界明确。",
         "真实 Mimics 手改后不会因模式显示或切换而绕过保护；实际新增/复用的 Mask 与文案一致。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "6feada1",
+      "fix_note": "新增 _effective_write_mode(state) 单一解析器：会话自身具体模式优先于全局_SESSION_WRITE_MODE，仅 choose_on_first_result 查询记忆、无记忆返回 ask_once；_async_prompt_menu 文案改用同一解析器。测试覆盖全局副本+当前原位（原 bug 场景）、全局原位+当前副本、有/无记忆 choose、new_empty，并断言每种模式文案与应用一致；test_interactive_algorithms 23 过、smoke 8/8。"
     },
     {
       "id": "R12",
