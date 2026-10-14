@@ -82,74 +82,82 @@ class ContractTests(unittest.TestCase):
 
     def test_directory_signature_tracks_each_file_timestamp(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The cache is disabled so a fresh directory scan runs even
-            # though a previous call cached this exact directory state.
-            with mock.patch.dict(
-                os.environ, {"MIMICS_PATH_SIGNATURE_CACHE_DIR": "off"}
-            ):
-                root = Path(temporary) / "series"
-                root.mkdir()
-                first = root / "slice_001.dcm"
-                second = root / "slice_002.dcm"
-                first.write_bytes(b"aa")
-                second.write_bytes(b"bb")
-                os.utime(first, (100, 100))
-                os.utime(second, (200, 200))
-                before = common.path_signature(root)
-                os.utime(first, (150, 150))
-                after = common.path_signature(root)
-                self.assertEqual(before["size"], after["size"])
-                self.assertEqual(before["mtime_ns"], after["mtime_ns"])
-                self.assertNotEqual(
-                    before["manifest_sha256"], after["manifest_sha256"]
-                )
-
-    def test_directory_signature_cache_hit_and_invalidation(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            cache_dir = Path(temporary) / "sigcache"
             root = Path(temporary) / "series"
             root.mkdir()
             first = root / "slice_001.dcm"
+            second = root / "slice_002.dcm"
             first.write_bytes(b"aa")
+            second.write_bytes(b"bb")
             os.utime(first, (100, 100))
-            with mock.patch.dict(
-                os.environ, {"MIMICS_PATH_SIGNATURE_CACHE_DIR": str(cache_dir)}
-            ):
-                before = common.path_signature(root)
-                self.assertTrue(list(cache_dir.glob("*.json")))
-                # Changing a file's timestamp without touching the directory
-                # mtime would change a fresh scan's manifest; an identical
-                # result proves the cached signature was reused.
-                os.utime(first, (150, 150))
-                cached = common.path_signature(root)
-                self.assertEqual(before, cached)
-                # Adding a file changes the directory mtime and must
-                # invalidate the cached entry immediately.
-                (root / "slice_002.dcm").write_bytes(b"bb")
-                grown = common.path_signature(root)
-                self.assertEqual(grown["files"], 2)
-                self.assertNotEqual(grown["manifest_sha256"], before["manifest_sha256"])
-                # An expired entry is rescanned even when nothing changed.
-                for entry in cache_dir.glob("*.json"):
-                    payload = json.loads(entry.read_text(encoding="utf-8"))
-                    payload["verified_at_epoch"] = 0
-                    entry.write_text(json.dumps(payload), encoding="utf-8")
-                revalidated = common.path_signature(root)
-                self.assertEqual(revalidated, grown)
+            os.utime(second, (200, 200))
+            before = common.path_signature(root)
+            os.utime(first, (150, 150))
+            after = common.path_signature(root)
+            self.assertEqual(before["size"], after["size"])
+            self.assertEqual(before["mtime_ns"], after["mtime_ns"])
+            self.assertNotEqual(
+                before["manifest_sha256"], after["manifest_sha256"]
+            )
 
-    def test_directory_signature_cache_off_switch(self):
+    def test_directory_signature_reflects_in_place_child_mutation(self):
+        """R14: a repaired/re-synced DICOM slice written in place does not
+        change the parent directory's mtime. The old cross-process manifest
+        cache keyed on that mtime, so the stale signature kept serving for
+        up to 7 days and prepared caches reused conversions of the old
+        source. Every call must re-scan and pick the change up immediately."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "series"
+            root.mkdir()
+            child = root / "slice_001.dcm"
+            child.write_bytes(b"old image bytes!!")
+            before = common.path_signature(root)
+            dir_mtime_before = root.stat().st_mtime_ns
+
+            # In-place update, same size: repair jobs and sync tools do
+            # exactly this, and the directory mtime never changes.
+            child.write_bytes(b"NEW image bytes!!")
+            self.assertEqual(len(b"old image bytes!!"), len(b"NEW image bytes!!"))
+            self.assertEqual(root.stat().st_mtime_ns, dir_mtime_before)
+            after = common.path_signature(root)
+            self.assertNotEqual(before, after)
+            self.assertNotEqual(
+                before["manifest_sha256"], after["manifest_sha256"]
+            )
+
+            # In-place update with a different size must invalidate too.
+            child.write_bytes(b"changed image bytes, different size")
+            third = common.path_signature(root)
+            self.assertNotEqual(
+                after["manifest_sha256"], third["manifest_sha256"]
+            )
+            self.assertNotEqual(after["size"], third["size"])
+
+            # Nested directory mutation is picked up through rglob.
+            nested = root / "extra" / "deeper"
+            nested.mkdir(parents=True)
+            (nested / "slice_002.dcm").write_bytes(b"bb")
+            fourth = common.path_signature(root)
+            self.assertEqual(fourth["files"], third["files"] + 1)
+
+    def test_directory_signature_no_cross_process_cache(self):
+        """R14: the persistent signature cache is gone; signing the same
+        directory twice (two calls, e.g. two pipeline runs in one process)
+        must reflect the current on-disk state each time, and no cache
+        directory may be created."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "series"
             root.mkdir()
             (root / "slice_001.dcm").write_bytes(b"aa")
-            with mock.patch.dict(
-                os.environ, {"MIMICS_PATH_SIGNATURE_CACHE_DIR": "off"}
-            ):
-                first = common.path_signature(root)
-                second = common.path_signature(root)
-                self.assertEqual(first, second)
+            first = common.path_signature(root)
+            second = common.path_signature(root)
+            self.assertEqual(first, second)
+            # A mutation between two calls in the same process is visible.
+            (root / "slice_001.dcm").write_bytes(b"bb")
+            third = common.path_signature(root)
+            self.assertNotEqual(first["manifest_sha256"], third["manifest_sha256"])
 
-
+        # Files keep their own identity path: same size and mtime but a
+        # replaced inode still yields a different signature.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "image.nii.gz"
