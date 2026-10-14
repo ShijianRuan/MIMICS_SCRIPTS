@@ -552,7 +552,7 @@
     {
       "id": "R15",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "主动学习只核对体素形状，没有核对两个预测的物理网格",
       "previous_ids": [
         "F01",
@@ -586,7 +586,9 @@
         "正常同网格模型正常计算；失败病例列为失败/跳过原因，不能伪装为已复核。",
         "真实 Mimics 辅助带位置与输入一致，查看不自动标注，重复计算不污染人工 Mask。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "3bca099",
+      "fix_note": "load_masks 逐份比较 affine（allclose, atol=1e-4，容忍重采样写回的浮点抖动），不一致时抛错指出具体文件；run_batch 既有单例失败机制将其记为处理失败、不写输出、不进 ranking.csv。失败路径测试：同 shape 平移 100mm 预测 → 失败入日志不进排名（test_run_batch_rejects_same_shape_mismatched_affine）；浮点 jitter 不误拒（test_load_masks_affine_tolerance）。验证：test_flexict_pkg 12/12、AL 生命周期 10/10、smoke 8/8（工件 20261014T205524_smoke.json）。"
     },
     {
       "id": "R16",
