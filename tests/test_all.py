@@ -13035,6 +13035,77 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             dirs = import_undo_mimics._recent_drop_output_dirs()
         self.assertEqual([], dirs)
 
+    def test_recent_drop_output_dirs_derives_from_output_mcs(self):
+        """R03 失败路径：worker 改写状态后只保留 output_mcs 也能找回目录。
+
+        真实生命周期：bootstrap 写 output_path -> worker 的 _write_status
+        整份替换为 completed/output_mcs（旧 worker 不保留上下文）。检索必须
+        从 output_mcs 推导输出目录，且多个病例共享同一目录时先去重再截取，
+        不把 limit 耗尽在重复项上。
+        """
+        import import_undo_mimics
+
+        custom_out = os.path.join(self.tmp, "custom_out")
+        os.makedirs(custom_out)
+        other_out = os.path.join(self.tmp, "other_out")
+        os.makedirs(other_out)
+        drop_dir = os.path.join(self.tmp, ".mimics_runtime", "drop_import")
+        os.makedirs(drop_dir)
+        # 旧 worker 的完成状态：只有 output_mcs，没有 output_path。
+        for index, (name, folder, case) in enumerate((
+            ("20260101T000001_abcd_0_status.json", custom_out, "caseA"),
+            ("20260101T000002_abcd_1_status.json", custom_out, "caseB"),
+            ("20260101T000003_wxyz_0_status.json", other_out, "caseC"),
+        )):
+            with open(os.path.join(drop_dir, name), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "status": "completed",
+                    "output_mcs": os.path.join(folder, case + ".mcs"),
+                    "updated_at_epoch": 1000.0 + index,
+                }, handle)
+        with mock.patch.object(import_undo_mimics, "_project_root",
+                               lambda: self.tmp):
+            dirs = import_undo_mimics._recent_drop_output_dirs(limit=5)
+        # 去重后两个目录都在，custom_out（更新）在前。
+        self.assertEqual([other_out, custom_out], dirs)
+
+    def test_worker_status_rewrites_preserve_bootstrap_context(self):
+        """R03 主链路：真实 worker 状态转换不丢 output_path/source_path。
+
+        bootstrap 写入 output_path 后，worker 的每次 _write_status（整份
+        替换语义）都必须保留该字段——撤销检索依赖它定位自定义输出目录。
+        """
+        import tools.single_case_import_worker as worker
+
+        status_dir = os.path.join(self.tmp, "drop_import")
+        os.makedirs(status_dir)
+        status_path = os.path.join(status_dir, "run_0_status.json")
+        # 复现 bootstrap（import_drop_window.submit_import 预写）。
+        with open(status_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "status": "running", "phase": "starting_worker",
+                "output_path": os.path.join(self.tmp, "custom_out"),
+                "source_path": os.path.join(self.tmp, "src"),
+                "updated_at_epoch": 100.0,
+            }, handle)
+        # 真实 worker 状态序列：preparing -> creating_mcs -> completed。
+        worker._write_status(Path(status_path), "running", "preparing",
+                             completed=0, failed=0, total=1, case_id="caseA")
+        worker._write_status(Path(status_path), "running", "creating_mcs",
+                             completed=0, failed=0, total=1, case_id="caseA",
+                             output_mcs=os.path.join(self.tmp, "custom_out", "caseA.mcs"))
+        worker._write_status(Path(status_path), "completed", "completed",
+                             completed=1, failed=0, total=1, case_id="caseA",
+                             output_mcs=os.path.join(self.tmp, "custom_out", "caseA.mcs"))
+        with open(status_path, "r", encoding="utf-8") as handle:
+            final = json.load(handle)
+        self.assertEqual("completed", final["status"])
+        self.assertEqual(os.path.join(self.tmp, "custom_out"),
+                         final["output_path"])
+        self.assertEqual(os.path.join(self.tmp, "src"), final["source_path"])
+        self.assertEqual(os.path.join(self.tmp, "custom_out", "caseA.mcs"),
+                         final["output_mcs"])
+
     def _install_undo_env(self, mcs_path, masks_alive):
         """Patch the undo module's Mimics surface and receipt discovery.
 

@@ -39,12 +39,26 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+# Fixed task context (R03): these fields are written by the drop window's
+# bootstrap status and must survive every worker rewrite — undo's receipt
+# search (_recent_drop_output_dirs in import_undo_mimics.py) reads
+# output_path from the status file, but the worker's own statuses only
+# carry output_mcs, so a full replacement made the completed import's
+# output folder (and its receipt) undiscoverable.
+_STATUS_CONTEXT_FIELDS = ("output_path", "source_path")
+
+
 def _write_status(path: Path, status: str, phase: str, **payload) -> None:
     record = {
         "status": str(status),
         "phase": str(phase),
         "updated_at_epoch": time.time(),
     }
+    previous = _read_json(path)
+    for key in _STATUS_CONTEXT_FIELDS:
+        value = previous.get(key)
+        if value:
+            record[key] = value
     record.update(payload)
     runtime_common.write_json_atomic(str(path), record)
 

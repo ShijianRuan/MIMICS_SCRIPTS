@@ -92,6 +92,14 @@ def _recent_drop_output_dirs(limit=5):
                 with open(path, "r") as handle:
                     payload = json.load(handle)
                 output = str(payload.get("output_path") or "").strip()
+                # R03: worker rewrites (pre-worker-fix statuses) replaced the
+                # bootstrap record and only kept output_mcs — derive the
+                # output folder from it so those completed imports stay
+                # discoverable by undo.
+                if not output:
+                    output = str(payload.get("output_mcs") or "").strip()
+                    if output:
+                        output = os.path.dirname(output)
                 if output and os.path.isdir(output):
                     entries.append(
                         (float(payload.get("updated_at_epoch") or 0.0), output)
@@ -101,7 +109,18 @@ def _recent_drop_output_dirs(limit=5):
     except OSError:
         return []
     entries.sort(key=lambda item: item[0], reverse=True)
-    return [output for _ts, output in entries[:limit]]
+    # Deduplicate before truncating (R03): several cases of one drop share
+    # the same output folder; duplicates must not crowd other folders out
+    # of the limit.
+    seen = set()
+    unique = []
+    for _ts, output in entries:
+        key = os.path.normcase(os.path.abspath(output))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(output)
+    return unique[:limit]
 
 
 def find_latest_receipt():
