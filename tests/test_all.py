@@ -11839,6 +11839,87 @@ class TestImportDropWindow(unittest.TestCase):
         self.assertEqual([], dw.cases_missing_selected_masks(None, ["liver"]))
         self.assertEqual([], dw.cases_missing_selected_masks(case_mask_names, []))
 
+    def test_partial_mask_report_covers_maskless_and_partial_cases(self):
+        # R02: A(liver), B(no masks), C(spleen) — picking liver must warn
+        # about B AND C; picking liver+spleen must still warn about B and
+        # expose A/C as partial (each holds only half of the picks).
+        import import_drop_window as dw
+        case_mask_names = {
+            "s0001": ["liver"],
+            "s0002": [],
+            "s0003": ["spleen"],
+        }
+        missing, partial = dw.cases_partial_mask_report(
+            case_mask_names, ["liver"])
+        self.assertEqual(["s0002", "s0003"], missing)
+        self.assertEqual({}, partial)
+        missing, partial = dw.cases_partial_mask_report(
+            case_mask_names, ["liver", "spleen"])
+        self.assertEqual(["s0002"], missing)
+        self.assertEqual(
+            {"s0001": ["spleen"], "s0003": ["liver"]}, partial)
+        # Case and whitespace variants must not fool the pre-check — the
+        # worker's _filter_masks matches case-insensitively after trimming.
+        # Gap names come back in the normalized form shown in the dialog.
+        missing, partial = dw.cases_partial_mask_report(
+            case_mask_names, ["Liver ", "SPLEEN"])
+        self.assertEqual(["s0002"], missing)
+        self.assertEqual(
+            {"s0001": ["spleen"], "s0003": ["liver"]}, partial)
+        # Degenerate inputs: nothing picked / nothing known -> no warning.
+        self.assertEqual(([], {}), dw.cases_partial_mask_report(case_mask_names, []))
+        self.assertEqual(([], {}), dw.cases_partial_mask_report({}, ["liver"]))
+        self.assertEqual(([], {}), dw.cases_partial_mask_report(None, ["liver"]))
+
+    def test_partial_mask_report_matches_worker_filter_rule(self):
+        # R02: the pre-check and the worker must agree on what "has the
+        # selected mask" means — the worker matches case-insensitively with
+        # surrounding whitespace stripped; so must the pre-check. Per picked
+        # name: the pre-check reports a gap exactly when the worker's
+        # _filter_masks would keep no mask by that name.
+        import import_drop_window as dw
+        import single_case_import_worker as worker
+        masks = [
+            {"name": " Liver ", "path": "a.nii.gz"},
+            {"name": "Spleen", "path": "b.nii.gz"},
+        ]
+        case_names = [m["name"] for m in masks]
+        for picked in (["liver"], ["LIVER"], [" liver "], ["liver", "spleen"],
+                       ["Liver ", "SPLEEN"]):
+            kept = worker._filter_masks(masks, ",".join(picked))
+            kept_names = dw._normalized_mask_names(
+                [m["name"] for m in kept])
+            missing, partial = dw.cases_partial_mask_report(
+                {"case": case_names}, picked)
+            if kept_names >= dw._normalized_mask_names(picked):
+                # every picked name survives the worker -> no gap at all
+                self.assertEqual(([], {}), (missing, partial), picked)
+            else:
+                gaps = dw._normalized_mask_names(picked) - kept_names
+                self.assertEqual(
+                    {"case": sorted(gaps)},
+                    {k: sorted(v) for k, v in partial.items()}, picked)
+
+    def test_summarize_dataset_keeps_maskless_cases_in_the_map(self):
+        # R02: a case without a segmentations/ folder must still appear in
+        # case_mask_names (empty list) — the old code created the entry only
+        # on mask discovery, so maskless cases were silently absent from
+        # the pre-submit warning loop.
+        import tools.io_path_setup_ui as ui
+        self._make_case("s0001", image="ct.nii.gz")  # has liver
+        self._make_case("s0002", image="ct.nii.gz")  # no segmentations/
+        seg = os.path.join(self.tmp, "s0001", "segmentations")
+        os.makedirs(seg)
+        open(os.path.join(seg, "liver.nii.gz"), "w").close()
+        result = ui.summarize_dataset(self.tmp)
+        self.assertEqual(
+            {"s0001": ["liver"], "s0002": []}, result["case_mask_names"])
+        import import_drop_window as dw
+        missing, partial = dw.cases_partial_mask_report(
+            result["case_mask_names"], ["liver"])
+        self.assertEqual(["s0002"], missing)
+        self.assertEqual({}, partial)
+
     def test_summarize_dataset_reports_per_case_mask_names(self):
         # UI24: the batch scan must expose which case owns which mask so the
         # drop window can warn per case before submitting.

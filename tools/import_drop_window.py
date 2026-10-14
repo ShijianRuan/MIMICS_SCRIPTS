@@ -171,6 +171,12 @@ def expand_mask_paths(values):
     return masks, invalid
 
 
+def _normalized_mask_names(names):
+    """Match rule the import worker applies (single_case_import_worker
+    _filter_masks): case-insensitive, surrounding whitespace ignored."""
+    return set(str(n).strip().lower() for n in (names or []) if str(n).strip())
+
+
 def cases_missing_selected_masks(case_mask_names, picked):
     """UI24: which cases would import as images only under a named selection.
 
@@ -178,14 +184,47 @@ def cases_missing_selected_masks(case_mask_names, picked):
     summarize_dataset; `picked` the checked names. Returns the sorted list
     of case ids whose folder contains none of them. Empty list when there
     is nothing to warn about (or nothing known — no map, no warning).
+
+    R02: matching is case-insensitive and whitespace-trimmed, identical to
+    the worker's _filter_masks, so the pre-check and the actual import
+    agree on what "has the selected mask" means.
     """
     if not case_mask_names or not picked:
         return []
-    picked_set = set(str(name) for name in picked)
+    picked_set = _normalized_mask_names(picked)
+    if not picked_set:
+        return []
     return sorted(
         case for case, names in case_mask_names.items()
-        if not (picked_set & set(str(n) for n in (names or [])))
+        if not (picked_set & _normalized_mask_names(names))
     )
+
+
+def cases_partial_mask_report(case_mask_names, picked):
+    """R02: per-case gaps for a named selection, for the pre-submit dialog.
+
+    Returns (missing_cases, partial) where missing_cases is the sorted
+    list of case ids that hold none of the picked masks (image-only
+    import) and partial maps case id -> sorted picked names the case is
+    missing some (but not all) of — the multi-organ partial loss the old
+    one-line warning could not show. Matching follows the worker's rule
+    (case-insensitive, trimmed).
+    """
+    if not case_mask_names or not picked:
+        return [], {}
+    picked_set = _normalized_mask_names(picked)
+    if not picked_set:
+        return [], {}
+    missing = []
+    partial = {}
+    for case, names in case_mask_names.items():
+        held = _normalized_mask_names(names)
+        gap = sorted(picked_set - held)
+        if not held & picked_set:
+            missing.append(case)
+        elif gap:
+            partial[case] = gap
+    return sorted(missing), partial
 
 
 def _child_case_dirs(root, limit=3):
@@ -740,6 +779,9 @@ def run(context=None, preview_path=""):
         # UI24: {case_id: [mask names]} from the batch scan, so a named
         # selection can be checked per case BEFORE the import starts.
         "case_mask_names": {},
+        # R02: the mask-gap summary the user confirmed for THIS submission —
+        # replayed on the result page so the fact stays visible.
+        "confirmed_mask_gaps": "",
         "last_activity": time.time(),
         "submitted": False,
     }
@@ -861,6 +903,15 @@ def run(context=None, preview_path=""):
                 summary += (
                     "\n⚠ 未发现 Mask（自动发现只查找每个病例文件夹下的 segmentations/ 子目录）。"
                 )
+            # R02: the named-selection pre-check needs the per-case map here
+            # too — the pick list is the UNION over all dropped cases, so a
+            # case missing a checked name would otherwise fail at the worker
+            # (no_matching_masks) with no warning up front.
+            state["case_mask_names"] = dict(
+                (case_info["case_id"], [m["name"] for m in case_info.get("masks") or []])
+                for _path, case_info in (payload.get("multi_cases") or [])
+                if case_info
+            )
             set_recognition(summary, valid < len(paths) or (valid > 0 and all_masks_empty))
             dropzone.setText("多选：{0} 个路径".format(len(paths)))
             if union_masks:
@@ -873,6 +924,16 @@ def run(context=None, preview_path=""):
             case_info = payload.get("single_case") if kind == "single" else None
             if case_info:
                 state["auto_masks_found"] = bool(case_info.get("masks"))
+                # R02: a single case feeds the same pre-check map the batch
+                # path uses — although the pick list is built from this case
+                # (so a named selection normally cannot miss), an explicit
+                # mask-path override or a stale pick list must still be
+                # caught before submit.
+                state["case_mask_names"] = {
+                    case_info["case_id"]: [
+                        m["name"] for m in case_info.get("masks") or []
+                    ]
+                }
                 if case_info.get("masks"):
                     _fill_mask_pick_list(case_info["masks"])
                 mask_names = "、".join(m["name"] for m in case_info["masks"][:5])
@@ -949,6 +1010,10 @@ def run(context=None, preview_path=""):
         state["auto_masks_found"] = False
         state["discovered_mask_names"] = []
         state["case_mask_names"] = {}
+        # R02: the confirmed-gap note belongs to the submission it was
+        # confirmed for; a new drop (or the post-submit reset) must not
+        # carry it into an unrelated result dialog.
+        state["confirmed_mask_gaps"] = ""
         if not paths:
             scan_generation["value"] += 1  # cancel any in-flight scan
             state["paths"] = []
@@ -1152,10 +1217,16 @@ def run(context=None, preview_path=""):
         lines = ["{0}: {1}".format(name, status) for name, status in launched[:10]]
         if len(launched) > 10:
             lines.append("……其余 {0} 例".format(len(launched) - 10))
+        # R02: when the user accepted a mask-gap warning, the fact must
+        # survive onto the result page too — the annotator confirms the
+        # image-only/partial import and later needs it stated again, not
+        # only in a dialog that has already closed.
+        gap_note = state.get("confirmed_mask_gaps") or ""
         QtWidgets.QMessageBox.information(
             window, "导入已开始",
-            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}\n\n"
-            "进度可在 01_Data > 04_Task_Status 查看。".format("\n".join(lines), output),
+            "导入已开始：\n\n{0}\n\n任务在后台继续进行；Mimics 工程将生成于：\n{1}\n{2}"
+            "\n进度可在 01_Data > 04_Task_Status 查看。".format(
+                "\n".join(lines), output, gap_note),
         )
         state["submitted"] = True
         analyze([])
@@ -1196,27 +1267,59 @@ def run(context=None, preview_path=""):
                 "包含逗号或 all/none/no/off 的名称暂不支持按名称筛选。请选择“全部 Mask”，或重命名分割文件后重试。")
             return
         if picked:
-            # UI24: a named selection means the user wants those masks. A
-            # case whose folder lacks every picked name would import as
-            # images only — surface WHICH cases before the batch starts,
-            # instead of one English log line after the fact.
-            if kind == "batch":
-                missing = cases_missing_selected_masks(
+            # UI24/R02: a named selection means the user wants those masks.
+            # A case whose folder lacks every picked name imports as images
+            # only on the batch path — but FAILS at the single-case worker
+            # (no_matching_masks) — and a case holding only some picks
+            # silently drops the rest. Surface all of it, per case, before
+            # anything starts. Matching is case-insensitive, same as the
+            # worker's _filter_masks.
+            if kind in ("batch", "multi_single", "single"):
+                missing, partial = cases_partial_mask_report(
                     state.get("case_mask_names"), picked)
-                if missing:
-                    shown = "、".join(missing[:5])
-                    if len(missing) > 5:
-                        shown += " 等共 {0} 例".format(len(missing))
+                if missing or partial:
+                    # What "no matching mask" means downstream depends on
+                    # the path: batch prepares the case with an empty mask
+                    # list (image-only project), while the single-case
+                    # worker refuses the case outright. The dialog must not
+                    # promise image-only import for a case that will fail.
+                    if kind == "batch":
+                        missing_line = (
+                            "以下 {0} 例不含任何所选 Mask，将仅导入图像：\n{1}")
+                    else:
+                        missing_line = (
+                            "以下 {0} 例不含任何所选 Mask，这些病例将导入失败"
+                            "（无匹配分割文件）：\n{1}")
+                    lines = []
+                    if missing:
+                        shown = "、".join(missing[:5])
+                        if len(missing) > 5:
+                            shown += " 等共 {0} 例".format(len(missing))
+                        lines.append(missing_line.format(len(missing), shown))
+                    if partial:
+                        detail = "；".join(
+                            "{0}（缺 {1}）".format(
+                                case, "、".join(names))
+                            for case, names in sorted(partial.items())[:5])
+                        if len(partial) > 5:
+                            detail += "；等共 {0} 例".format(len(partial))
+                        lines.append(
+                            "以下病例缺少部分所选 Mask，缺失的标签不会导入：\n{0}".format(
+                                detail))
                     answer = QtWidgets.QMessageBox.question(
                         window, "部分病例缺少所选 Mask",
-                        "以下 {0} 例不含所选 Mask，将仅导入图像：\n{1}\n\n"
-                        "如非预期，请取消并检查这些病例的 segmentations/ 文件夹，"
-                        "或改选其他 Mask。".format(len(missing), shown),
+                        "{0}\n\n如非预期，请取消并检查这些病例的 segmentations/ 文件夹，"
+                        "或改选其他 Mask。".format("\n\n".join(lines)),
                         QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                         QtWidgets.QMessageBox.No,
                     )
                     if answer != QtWidgets.QMessageBox.Yes:
                         return
+                    # R02: keep the accepted gap visible on the result page
+                    # ("仅图像后结果页也必须保留该事实") — the confirm dialog
+                    # closes, the fact must not vanish with it.
+                    state["confirmed_mask_gaps"] = "\n\n{0}\n".format(
+                        "；".join(lines))
             # The worker receives the exact checked names.
             mask_selection = ",".join(picked)
         mask_paths = []

@@ -366,6 +366,10 @@ def summarize_dataset(source, profile_id=None, entry_cap=511):
             skipped.append(name)
             continue
         case_count += 1
+        # R02: every importable case gets a map entry even with no masks,
+        # so the pre-submit check can name maskless cases instead of
+        # silently dropping them from the warning loop.
+        case_mask_names.setdefault(name, set())
         image_kinds[image_kind] = image_kinds.get(image_kind, 0) + 1
         if volume_files > 1:
             warnings.append(
