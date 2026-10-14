@@ -85,7 +85,10 @@ def load_masks(mask_paths):
     """读取多个 mask，返回 (堆叠数组, 参考 affine, 参考 header)。
 
     - ``mask_paths``：mask 文件路径列表（NIfTI），长度必须 >= 2。
-    - 所有 mask 必须具有相同的空间尺寸（shape）。
+    - 所有 mask 必须具有相同的空间尺寸（shape）**和相同的物理网格
+      （affine，平移/方向/间距）**。同 shape 但 affine 不一致意味着两份
+      预测来自不同转换路径（缓存陈旧或网格错配），逐体素比较会把不同
+      解剖位置的体素当成同一位置，分歧结果整体失真——必须拒绝。
     - 返回的堆叠数组形状为 ``(N, X, Y, Z)``，整型标签。
     """
     if mask_paths is None or len(mask_paths) < 2:
@@ -113,6 +116,11 @@ def load_masks(mask_paths):
             raise ValueError(
                 "mask 尺寸不一致: {0} 的 shape 为 {1}，但参考 shape 为 {2}".format(
                     path, data.shape, ref_shape))
+        elif not np.allclose(img.affine, ref_affine, atol=1e-4):
+            raise ValueError(
+                "mask 物理网格不一致: {0} 的 affine 与参考不同（平移/方向/间距"
+                "不匹配，两份预测不在同一物理坐标上，逐体素比较无意义）".format(
+                    path))
         arrays.append(data)
 
     stack = np.stack(arrays, axis=0)  # (N, X, Y, Z)

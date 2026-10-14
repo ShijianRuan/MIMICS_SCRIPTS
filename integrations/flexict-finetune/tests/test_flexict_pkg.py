@@ -178,6 +178,77 @@ class TestUncertainty(unittest.TestCase):
             self.assertIn("case", header)
 
 
+    def test_run_batch_rejects_same_shape_mismatched_affine(self):
+        """R15 失败路径：同 shape 但 affine 不同的两份预测不得进入排名。
+
+        场景：某模型的预测缓存陈旧/网格错配（x 平移 100mm），shape 与参考
+        完全一致。只查 shape 的旧实现会静默接受并以第一份 affine 输出，
+        把不同解剖位置的体素当成同一位置比较。修复后 run_batch 应把该
+        病例记为处理失败（不写输出文件、不进 ranking.csv），其余正常病例
+        不受影响。
+        """
+        import numpy as np
+        import nibabel as nib
+        from uncertainty import uncertainty as unc
+        with tempfile.TemporaryDirectory() as tmp:
+            d1 = os.path.join(tmp, "alg_a"); os.makedirs(d1)
+            d2 = os.path.join(tmp, "alg_b"); os.makedirs(d2)
+            out = os.path.join(tmp, "out")
+            log_path = os.path.join(tmp, "batch.log")
+            # 正常病例：两份同网格预测。
+            self._make_case([d1, d2], "case_ok")
+            # 错配病例：alg_b 的 mask 同 shape 但 x 平移 100mm。
+            self._make_case([d1, d2], "case_bad")
+            bad_affine = np.eye(4); bad_affine[0, 3] = 100.0
+            bad_path = os.path.join(d2, "case_bad.nii.gz")
+            img = nib.load(bad_path)
+            nib.save(nib.Nifti1Image(np.asarray(img.dataobj), bad_affine), bad_path)
+            with open(os.path.join(tmp, "cases.txt"), "w") as fh:
+                fh.write("case_ok\ncase_bad\n")
+            metrics = unc.run_batch(
+                mask_dirs=[d1, d2],
+                out_dir=out,
+                case_list_txt=os.path.join(tmp, "cases.txt"),
+                filename_template="{case}.nii.gz",
+                method="disagreement",
+                target_labels=[1],
+                min_masks=2,
+                log_path=log_path,
+            )
+            # 错配病例不进指标（失败，不是"成功计算了一个错答案"）。
+            self.assertEqual([m["case"] for m in metrics], ["case_ok"])
+            # 错配病例无任何输出文件，不会伪装成已复核。
+            self.assertFalse(os.path.isfile(
+                os.path.join(out, "case_bad_uncertainty_disagreement.nii.gz")))
+            self.assertFalse(os.path.isfile(os.path.join(out, "case_bad_consensus.nii.gz")))
+            # 日志指明失败病例与原因（指向具体文件）。
+            with open(log_path, encoding="utf-8") as fh:
+                log_text = fh.read()
+            self.assertIn("case_bad", log_text)
+            self.assertIn("物理网格不一致", log_text)
+            self.assertIn("case_bad.nii.gz", log_text)
+            # 正常病例照常完成。
+            self.assertTrue(os.path.isfile(
+                os.path.join(out, "case_ok_uncertainty_disagreement.nii.gz")))
+
+    def test_load_masks_affine_tolerance(self):
+        """浮点级 affine 抖动（重采样写回时的 1e-6 量级）不误拒。"""
+        import numpy as np
+        import nibabel as nib
+        from uncertainty import uncertainty as unc
+        with tempfile.TemporaryDirectory() as tmp:
+            base = np.eye(4)
+            jitter = np.eye(4); jitter[1, 3] = 5e-6
+            p1 = os.path.join(tmp, "a.nii.gz")
+            p2 = os.path.join(tmp, "b.nii.gz")
+            arr = (np.random.RandomState(0).rand(4, 4, 4) > 0.5).astype(np.uint8)
+            nib.save(nib.Nifti1Image(arr, base), p1)
+            nib.save(nib.Nifti1Image(arr, jitter), p2)
+            stack, affine, _ = unc.load_masks([p1, p2])
+            self.assertEqual(stack.shape, (2, 4, 4, 4))
+            self.assertTrue(np.allclose(affine, base))
+
+
 class TestTrainerContract(unittest.TestCase):
     """The trainer needs nnU-Net installed to import, so test the file as text:
     env-var contract and class names that the Mimics pipeline relies on."""
