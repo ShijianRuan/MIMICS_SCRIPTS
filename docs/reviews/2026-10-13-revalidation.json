@@ -462,7 +462,7 @@
     {
       "id": "R12",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "交互模型选择器的长版本号仍不可见、不可键盘复制",
       "previous_ids": [
         "UI20"
@@ -489,7 +489,9 @@
         "键盘可进入详情并复制全文；切换模型时内容同步。",
         "按真实 contentRect/可见区域和截图验收，不能仅 assertIn(model_id, label.text())。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "035106d",
+      "fix_note": "摘要控件从 QLabel 换成只读 QPlainTextEdit（复用 model_manager_ui 的 selection_detail 模式）：WrapAnywhere 强制长无空格 model_id 换行、尾部可见；TextSelectableByKeyboard 使全文可键盘复制；高度 48-96px 可滚动不挤压主按钮；切换模型内容同步。测试：真实 Qt 控件测试（853×440 渲染、viewport 溢出测量、键盘选择标志、切换同步、无省略号），125%/150% 字体验证长 ID 换行可见；smoke 8/8 工件 20261014T221549_smoke.json。"
     },
     {
       "id": "R13",
