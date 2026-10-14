@@ -221,6 +221,78 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertTrue(w.remove_button.isVisible())
         self.assertFalse(w.use_button.isEnabled())
 
+    def test_task_model_chooser_full_id_readable_and_copyable(self):
+        # R12/UI20: two long same-prefix versions differ only past column ~30.
+        # The summary must show the tail visibly (wrap anywhere) and stay
+        # selectable by keyboard at the 853×440 small screen — asserting the
+        # id merely exists in the string is exactly the gap this closes.
+        import nninteractive_task_model_chooser as ui
+        import nninteractive_task_common as common
+        import json as _json
+
+        prefix = 'model_20261014T220658' + 'f' * 60
+        ids = [prefix + 'aaaa0000', prefix + 'bbbb1111']
+        registry = {
+            'schema_version': 'nninteractive_task_registry.v1',
+            'tasks': [{
+                'task_id': 'task',
+                'task_name': '多器官分割',
+                'recommended_model_id': ids[0],
+                'models': [
+                    dict(model_id=mid, state='validated', compatible=True,
+                         strategy='clopa_in', created_at_epoch=1700000100 - n,
+                         train_case_count=12, validation_case_count=2,
+                         quality={'delta_auc': 0.05},
+                         model_relpath='tasks/task/models/' + mid)
+                    for n, mid in enumerate(ids)
+                ],
+            }],
+        }
+        (self.root / 'registry.json').write_text(
+            _json.dumps(registry), encoding='utf-8')
+        for mid in ids:
+            model_dir = self.root / 'tasks' / 'task' / 'models' / mid
+            model_dir.mkdir(parents=True)
+            for name in common.MODEL_METADATA_FILES:
+                (model_dir / name).write_text('{}', encoding='utf-8')
+            fold = model_dir / 'fold_0'
+            fold.mkdir()
+            (fold / 'checkpoint_final.pth').write_bytes(b'x')
+
+        w = self.keep(ui.Chooser(QtWidgets.QWidget(), {
+            'workspace': str(self.root),
+            'status_path': str(self.root / 'choice.json'),
+            'task_id': 'task',
+        }, QT))
+        w.window.resize(853, 440)
+        APP.processEvents()
+
+        # Plain text edit, not a label: read-only, keyboard-selectable, and
+        # wraps unbroken tokens so the distinguishing tail is on screen.
+        self.assertIsInstance(w.summary, QtWidgets.QPlainTextEdit)
+        self.assertTrue(w.summary.isReadOnly())
+        self.assertTrue(w.summary.textInteractionFlags()
+                        & QtCore.Qt.TextSelectableByKeyboard)
+        text = w.summary.toPlainText()
+        self.assertIn(ids[0], text)
+        self.assertNotIn('…', text)
+        fm = w.summary.fontMetrics()
+        self.assertGreater(
+            fm.horizontalAdvance(ids[0]),
+            w.summary.viewport().width(),
+            'long id should overflow the viewport so wrap/scroll matters')
+        self.assertTrue(w.summary.isVisible())
+        self.assertFalse(w.summary.visibleRegion().isEmpty())
+
+        # Switching models must sync the detail text (tail distinguishes).
+        w.model_combo.setCurrentIndex(1)
+        APP.processEvents()
+        self.assertIn(ids[1], w.summary.toPlainText())
+        self.assertIn('bbbb1111', w.summary.toPlainText())
+        w.model_combo.setCurrentIndex(0)
+        APP.processEvents()
+        self.assertIn('aaaa0000', w.summary.toPlainText())
+
     def test_environment_repairs_target_their_own_feedback(self):
         import env_guidance as ui
         issues = [dict(title=t, detail=t, fix_action=a) for t, a in [('第一项', 'install'), ('第二项', 'migrate:old')]]

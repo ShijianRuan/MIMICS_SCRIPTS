@@ -81,10 +81,25 @@ class Chooser:
         self.show_all.toggled.connect(self.refresh_models)
         form.addRow("", self.show_all)
         layout.addLayout(form)
-        self.summary = self.QtWidgets.QLabel("")
+        # R12/UI20: the summary is a read-only QPlainTextEdit (the pattern
+        # already used by model_manager_ui's selection_detail), not a QLabel —
+        # a long unbroken model_id never wraps in a QLabel, so two long
+        # same-prefix versions differ only in text the user cannot see or
+        # select. WrapAnywhere + scrolling + native keyboard selection makes
+        # the full ID readable and copyable at any window width or DPI.
+        self.summary = self.QtWidgets.QPlainTextEdit("")
         self.summary.setObjectName("hint")
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        self.summary.setReadOnly(True)
+        self.summary.setLineWrapMode(self.QtWidgets.QPlainTextEdit.WidgetWidth)
+        self.summary.setWordWrapMode(self.QtGui.QTextOption.WrapAnywhere)
+        self.summary.setMinimumHeight(48)
+        self.summary.setMaximumHeight(96)
+        self.summary.setTextInteractionFlags(
+            self.QtCore.Qt.TextSelectableByKeyboard
+            | self.QtCore.Qt.TextSelectableByMouse
+        )
+        self.summary.setAccessibleName("所选模型完整信息")
+        layout.addWidget(self.summary, 1)
         self.remember = self.QtWidgets.QCheckBox(
             "为当前工程记住此目标与模型"
         )
@@ -145,7 +160,7 @@ class Chooser:
             None,
         )
         if not model:
-            self.summary.setText("该目标没有可用模型。")
+            self.summary.setPlainText("该目标没有可用模型。")
             self.use_button.setEnabled(False)
             return
         quality = model.get("quality") or {}
@@ -164,7 +179,7 @@ class Chooser:
             if str(model.get("state") or "").strip().lower() == "unverified"
             else ""
         )
-        self.summary.setText(
+        self.summary.setPlainText(
             "{}\n版本：{}{}\n点提示 · 训练 {} 例 + 验证 {} 例 · {}".format(
                 strategy_display_name(model.get("strategy")),
                 str(model.get("model_id") or ""),
@@ -182,7 +197,7 @@ class Chooser:
             model_is_usable(model) and bool(audit.get("compatible"))
         )
         if not audit.get("compatible"):
-            self.summary.setText(
+            self.summary.setPlainText(
                 "该模型不完整：{}".format(", ".join(audit.get("missing") or []))
             )
 
@@ -206,7 +221,7 @@ class Chooser:
                 verify_checksum=False,
             )
         except Exception as exc:
-            self.summary.setText(friendly_error(exc))
+            self.summary.setPlainText(friendly_error(exc))
             return
         write_json_atomic(
             self.status_path,
