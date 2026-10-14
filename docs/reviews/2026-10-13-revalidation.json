@@ -213,7 +213,7 @@
     {
       "id": "R06",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "中文多器官名称仍被误判成同一个标签或别名",
       "previous_ids": [
         "UI19",
@@ -243,7 +243,9 @@
         "跨标签共享真实别名时拒绝，行内说明两个冲突目标；同一标签内重复别名只去重。",
         "MCS 选标签→准备训练→dataset.json→预测回写/导出使用相同映射，不只是验证 request 文本。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "ad7b4e9",
+      "fix_note": "normalize_labels 标签/别名唯一性比较改用 _semantic_label_key（NFKC + casefold），不再用 ASCII safe_identifier 塌缩；跨标签共享真实别名时以中文报错并指名两个冲突标签，同一标签内重复别名只去重。nnunet_pipeline._find_label_files 新增 _label_name_key（镜像 mimics_export._canonical_mask_name 的 Unicode 规则），中文器官文件不再互相误配。下游 dataset.json/预测回写/Mimics 导出核对确认均使用原始 Unicode 名称。测试：test_nnunet_integration 114 通过，含 5 项新增 R06 测试；定向 132 通过；smoke 门禁 8/8（工件 20261014T125607_smoke.json）。"
     },
     {
       "id": "R07",
