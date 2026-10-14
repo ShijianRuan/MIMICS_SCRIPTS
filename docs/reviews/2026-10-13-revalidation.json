@@ -12,7 +12,7 @@
     {
       "id": "R01",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "任务标识二次归一化会丢掉区分摘要",
       "previous_ids": [
         "UI19",
@@ -47,7 +47,9 @@
         "GUI→create_job→本地/远程请求→模型注册→缓存路径，ID 完全一致；二次 normalize_request 不变化。",
         "旧英文任务加载、改显示名称、同名重建、重启后仍能定位同一任务。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "e48fc31",
+      "fix_note": "stable_task_identifier 有损判据改为 slug != 原文（覆盖替换/剥离/截断），超长纯 ASCII 名不碰撞；摘要压进 96 字符预算（slug 截 87 + 8 位 digest），对已生成 ID 幂等，二次 normalize_request task_id 不变。测试：test_task_identifier_collision_and_idempotence（96 字符同前缀不同尾部、中文尾部、幂等、二次归一化）。验证：nnunet 119/119、smoke 8/8（工件 20261014T212735_smoke.json）。"
     },
     {
       "id": "R02",
@@ -593,7 +595,7 @@
     {
       "id": "R16",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "保留名 background 会覆盖 nnU-Net 的零背景定义",
       "previous_ids": [],
       "observations": [
@@ -620,7 +622,9 @@
         "非法/非连续/重复 ID、仅背景标签、空数据、旧映射导入均给出清楚处理路径。",
         "测试实际生成的 dataset.json 和 nnU-Net 完整性检查，而非只检查 normalize_request 返回值。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "e48fc31",
+      "fix_note": "normalize_labels 拒绝标签名/别名为保留名 background（语义键比较含大小写变体，中文报错）；_materialize_nnunet_raw 写 dataset.json 前再验证 background == 0，篡改请求在半成品注册前失败。测试：test_reserved_background_label_name_rejected、test_dataset_json_keeps_zero_background（真实 dataset.json 断言 + 篡改重放拒绝）。验证：nnunet 119/119、smoke 8/8（工件 20261014T212735_smoke.json）。"
     },
     {
       "id": "R17",
