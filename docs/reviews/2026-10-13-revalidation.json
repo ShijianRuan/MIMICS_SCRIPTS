@@ -250,7 +250,7 @@
     {
       "id": "R07",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "FlexiCT 最后重写拆分仍把旧验证病例放入训练",
       "previous_ids": [
         "UI30",
@@ -284,12 +284,14 @@
         "显式改验证选择、整组扩展、旧病例删除各有确定规则；最终 splits_final.json 与 UI 预览一致。",
         "检查实际调用顺序和 trainer 读取文件，不能仅测 _split_train_val 单函数。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "c71e724",
+      "fix_note": "run_training 在物化前读取上一份 splits_final.json 的 fold-0 验证集（经 manifest 把 nnU-Net case key 翻译回原始 id），传入 _write_flexict_splits；冻结病例及患者组固定留验证侧，显式 val_case_ids 替换契约，空侧中文报错。TestFrozenValidationContract 5 个端到端测试（真实调用顺序：新增病例、重排、组扩展、显式重分、空侧 fail-closed、中文键翻译）。"
     },
     {
       "id": "R08",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "远程 FlexiCT 打包/重建病例丢掉患者分组",
       "previous_ids": [
         "F16",
@@ -327,7 +329,9 @@
         "只含顶层映射、只含行字段、二者冲突、中文病例键、旧 prepared 请求均有明确兼容/拒绝规则。",
         "完整 prepare→remote_request→容器 run_training→实际 splits 文件验证，不依赖手写 row fixture。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "7661be1",
+      "fix_note": "controller 两处打包逐行序列化 patient_group；nnunet_pipeline 共享 helper _prepared_rows_from_request 重建行（行字段优先/映射补全/冲突拒绝/旧 bundle 病例级独立），两管线 prepared 分支去重。端到端测试：本地与容器 run_training 最终 splits 一致，A 患者不跨两侧。"
     },
     {
       "id": "R09",
