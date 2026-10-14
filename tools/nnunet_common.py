@@ -34,17 +34,27 @@ def stable_task_identifier(value: object, fallback: str = "item") -> str:
     UI19/F22: ``safe_identifier`` folds every non-ASCII character to "_", so
     two different Chinese target names both become "item" and silently merge
     in the model library. nnU-Net's on-disk rules (Dataset{:03d}_<id>) still
-    require ASCII, so the identifier stays ASCII — but when the plain slug
-    is lossy (the fallback, or the original contained characters outside
-    [A-Za-z0-9_.-]), a short digest of the original name keeps distinct
-    names distinct. Pure-ASCII names keep their existing identifier, so
-    existing workspaces and models are unaffected.
+    require ASCII, so the identifier stays ASCII — but whenever the slug is
+    lossy (any character replaced, stripped, or truncated) a short digest of
+    the original name keeps distinct names distinct.
+
+    R01: the result must survive a second normalization. Downstream code
+    (normalize_request, cache and model directories) feeds the generated id
+    back through ``safe_identifier``, which truncates to 96 — so the digest
+    is fitted inside that budget (slug capped at 87 + 8 hex chars) and the
+    output is idempotent: re-deriving the id from an already-generated id
+    returns it unchanged. Pure-ASCII names that need no cleaning keep their
+    existing identifier, so existing workspaces and models are unaffected.
     """
     text = str(value or "").strip()
     slug = safe_identifier(text, fallback)
-    if not text or re.search(r"[^A-Za-z0-9_.-]", text):
+    # Lossy iff the slug is not the exact input: replacement (non-ASCII or
+    # forbidden chars), stripping (leading/trailing "._-"), truncation (>96
+    # chars), or the empty-input fallback. Covers the R01 case of two long
+    # same-prefix ASCII names that differ only past column 96.
+    if not text or slug != text:
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-        slug = "{}_{}".format(slug, digest)
+        slug = "{}_{}".format(slug[:87], digest)
     return slug
 
 
@@ -420,6 +430,15 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
         name = str(raw.get("name") or "").strip()
         if not name:
             raise ValueError("Label row {} has no output name.".format(index))
+        # R16: "background" is nnU-Net's reserved name for label 0 (the zero
+        # background added by _materialize_nnunet_raw). A user-defined label
+        # with this name would silently overwrite the background entry in
+        # dataset.json and break training/integrity checks downstream.
+        if _semantic_label_key(name) == "background":
+            raise ValueError(
+                "标签名“background”是 nnU-Net 的保留背景项（ID 0），"
+                "不能用作输出标签名；请改用其他名称。"
+            )
         label_id = int(raw.get("id") or index)
         if label_id <= 0 or label_id > 255:
             raise ValueError("Label '{}' ID must be between 1 and 255.".format(name))
@@ -445,6 +464,11 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
         local_aliases = set()
         for alias in aliases:
             canonical_alias = _semantic_label_key(alias)
+            if canonical_alias == "background":
+                raise ValueError(
+                    "别名“{0}”是 nnU-Net 的保留背景项（ID 0），"
+                    "不能用作标签别名；请改用其他名称。".format(alias)
+                )
             if canonical_alias in local_aliases:
                 continue
             owner = aliases_seen.get(canonical_alias)

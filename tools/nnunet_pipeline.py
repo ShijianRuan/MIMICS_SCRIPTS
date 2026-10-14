@@ -1012,6 +1012,14 @@ def _materialize_nnunet_raw(
         _link_or_copy(row["label"], staging / "labelsTr" / (case_key + ".nii.gz"))
     labels = {"background": 0}
     labels.update({str(row["name"]): int(row["id"]) for row in request["labels"]})
+    # R16: normalize_request rejects a user label named "background", but
+    # this writer also serves stored/replayed requests — assert the reserved
+    # entry survived instead of silently overwriting the zero background.
+    if labels.get("background") != 0:
+        raise RuntimeError(
+            "dataset.json 的 background 保留项必须是 0；"
+            "请检查标签名是否使用了保留名 background。"
+        )
     dataset_json = {
         "name": request["task_name"],
         "description": "Prepared by Mimics-Script on the original source-image grid.",

@@ -225,6 +225,57 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(ascii_request["task_id"], "liver_seg")
 
+    def test_task_identifier_collision_and_idempotence(self):
+        """R01 失败路径：任务标识的二次归一化不得丢掉区分摘要。
+
+        旧实现两个洞：(a) 超长纯 ASCII 名（>96 字符）不加摘要，96 字符前缀
+        相同的不同任务碰撞到同一 ID；(b) stable_task_identifier 产出可超过
+        96 字符的 ID，下游 safe_identifier/normalize_request 再次截断时把
+        摘要尾巴砍掉，create_job 落盘后两个不同任务变成同一个 ID。
+        修复契约：ID 不超过 96；对已生成的 ID 再归一化（幂等）不变；
+        二次 normalize_request 后 task_id 不变。
+        """
+        from nnunet_common import safe_identifier, stable_task_identifier
+
+        # 96 个 a 加不同尾部：首次生成必须可区分且都在预算内。
+        long_liver = "a" * 96 + "liver"
+        long_kidney = "a" * 96 + "kidney"
+        id_liver = stable_task_identifier(long_liver)
+        id_kidney = stable_task_identifier(long_kidney)
+        self.assertNotEqual(id_liver, id_kidney)
+        self.assertLessEqual(len(id_liver), 96)
+        self.assertLessEqual(len(id_kidney), 96)
+
+        # 96 字符前缀 + 不同中文尾部（真实场景：同名前缀的中文任务）。
+        id_cn_liver = stable_task_identifier("a" * 96 + "肝脏")
+        id_cn_kidney = stable_task_identifier("a" * 96 + "肾脏")
+        self.assertNotEqual(id_cn_liver, id_cn_kidney)
+        self.assertLessEqual(len(id_cn_liver), 96)
+
+        # 幂等：对已生成 ID 再派生/再 safe_identifier 都不变。
+        self.assertEqual(stable_task_identifier(id_liver), id_liver)
+        self.assertEqual(safe_identifier(id_liver), id_liver)
+
+        # 全链路：normalize_request 二次处理同一请求，task_id 不变。
+        first = common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": long_liver,
+                "workspace": "/tmp/nnunet-test",
+                "labels": [{"name": "Liver", "id": 1}],
+            }
+        )
+        second = common.normalize_request(dict(first))
+        self.assertEqual(first["task_id"], id_liver)
+        self.assertEqual(second["task_id"], id_liver)
+
+        # 中文短名仍然互不串（UI19 既有行为不回退）。
+        self.assertNotEqual(
+            stable_task_identifier("肝脏"), stable_task_identifier("肾脏"))
+
+        # 纯 ASCII 短名保持原样：既有英文任务/工作区不受影响。
+        self.assertEqual(stable_task_identifier("liver_seg"), "liver_seg")
+
     def test_grouped_label_preserves_union_source_mode(self):
         labels = common.normalize_labels(
             [
@@ -257,6 +308,29 @@ class ContractTests(unittest.TestCase):
                     {"name": "B", "id": 1},
                 ]
             )
+
+    def test_reserved_background_label_name_rejected(self):
+        """R16 失败路径：保留名 background 不得覆盖 nnU-Net 的零背景。
+
+        旧实现只查名称非空/ID 范围/连续性，{"background": 1} 的自定义映射
+        被接受并最终写进 dataset.json 覆盖零背景项，准备看似成功而训练/
+        完整性检查失败。修复契约：标签名与别名（含大小写变体）出现
+        background 均中文报错；正常多器官映射不受影响。
+        """
+        for payload in (
+            [{"name": "background", "id": 1}],
+            [{"name": "Background", "id": 1}],
+            [{"name": "liver", "id": 1, "aliases": ["BACKGROUND"]}],
+            [{"name": "liver", "id": 1, "aliases": "background;liver"}],
+        ):
+            with self.assertRaisesRegex(ValueError, "保留"):
+                common.normalize_labels(payload)
+        # 正常器官（中文/英文）与隐式别名不受影响。
+        rows = common.normalize_labels(
+            [{"name": "肝脏", "id": 1}, {"name": "脾脏", "id": 2}]
+        )
+        self.assertEqual([row["name"] for row in rows], ["肝脏", "脾脏"])
+        self.assertEqual(rows[0]["aliases"], ["肝脏"])
 
     def test_label_ids_must_be_consecutive(self):
         with self.assertRaisesRegex(ValueError, "连续编号"):
@@ -562,6 +636,54 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(len(split[0]["train"]), 4)
             self.assertEqual(len(split[0]["val"]), 1)
             self.assertEqual(len(fingerprint), 64)
+
+    def test_dataset_json_keeps_zero_background(self):
+        """R16 失败路径：真实生成的 dataset.json 中 background 必须是 0。
+
+        normalize_request 已拒绝保留名，但 _materialize_nnunet_raw 也服务
+        已存储/重放的请求——写盘前再验证保留项未被覆盖，半成品注册前
+        就失败，而不是训练/完整性检查时才失败。
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image = root / "prepared" / "case0" / "image.nii.gz"
+            label = root / "prepared" / "case0" / "label.nii.gz"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"image0")
+            label.write_bytes(b"label0")
+            rows = [
+                {
+                    "case_id": "case0",
+                    "image": image,
+                    "label": label,
+                    "fingerprint": "0",
+                }
+            ]
+            request = common.normalize_request(
+                {
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "validation_fraction": 0.2,
+                    "split_seed": 42,
+                }
+            )
+            dataset, _ = pipeline._materialize_nnunet_raw(
+                rows, request, root / "raw", root / "preprocessed"
+            )
+            dataset_json = common.read_json(dataset / "dataset.json")
+            self.assertEqual(dataset_json["labels"]["background"], 0)
+            self.assertEqual(dataset_json["labels"]["liver"], 1)
+            # 篡改请求重放（绕过 normalize_labels 的入口校验）时，写盘
+            # 守卫拒绝并清理半成品，不得留下覆盖零背景的 dataset.json。
+            poisoned = dict(request)
+            poisoned["labels"] = [{"name": "background", "id": 1}]
+            with self.assertRaisesRegex(RuntimeError, "background"):
+                pipeline._materialize_nnunet_raw(
+                    rows, poisoned, root / "raw", root / "preprocessed"
+                )
 
     def _split_rows(self, count, patient_groups=None):
         """Minimal rows for _split_folds; patient_groups maps index->group."""
