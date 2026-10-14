@@ -518,7 +518,7 @@
     {
       "id": "R14",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "目录签名缓存会把被原位更新的影像当成旧数据",
       "previous_ids": [],
       "observations": [
@@ -545,7 +545,9 @@
         "转换 image 的内容/指纹随源变更；本地缓存、远程归档、预处理缓存不因父目录 mtime 未变继续复用。",
         "显式刷新显示重新检查范围；不可变模式清楚说明输入要求，用户取消保留旧成果。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "9bc41f7",
+      "fix_note": "删除跨进程目录签名缓存（path_signature 每次轻量 stat 扫描，不做内容哈希）。病例级序列文件夹扫描毫秒级，源指纹正确性优先；每次进程启动即重新验证，原位改写立即反映。失败路径测试：同尺寸/异尺寸原位改写、嵌套变更、进程内两次调用间变异、文件替换 ctime。nnunet 116、flexict 141、smoke 8/8 全绿。"
     },
     {
       "id": "R15",
