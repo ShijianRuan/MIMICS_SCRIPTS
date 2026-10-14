@@ -136,7 +136,7 @@
     {
       "id": "R04",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "主动学习写锁在 Mimics 主线程等待约两秒",
       "previous_ids": [
         "UI31",
@@ -174,7 +174,9 @@
         "独立进程、两个窗口、并发不同病例、重复点击、进程退出和磁盘只读，不丢显式 annotated/skipped。",
         "Windows msvcrt 与实际 UNC 目标机验证；UI 未持久化前不得显示标记成功。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "9e3332e",
+      "fix_note": "Mimics 侧 _al_mark_viewed 改为 wait_seconds=0 单次非阻塞尝试；争用时条目进入进程内待重试队列（去重），下一个 monitor tick 解锁后补写。外部复核窗口的 set_case_state 保持有界等待（阻塞的是窗口自身进程而非 Mimics 主线程，失败时报错不显示成功，UI31 语义不变）。测试：test_al_mark_viewed_never_blocks_gui_thread_on_lock（持锁立即返回/入队/tick 补写）、test_al_mark_viewed_writes_directly_when_lock_free。验证：定向 7/7、smoke 8/8（工件 20261014T213818_smoke.json）。"
     },
     {
       "id": "R05",
