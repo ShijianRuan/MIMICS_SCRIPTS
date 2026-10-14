@@ -52,7 +52,7 @@
     {
       "id": "R02",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "批量导入预检漏掉完全没有 Mask 的病例",
       "previous_ids": [
         "UI24"
@@ -90,7 +90,9 @@
         "不同大小写与前后空白，预检结果和实际 worker 一致。",
         "批量、单病例、显式多文件三条路径都验证；用户取消不得创建作业，允许仅图像后结果页也必须保留该事实。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "2d360d1",
+      "fix_note": "summarize_dataset 为每个可导入病例初始化映射条目（无 Mask 为空列表）；新增 cases_partial_mask_report 逐例报告完全缺失（missing）与部分缺失（partial），名称匹配与 worker _filter_masks 同规则（去空白、忽略大小写）；预检覆盖批量/多选/单病例三条路径，批量与多选按真实下游行为区分文案（批量=仅导入图像，多选=该病例将导入失败）；用户确认缺口后结果页保留该事实。测试：test_all.py 全量 636 通过，含 3 项新增 R02 失败路径测试（三例场景、预检-worker 规则一致性、无 Mask 病例入映射）；UI 工作流回归 + GUI 冒烟 101 通过；smoke 门禁 8/8（工件 20261014T123336_smoke.json）。"
     },
     {
       "id": "R03",
