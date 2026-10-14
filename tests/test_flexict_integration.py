@@ -1062,9 +1062,11 @@ class TestInferenceLifecycle(unittest.TestCase):
             self.assertEqual(
                 capture["params"]["input_path"],
                 str(job_dir / "input" / "source_image.nii.gz"))
+            # R10: the worker writes to a staging file; only the validated
+            # result is published to the final prediction.nii.gz.
             self.assertEqual(
                 capture["params"]["output_path"],
-                str(job_dir / "prediction.nii.gz"))
+                str(job_dir / "prediction.staged.nii.gz"))
             # prediction written next to the job on the source grid
             prediction = job_dir / "prediction.nii.gz"
             self.assertTrue(prediction.is_file())

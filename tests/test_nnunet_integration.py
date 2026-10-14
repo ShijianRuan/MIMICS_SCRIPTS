@@ -1436,12 +1436,13 @@ class SpatialContractTests(unittest.TestCase):
             )
             common.write_json_atomic(job / "control.json", {"action": "run"})
 
-            def fake_worker(*args, **kwargs):
+            def fake_worker(stage, params, *args, **kwargs):
                 wrong = np.eye(4)
                 wrong[0, 3] = 10.0
+                staged = Path(params["output_path"])
                 nib.save(
                     nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), wrong),
-                    str(job / "prediction.nii.gz"),
+                    str(staged),
                 )
                 return {"predicted": True}
 
@@ -1503,6 +1504,98 @@ class SpatialContractTests(unittest.TestCase):
             worker.assert_not_called()
             status = common.read_json(job / "status.json")
             self.assertIn("no longer matches", status["error"])
+
+    def test_inference_wrong_grid_preserves_previous_published_result(self):
+        """R10: a wrong-grid worker output must never touch the published
+        file — the previous reviewed prediction stays intact."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = root / "job"
+            job.mkdir()
+            image = root / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)),
+                str(image),
+            )
+            model = root / "model"
+            model.mkdir()
+            manifest = model / "mimics_model_manifest.json"
+            common.write_json_atomic(
+                manifest,
+                {
+                    "schema_version": common.MODEL_SCHEMA_VERSION,
+                    "model_id": "model",
+                    "model_dir": str(model),
+                    "labels": [{"name": "A", "id": 1}],
+                },
+            )
+            published = root / "reviewed_prediction.nii.gz"
+            previous = np.zeros((4, 4, 4), dtype=np.uint8)
+            previous[0, 0, 0] = 7
+            nib.save(nib.Nifti1Image(previous, np.eye(4)), str(published))
+            common.write_json_atomic(
+                job / "request.json",
+                {
+                    "operation": "infer",
+                    "job_id": "infer",
+                    "workspace": str(root / "workspace"),
+                    "image_path": str(image),
+                    "model_manifest": str(manifest),
+                    "output_path": str(published),
+                },
+            )
+            common.write_json_atomic(job / "control.json", {"action": "run"})
+
+            def fake_worker(stage, params, *args, **kwargs):
+                wrong = np.eye(4)
+                wrong[1, 3] = 12.0
+                nib.save(
+                    nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), wrong),
+                    str(Path(params["output_path"])),
+                )
+                return {"predicted": True}
+
+            with mock.patch.object(
+                pipeline, "_spawn_worker", side_effect=fake_worker
+            ), mock.patch.object(
+                pipeline, "_acquire_local_gpu", return_value=None
+            ):
+                returncode = pipeline.run_inference(job)
+            self.assertEqual(returncode, 1)
+            status = common.read_json(job / "status.json")
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("grid does not match", status["error"])
+            # The reviewed result is byte-for-byte intact.
+            survivor = np.asarray(nib.load(str(published)).dataobj)
+            self.assertEqual(int(survivor.sum()), 7)
+
+    def test_publish_prediction_output_refuses_corrupt_candidate(self):
+        """R10: corrupt bytes can never reach the published output path."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate = root / "candidate.nii.gz"
+            candidate.write_bytes(b"truncated garbage")
+            output = root / "prediction.nii.gz"
+            nib = __import__("nibabel")
+            np = __import__("numpy")
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            with self.assertRaises(RuntimeError):
+                pipeline.publish_prediction_output(
+                    candidate, output, None
+                )
+            self.assertEqual(
+                np.asarray(nib.load(str(output)).dataobj).sum(), 8
+            )
+            # No staging leftovers next to the output.
+            self.assertEqual(
+                [p.name for p in output.parent.glob("*.staged")], []
+            )
 
     def test_remote_inference_rejects_changed_source_before_transfer(self):
         import nibabel as nib

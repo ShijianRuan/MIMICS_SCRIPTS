@@ -2495,28 +2495,15 @@ def _finalize_completed_remote_job(
         ]
         _status_update(status_path, models=local_model_rows)
     else:
-        from tools.nnunet_common import read_json as read_nnunet_json
-
-        local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
-        downloaded = local_model_dir / "prediction.nii.gz"
-        output_path = Path(str(local_request.get("output_path") or downloaded)).resolve()
-        if not downloaded.is_file():
-            raise RuntimeError(
-                "Remote {} inference produced no prediction file.".format(
-                    "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
-                )
-            )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        if downloaded.resolve() != output_path.resolve():
-            temporary_output = output_path.with_name(output_path.name + ".remote-part")
-            shutil.copy2(str(downloaded), str(temporary_output))
-            os.replace(str(temporary_output), str(output_path))
+        # R10: route through the shared validate-then-publish boundary so a
+        # corrupt download or wrong-grid result cannot replace a previously
+        # reviewed prediction (same contract as _apply_remote_prediction_output).
+        _apply_remote_prediction_output(spec, kind, local_model_dir, remote_status)
         model = {
             "model_id": str(remote_status.get("model_id") or ""),
-            "output_path": str(output_path),
+            "output_path": str(remote_status.get("output_path") or ""),
         }
         selected = True
-        remote_status["output_path"] = str(output_path)
     _status_update(
         status_path,
         status="completed",
@@ -2853,6 +2840,7 @@ def _apply_remote_prediction_output(
     remote_status: dict[str, Any],
 ) -> None:
     from tools.nnunet_common import read_json as read_nnunet_json
+    from tools.nnunet_pipeline import publish_prediction_output
 
     local_request = read_nnunet_json(Path(spec["request_path"]), {}) or {}
     downloaded = local_model_dir / "prediction.nii.gz"
@@ -2863,11 +2851,14 @@ def _apply_remote_prediction_output(
                 "nnU-Net" if kind == "nnunet_infer" else "FlexiCT"
             )
         )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if downloaded.resolve() != output_path.resolve():
-        temporary_output = output_path.with_name(output_path.name + ".remote-part")
-        shutil.copy2(str(downloaded), str(temporary_output))
-        os.replace(str(temporary_output), str(output_path))
+    # R10: validate (readable NIfTI, source grid) BEFORE touching the target
+    # and publish through a unique staging name; a corrupt download or a
+    # wrong-grid result must never replace a previously reviewed file.
+    publish_prediction_output(
+        downloaded,
+        output_path,
+        local_request.get("source_geometry_expected"),
+    )
     remote_status["output_path"] = str(output_path)
 
 

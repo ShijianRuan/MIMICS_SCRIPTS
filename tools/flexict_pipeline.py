@@ -78,6 +78,7 @@ from nnunet_pipeline import (  # noqa: E402
     build_training_data_profile,
     path_signature,
     prepare_source_grid_cases,
+    publish_prediction_output,
     validate_materialized_source_geometry,
 )
 from resource_locks import process_start_marker  # noqa: E402
@@ -1274,6 +1275,10 @@ def run_inference(job_dir: Path) -> int:
         )
         gpu_lock = _acquire_local_gpu(
             request, status_path, control_path, log_path, "flexict inference")
+        # R10: the worker writes to a job-local staging file; the final
+        # output_path is only touched after the prediction passed validation,
+        # so a failed or wrong-grid run cannot destroy a previous result.
+        staged_output = job_dir / "prediction.staged.nii.gz"
         try:
             configuration = str(manifest.get("configuration") or "2d")
             import nnunet_pipeline as np_mod
@@ -1288,7 +1293,7 @@ def run_inference(job_dir: Path) -> int:
                     {
                         "model_folder": str(model_dir),
                         "input_path": str(inference_input),
-                        "output_path": str(output_path),
+                        "output_path": str(staged_output),
                         "disable_tta": True,  # locked recipe: no TTA
                         "use_cpu": bool(request.get("use_cpu", False)),
                         "enable_stats": False,
@@ -1306,19 +1311,27 @@ def run_inference(job_dir: Path) -> int:
         finally:
             if gpu_lock is not None:
                 gpu_lock.release()
-        if not output_path.is_file():
+        if not staged_output.is_file():
             raise RuntimeError(
-                "FlexiCT inference produced no output: {}".format(output_path))
+                "FlexiCT inference produced no output: {}".format(staged_output))
         import nibabel as nib
         import numpy as np
 
         source = nib.load(str(inference_input))
-        prediction = nib.load(str(output_path))
+        prediction = nib.load(str(staged_output))
         if tuple(source.shape[:3]) != tuple(prediction.shape[:3]) or not np.allclose(
             source.affine, prediction.affine, atol=1e-4, rtol=0.0
         ):
             raise RuntimeError(
                 "Prediction grid does not match the source image. The result was not offered to Mimics.")
+        publish_prediction_output(
+            staged_output,
+            output_path,
+            {
+                "source_shape": list(source.shape[:3]),
+                "source_voxel_to_ras_matrix": source.affine.tolist(),
+            },
+        )
         update_status(
             status_path,
             status="completed",

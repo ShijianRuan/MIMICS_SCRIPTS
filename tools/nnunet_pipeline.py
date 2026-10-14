@@ -1743,6 +1743,122 @@ def validate_materialized_source_geometry(
         )
 
 
+def validate_prediction_nifti(prediction_path: str | Path) -> None:
+    """R10: a downloaded/produced prediction must be a readable 3D NIfTI.
+
+    Runs before anything is allowed to touch the published output path, so a
+    corrupt or truncated download can never replace a reviewed result.
+    """
+    import nibabel as nib
+
+    try:
+        image = nib.load(str(prediction_path))
+    except Exception as exc:
+        raise RuntimeError(
+            "The prediction file is not a readable NIfTI image ({}): {}".format(
+                exc, prediction_path
+            )
+        )
+    if len(image.shape) < 3:
+        raise RuntimeError(
+            "The prediction file is not a valid 3D NIfTI image: {}".format(
+                prediction_path
+            )
+        )
+
+
+def publish_prediction_output(
+    candidate: str | Path,
+    output_path: str | Path,
+    expected_geometry: dict[str, Any] | None,
+) -> Path:
+    """R10: validate-then-publish boundary for prediction outputs.
+
+    The candidate is validated (readable NIfTI, source shape/affine) BEFORE
+    the output path is touched. Publication uses a unique staging name (two
+    concurrent jobs never share one .remote-part) and, when the target
+    already exists, moves the old file aside so a failed or wrong-grid result
+    can never silently destroy a previously reviewed prediction.
+
+    Returns the resolved output path; on any failure the old file is intact.
+    """
+    candidate = Path(candidate).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    if not candidate.is_file():
+        raise RuntimeError(
+            "Prediction file is missing: {}".format(candidate)
+        )
+    validate_prediction_nifti(candidate)
+    if expected_geometry:
+        expected_shape = tuple(
+            int(value) for value in expected_geometry.get("source_shape") or []
+        )
+        expected_affine = expected_geometry.get("source_voxel_to_ras_matrix")
+        if expected_affine is not None:
+            import nibabel as nib
+            import numpy as np
+
+            image = nib.load(str(candidate))
+            if (
+                len(expected_shape) != 3
+                or tuple(image.shape[:3]) != expected_shape
+                or not np.allclose(
+                    image.affine,
+                    np.asarray(expected_affine, dtype=float),
+                    atol=1e-4,
+                    rtol=0.0,
+                )
+            ):
+                raise RuntimeError(
+                    "Prediction grid does not match the source image. "
+                    "The result was not published and the existing file "
+                    "was left unchanged."
+                )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if candidate == output_path:
+        return output_path
+    # Keep the original suffix (e.g. .nii.gz) intact so the staged copy is
+    # still a recognizable NIfTI for nibabel's extension-based loading during
+    # the second validation pass.
+    staging = output_path.with_name(
+        "{}.{}.staged{}".format(
+            output_path.name, uuid.uuid4().hex, "".join(output_path.suffixes)
+        )
+    )
+    replaced = None
+    try:
+        shutil.copy2(str(candidate), str(staging))
+        # Validate the copy we are about to publish, not just the source:
+        # a partial copy (disk full mid-write) must fail here, not in Mimics.
+        validate_prediction_nifti(staging)
+        if output_path.exists():
+            replaced = output_path.with_name(
+                "{}.replaced-{}".format(
+                    output_path.name, uuid.uuid4().hex[:8]
+                )
+            )
+            os.replace(str(output_path), str(replaced))
+        try:
+            replace_with_retry(str(staging), str(output_path))
+        except OSError:
+            if replaced is not None and not output_path.exists():
+                os.replace(str(replaced), str(output_path))
+                replaced = None
+            raise
+    finally:
+        if staging.exists():
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+    if replaced is not None:
+        try:
+            replaced.unlink()
+        except OSError:
+            pass
+    return output_path
+
+
 def _record_log_compaction(status_path: Path, log_path: Path) -> None:
     try:
         result = compact_completed_log(log_path)
@@ -2188,13 +2304,17 @@ def run_inference(job_dir: Path) -> int:
         gpu_lock = _acquire_local_gpu(
             request, status_path, control_path, log_path, "inference"
         )
+        # R10: the worker writes to a job-local staging file; the final
+        # output_path is only touched after the prediction passed validation,
+        # so a failed or wrong-grid run cannot destroy a previous result.
+        staged_output = job_dir / "prediction.staged.nii.gz"
         try:
             _spawn_worker(
                 "infer",
                 {
                     "model_folder": str(model_dir),
                     "input_path": str(inference_input),
-                    "output_path": str(output_path),
+                    "output_path": str(staged_output),
                     "disable_tta": bool(request.get("disable_tta", True)),
                     "use_cpu": bool(request.get("use_cpu", False)),
                     "enable_stats": False,
@@ -2213,19 +2333,27 @@ def run_inference(job_dir: Path) -> int:
         finally:
             if gpu_lock is not None:
                 gpu_lock.release()
-        if not output_path.is_file():
-            raise RuntimeError("nnU-Net inference produced no output: {}".format(output_path))
+        if not staged_output.is_file():
+            raise RuntimeError("nnU-Net inference produced no output: {}".format(staged_output))
         import nibabel as nib
         import numpy as np
 
         source = nib.load(str(inference_input))
-        prediction = nib.load(str(output_path))
+        prediction = nib.load(str(staged_output))
         if tuple(source.shape[:3]) != tuple(prediction.shape[:3]) or not np.allclose(
             source.affine, prediction.affine, atol=1e-4, rtol=0.0
         ):
             raise RuntimeError(
                 "Prediction grid does not match the source image. The result was not offered to Mimics."
             )
+        publish_prediction_output(
+            staged_output,
+            output_path,
+            {
+                "source_shape": list(source.shape[:3]),
+                "source_voxel_to_ras_matrix": source.affine.tolist(),
+            },
+        )
         update_status(
             status_path,
             status="completed",

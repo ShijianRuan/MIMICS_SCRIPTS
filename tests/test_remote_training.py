@@ -4625,5 +4625,165 @@ class AcceptanceChecklistTests(unittest.TestCase):
         )
 
 
+class RemotePredictionPublishTests(unittest.TestCase):
+    """R10: a downloaded remote prediction must never destroy the existing
+    reviewed result before it is proven valid."""
+
+    def _spec(self, root: Path, output_path: Path) -> dict:
+        request_path = root / "request.json"
+        remote_compute.write_json_atomic(
+            request_path, {"output_path": str(output_path)}
+        )
+        return {
+            "job_dir": str(root),
+            "request_path": str(request_path),
+            "status_path": str(root / "status.json"),
+        }
+
+    def _download_dir(self, root: Path, prediction_bytes: bytes) -> Path:
+        bundle = root / "remote_prediction_bundle"
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "prediction.nii.gz").write_bytes(prediction_bytes)
+        return bundle
+
+    def _nifti_bytes(self, array, affine) -> bytes:
+        import nibabel as nib
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "prediction.nii.gz"
+            nib.save(nib.Nifti1Image(array, affine), str(path))
+            return path.read_bytes()
+
+    def test_corrupt_download_does_not_overwrite_existing_result(self):
+        # The exact R10 probe shape: 'new unvalidated synthetic result'
+        # bytes were previously copied straight over a reviewed file.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            output.write_bytes(b"previous reviewed result")
+            bundle = self._download_dir(root, b"new unvalidated synthetic result")
+            with self.assertRaises(RuntimeError):
+                controller._apply_remote_prediction_output(
+                    self._spec(root, output),
+                    "nnunet_infer",
+                    bundle,
+                    {},
+                )
+            self.assertEqual(
+                output.read_bytes(), b"previous reviewed result"
+            )
+
+    def test_geometry_mismatch_is_refused_before_publish(self):
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            shifted = np.eye(4)
+            shifted[0, 3] = 100.0
+            bundle = self._download_dir(
+                root, self._nifti_bytes(np.ones((4, 4, 4), dtype=np.uint8), shifted)
+            )
+            request_path = root / "request.json"
+            remote_compute.write_json_atomic(
+                request_path,
+                {
+                    "output_path": str(output),
+                    "source_geometry_expected": {
+                        "source_shape": [4, 4, 4],
+                        "source_voxel_to_ras_matrix": np.eye(4).tolist(),
+                    },
+                },
+            )
+            spec = {
+                "job_dir": str(root),
+                "request_path": str(request_path),
+                "status_path": str(root / "status.json"),
+            }
+            with self.assertRaisesRegex(RuntimeError, "grid does not match"):
+                controller._apply_remote_prediction_output(
+                    spec, "nnunet_infer", bundle, {}
+                )
+            previous = nib.load(str(output))
+            self.assertEqual(tuple(previous.shape[:3]), (4, 4, 4))
+            self.assertTrue(
+                np.allclose(previous.affine, np.eye(4), atol=1e-4)
+            )
+
+    def test_valid_prediction_publishes_and_replaces_old_file(self):
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            bundle = self._download_dir(
+                root,
+                self._nifti_bytes(
+                    np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                ),
+            )
+            spec = self._spec(root, output)
+            remote_status = {}
+            controller._apply_remote_prediction_output(
+                spec, "flexict_infer", bundle, remote_status
+            )
+            self.assertEqual(remote_status["output_path"], str(output.resolve()))
+            published = np.asarray(nib.load(str(output)).dataobj)
+            self.assertEqual(int(published.sum()), 64)
+
+    def test_staging_name_is_unique_per_call(self):
+        import nibabel as nib
+        import numpy as np
+
+        # Two concurrent jobs must never share one staging file: the old
+        # fixed '.remote-part' name let a second job overwrite the first
+        # job's staged bytes before either was published.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            bundle = self._download_dir(
+                root,
+                self._nifti_bytes(
+                    np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                ),
+            )
+            spec = self._spec(root, output)
+            staging_names = []
+            import tools.nnunet_pipeline as nnunet_pipeline_module
+
+            original_copy2 = nnunet_pipeline_module.shutil.copy2
+
+            def spy_copy2(source, destination, **kwargs):
+                if ".staged" in Path(str(destination)).name:
+                    staging_names.append(Path(str(destination)).name)
+                return original_copy2(source, destination, **kwargs)
+
+            with mock.patch.object(
+                nnunet_pipeline_module.shutil, "copy2", side_effect=spy_copy2
+            ):
+                controller._apply_remote_prediction_output(
+                    spec, "nnunet_infer", bundle, {}
+                )
+                controller._apply_remote_prediction_output(
+                    spec, "nnunet_infer", bundle, {}
+                )
+            self.assertEqual(len(staging_names), 2)
+            self.assertNotEqual(staging_names[0], staging_names[1])
+
+
 if __name__ == "__main__":
     unittest.main()
