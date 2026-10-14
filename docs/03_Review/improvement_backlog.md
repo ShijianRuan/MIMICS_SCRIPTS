@@ -3203,3 +3203,56 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
   **若未来仍需快捷键**：唯一现实途径是外置工具窗口内的 Qt 快捷键
   （Ctrl+O 等窗口内作用域），但仅在窗口激活时生效，覆盖不了
   "Mimics 主界面里的标注操作"这一主诉求，故不立项。
+
+### R81（2026-10-14 复审销项轮：2026-10-13-revalidation 17 卡全部修复）
+
+> 用户指令：修复 `docs/reviews/2026-10-13-revalidation.md`（基线 96448ae）
+> 的 17 项问题 R01–R17。逐卡：修复 → 失败路径测试 → smoke 门禁 →
+> 独立 commit → revalidation.json 卡片同步。P0×1、P1×7、P2×9，
+> 本轮全部关闭，无遗留。
+
+- [x] **R81-R10【P0】预测发布先校验后覆盖**〔commit `3119208`〕：
+  预测结果发布前先完整校验新结果，校验失败保留旧结果永不丢失。
+- [x] **R81-R17【P1】撤销导入误删人工修正过的 Mask**〔commit
+  `d06c24e`〕：撤销前比对内容快照，人工修正过的 Mask 不再被删除。
+- [x] **R81-R02【P1】批量导入预检漏掉无 Mask 病例**〔commit
+  `2d360d1`〕：预检覆盖无 Mask 与部分缺失两类情况，缺失在提交前可见。
+- [x] **R81-R06【P1】中文多器官标签误判同标签/别名**〔commit
+  `ad7b4e9`〕：语义标签键归一化不再把不同中文标签折叠成同一项。
+- [x] **R81-R07【P1】FlexiCT 最终拆分把旧验证病例放入训练侧**〔commit
+  `c71e724`〕：最终拆分重写尊重既有验证集划分。
+- [x] **R81-R08【P1】远程训练打包丢失患者分组**〔commit `7661be1`〕：
+  打包请求携带 patient_group，远程与本地拆分一致。
+- [x] **R81-R09【P1】非等距/重复位置 DICOM 被制造成规则网格**〔commit
+  `609a6b7`〕：桥接层对非规则序列 fail-closed，不再插值造数据。
+- [x] **R81-R11【P1】nnInteractive 写入方式显示与实际相反**〔commit
+  `6feada1`〕：显示文案与实际应用行为一致。
+- [x] **R81-R14【P2】目录签名缓存原位更新失效**〔commit `9bc41f7`〕：
+  缓存签名检测原位更新的影像，不再把新数据当旧数据。
+- [x] **R81-R15【P2】AL 不确定度只查 shape 不查 affine**〔commit
+  `3bca099`〕：逐份 mask 校验 affine（atol 1e-4），错配预测整例拒绝
+  并记录错误日志、不入排名。
+- [x] **R81-R01【P2】任务标识二次归一化丢摘要**〔commit `e48fc31`〕：
+  `stable_task_identifier` 以 `slug != text` 统一判定有损（替换/剥离/
+  截断），96 字符预算 87+摘要 8，幂等可重放。
+- [x] **R81-R16【P2】保留名 background 覆盖零背景**〔commit
+  `e48fc31`〕：入口拒绝标签名/别名 background + dataset.json 写盘前
+  断言 background==0 双层守卫。
+- [x] **R81-R03【P2】worker 状态改写丢 output_path**〔commit
+  `806fb61`〕：`_write_status` 从上一份状态保留 output_path/source_path；
+  回执检索侧从 output_mcs 推导输出目录 + normcase 去重。
+- [x] **R81-R04【P2】AL viewed 写锁阻塞 Mimics 主线程 2 秒**〔commit
+  `9e3332e`〕：Mimics 侧零等待 + `_al_tick` 队列重试（best-effort，
+  进程内生命周期）；外部 UI 侧保持有界等待不变。
+- [x] **R81-R05【P2】折叠摘要漏掉镜像与工作目录**〔commit
+  `85981b0`〕：`_non_default_summary` 补 runtime_image/remote_root 两项；
+  8 个高级控件编辑信号即时刷新折叠计数。
+- [x] **R81-R12【P2】模型选择器长版本号不可见不可复制**〔commit
+  `035106d`〕：摘要换只读 QPlainTextEdit（WrapAnywhere + 键盘可选 +
+  可滚动），真实 Qt 控件测试 + 125%/150% 字体验证。
+- [x] **R81-R13【P2】训练完成导航指向默认隐藏版本**〔commit
+  `005da90`〕：完成卡新增「查看这个版本」一键切页+提升过滤+定位行；
+  三终态文案修正为真实 UI 路径。
+
+**验证**：每卡独立 smoke 门禁全绿（工件见各 fix_note）；轮末 fast
+门禁见轮次报告。净代码变化见复杂度账本 R81 行。
