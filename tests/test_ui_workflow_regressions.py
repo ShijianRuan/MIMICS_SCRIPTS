@@ -138,11 +138,39 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertIn("跳过", summary[2])
         self.assertIn("缓存清理 7 天", summary[5])
 
+        # R05: the fold also hides runtime_image / remote_root — a non-default
+        # image or working directory changes the compute environment and
+        # where results land, so both must appear in the summary.
+        image_profile = {"runtime_image": "registry.local/mimics:latest"}
+        image_summary = ui._non_default_summary(image_profile)
+        self.assertEqual(1, len(image_summary))
+        self.assertIn("registry.local/mimics:latest", image_summary[0])
+        root_profile = {"remote_root": "/userdata/other/"}
+        root_summary = ui._non_default_summary(root_profile)
+        self.assertEqual(1, len(root_summary))
+        self.assertIn("/userdata/other", root_summary[0])
+        self.assertEqual([], ui._non_default_summary({
+            "runtime_image": ui.DEFAULT_IMAGE,
+            "remote_root": ui.DEFAULT_REMOTE_ROOT,
+        }))
+        both = ui._non_default_summary(
+            {"runtime_image": "x:1", "remote_root": "/r"})
+        self.assertEqual(2, len(both))
+
         with mock.patch.object(ui, 'load_profiles', return_value=[]):
             w = self.keep(ui.ServerProfilesDialog(None, QT))
         self.assertEqual("高级运行设置", w.advanced_toggle.text())
         w._refresh_advanced_toggle(profile)
         self.assertIn("7 项非默认", w.advanced_toggle.text())
+        # R05: the count follows edits, not just profile loads — typing a
+        # non-default image updates the fold title before any save.
+        w.image_edit.setText("registry.local/mimics:latest")
+        self.assertIn("1 项非默认", w.advanced_toggle.text())
+        w.image_edit.setText("")
+        w.remote_root_edit.setText("/userdata/other")
+        self.assertIn("1 项非默认", w.advanced_toggle.text())
+        w.remote_root_edit.setText("")
+        self.assertEqual("高级运行设置", w.advanced_toggle.text())
 
     def test_active_learning_single_creation_form_and_selection_gating(self):
         import flexict_active_learning_ui as ui

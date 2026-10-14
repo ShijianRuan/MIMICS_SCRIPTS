@@ -49,6 +49,10 @@ def _non_default_summary(profile: dict) -> list[str]:
 
     Pure function so tests can verify the mapping without Qt. Only the
     settings hidden behind the dialog's「高级运行设置」fold are summarized.
+    R05: runtime_image and remote_root are part of that fold too — a
+    non-default image or working directory changes the compute environment
+    and where results land, so they must show up in the summary (and thus
+    in the fold's count), not just in the fold's input fields.
     """
     deviations = []
     if str(profile.get("container_runtime") or "docker") != "docker":
@@ -80,6 +84,13 @@ def _non_default_summary(profile: dict) -> list[str]:
         deviations.append("缓存清理 {0} 天".format(retention))
     if profile.get("cache_training_data", True) is False:
         deviations.append("不复用已上传训练数据")
+    image = str(profile.get("runtime_image") or DEFAULT_IMAGE)
+    if image != DEFAULT_IMAGE:
+        deviations.append("镜像 {0}".format(image))
+    remote_root = str(
+        profile.get("remote_root") or DEFAULT_REMOTE_ROOT).rstrip("/")
+    if remote_root != DEFAULT_REMOTE_ROOT.rstrip("/"):
+        deviations.append("工作目录 {0}".format(remote_root))
     return deviations
 
 
@@ -307,6 +318,20 @@ class ServerProfilesDialog:
         form.addWidget(self.advanced_toggle, basic_row, 0, 1, 2)
         form.addWidget(advanced, basic_row + 1, 0, 1, 2)
         root.addWidget(scrollable_widget(form_surface), 1)
+        # R05: the fold's deviation count must follow edits, not just profile
+        # loads — otherwise the count shown while editing contradicts the
+        # value that save will persist.
+        for widget, signal in (
+            (self.remote_root_edit, "textChanged"),
+            (self.image_edit, "textChanged"),
+            (self.runtime_combo, "currentIndexChanged"),
+            (self.namespace_edit, "textChanged"),
+            (self.code_verify_combo, "currentIndexChanged"),
+            (self.weights_verify_combo, "currentIndexChanged"),
+            (self.gpu_busy_combo, "currentIndexChanged"),
+            (self.retention_spin, "valueChanged"),
+        ):
+            getattr(widget, signal).connect(self._refresh_toggle_from_form)
 
         self.status_label = QtWidgets.QLabel(
             "保存配置后，测试 SSH、Docker、GPU、存储和镜像环境。"
@@ -446,6 +471,23 @@ class ServerProfilesDialog:
             "高级运行设置（{0} 项非默认）".format(count) if count
             else "高级运行设置"
         )
+
+    def _current_profile_from_form(self) -> dict:
+        """The form's advanced fields as a profile-shaped dict (R05)."""
+        return {
+            "container_runtime": self.runtime_combo.currentData(),
+            "container_namespace": self.namespace_edit.text(),
+            "remote_code_verify": self.code_verify_combo.currentData(),
+            "remote_weights_verify": self.weights_verify_combo.currentData(),
+            "gpu_busy_policy": self.gpu_busy_combo.currentData(),
+            "remote_cache_retention_days": self.retention_spin.value(),
+            "cache_training_data": self.cache_check.isChecked(),
+            "runtime_image": self.image_edit.text(),
+            "remote_root": self.remote_root_edit.text(),
+        }
+
+    def _refresh_toggle_from_form(self, *_args) -> None:
+        self._refresh_advanced_toggle(self._current_profile_from_form())
 
     def _new_profile(self) -> None:
         self.profile_combo.setCurrentIndex(0)
