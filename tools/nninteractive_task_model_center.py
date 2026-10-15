@@ -2423,13 +2423,15 @@ class ModelCenter:
             self.model_table.setItem(
                 index, 0, self.QtWidgets.QTableWidgetItem(_format_time(row.get("created_at_epoch")))
             )
-            self.model_table.setItem(
-                index,
-                1,
-                self.QtWidgets.QTableWidgetItem(
-                    str(row.get("display_name") or row.get("model_id") or "")
-                ),
+            name_item = self.QtWidgets.QTableWidgetItem(
+                str(row.get("display_name") or row.get("model_id") or "")
             )
+            # R13: show_completed_model locates the row by model_id, not by
+            # display text — a display_name would break text matching.
+            name_item.setData(
+                self.QtCore.Qt.UserRole, str(row.get("model_id") or "")
+            )
+            self.model_table.setItem(index, 1, name_item)
             self.model_table.setItem(
                 index,
                 2,
@@ -2621,7 +2623,9 @@ class ModelCenter:
         self.tabs.setCurrentWidget(self.models_tab)  # also refreshes
         for row_index in range(self.model_table.rowCount()):
             item = self.model_table.item(row_index, 1)
-            if item is not None and item.text() == model_id:
+            if item is not None and str(
+                item.data(self.QtCore.Qt.UserRole) or ""
+            ) == model_id:
                 self.model_table.selectRow(row_index)
                 self.model_table.scrollToItem(
                     item, self.QtWidgets.QAbstractItemView.PositionAtCenter

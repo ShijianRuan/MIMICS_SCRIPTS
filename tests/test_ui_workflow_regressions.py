@@ -171,6 +171,11 @@ class TestUiWorkflow(unittest.TestCase):
         w.remote_root_edit.setText("/userdata/other")
         self.assertIn("1 项非默认", w.advanced_toggle.text())
         w.remote_root_edit.setText("")
+        # cache_check is counted in the summary although it sits on the basic
+        # page — unchecking it must update the fold count immediately too.
+        w.cache_check.setChecked(False)
+        self.assertIn("1 项非默认", w.advanced_toggle.text())
+        w.cache_check.setChecked(True)
         self.assertEqual("高级运行设置", w.advanced_toggle.text())
 
     def test_active_learning_single_creation_form_and_selection_gating(self):
@@ -425,6 +430,7 @@ class TestUiWorkflow(unittest.TestCase):
             w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
 
         model = dict(model_id='model_20261014T220000_ab12cd34',
+                     display_name='10月14日肝脏适配',
                      state='not_improved', strategy='baseline',
                      created_at_epoch=1, train_case_count=2,
                      validation_case_count=1)
@@ -454,8 +460,14 @@ class TestUiWorkflow(unittest.TestCase):
             self.assertTrue(w.show_failed.isChecked())
             self.assertEqual(w.tabs.currentWidget(), w.models_tab)
             self.assertEqual(1, w.model_table.rowCount())
+            # Row location matches on model_id (UserRole), not display text —
+            # a display_name must not break the navigation.
             self.assertEqual(
                 model['model_id'],
+                w.model_table.item(w.model_table.currentRow(), 1).data(
+                    QtCore.Qt.UserRole))
+            self.assertEqual(
+                '10月14日肝脏适配',
                 w.model_table.item(w.model_table.currentRow(), 1).text())
 
     def _drop_check(self, kind, chosen):

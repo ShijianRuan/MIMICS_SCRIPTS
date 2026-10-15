@@ -330,6 +330,9 @@ class ServerProfilesDialog:
             (self.weights_verify_combo, "currentIndexChanged"),
             (self.gpu_busy_combo, "currentIndexChanged"),
             (self.retention_spin, "valueChanged"),
+            # cache_check lives on the basic page but its value is counted
+            # in the deviation summary, so it refreshes the count too.
+            (self.cache_check, "toggled"),
         ):
             getattr(widget, signal).connect(self._refresh_toggle_from_form)
 
