@@ -216,7 +216,7 @@
       ],
       "target_environment_validation": "not_run",
       "fix_commit": "85981b0",
-      "fix_note": "_non_default_summary 补齐 runtime_image/remote_root 两项非默认检查（镜像 X/工作目录 X，全文拼接）；8 个高级控件连接变更信号，编辑时折叠计数即时刷新；主对话框 hint 既有非默认摘要列表（:889-895）展示镜像/目录全文。测试：test_remote_advanced_fold_summarizes_non_defaults 扩展（仅镜像/仅目录/两项都改/载入旧配置不回归/编辑即时刷新）；smoke 8/8 工件 20261014T220658_smoke.json。"
+      "fix_note": "_non_default_summary 补齐 runtime_image/remote_root 两项非默认检查（镜像 X/工作目录 X，全文拼接）；8 个高级控件连接变更信号，编辑时折叠计数即时刷新；主对话框 hint 既有非默认摘要列表（:889-895）展示镜像/目录全文。测试：test_remote_advanced_fold_summarizes_non_defaults 扩展（仅镜像/仅目录/两项都改/载入旧配置不回归/编辑即时刷新）；smoke 8/8 工件 20261014T220658_smoke.json。（自检加固 0a71677）编辑即时刷新补 cache_check toggled 信号（计入摘要但漏连信号，取消勾选后计数陈旧）。"
     },
     {
       "id": "R06",
@@ -525,7 +525,7 @@
       ],
       "target_environment_validation": "not_run",
       "fix_commit": "005da90",
-      "fix_note": "完成卡新增「查看这个版本」按钮：切到「模型版本」页、自动勾选「显示失败与未改进的版本」、定位并选中新版本行（model_id 通过按钮property 从 completed status 的 model.model_id 传入）。三个终态文案修正：current_model_retained 说明未超过现有模型+版本默认隐藏及查看方式；验证集不足场景同样给出按钮路径；不再有指向本页不存在列表的误导。测试：真实 Qt 行为测试覆盖 current_model_retained 全链路（文案、按钮可见、过滤提升、切页、选中行定位），source-assert 同步；smoke 8/8 工件 20261014T230649_smoke.json。"
+      "fix_note": "完成卡新增「查看这个版本」按钮：切到「模型版本」页、自动勾选「显示失败与未改进的版本」、定位并选中新版本行（model_id 通过按钮property 从 completed status 的 model.model_id 传入）。三个终态文案修正：current_model_retained 说明未超过现有模型+版本默认隐藏及查看方式；验证集不足场景同样给出按钮路径；不再有指向本页不存在列表的误导。测试：真实 Qt 行为测试覆盖 current_model_retained 全链路（文案、按钮可见、过滤提升、切页、选中行定位），source-assert 同步；smoke 8/8 工件 20261014T230649_smoke.json。（自检加固 0a71677）编辑即时刷新补 版本行定位从文本比对改为 UserRole（display_name 出现后文本匹配会静默失败）。"
     },
     {
       "id": "R14",
