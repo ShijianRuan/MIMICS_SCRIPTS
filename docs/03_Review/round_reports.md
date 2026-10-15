@@ -5855,3 +5855,24 @@ docs +40766 为评审证据工件（metrics/清单 json，非代码）。新增�
 ### 外部资源使用
 
 本轮未使用远程服务器与真实数据集（纯本机修复），无清理义务。
+
+### R81 自检加固（2026-10-15，用户指令：自我检查修复是否正确）
+
+对 R05/R12/R13 三张本会话修复卡做对抗性复查，发现并修复两处真实缺陷
+（commit `0a71677`）：
+
+- **R05 漏连 cache_check 信号**：它位于基本页但 cache_training_data
+  计入偏离摘要——取消勾选后折叠计数陈旧直到保存。补 toggled 连接
+  + 测试断言（勾选/取消即时刷新）。
+- **R13 行定位按显示文本比对**：模型注册表结构允许 display_name，
+  一旦写入「查看这个版本」的文本匹配即静默失灵。列 1 item 改存
+  model_id 于 UserRole，定位按 UserRole 比对；测试补 display_name
+  用例锁定契约（文本列显示中文名、UserRole 仍是 id）。
+
+R12 复查结论（无缺陷）：最小窗口 560×280 下主按钮/取消按钮均可达、
+长 ID 全文可滚动至尾部、键盘可选标志生效；minimumHeight 在 show()
+后被 Qt 重算属正常行为（实际高度取 maxHeight=96，viewport 满足阅读）；
+Chooser.cancel 无属性遮蔽。
+
+验证：test_ui_workflow_regressions 21 passed + 31 subtests、
+model_center 6/6、smoke 8/8（20261015T224446_smoke.json）。
