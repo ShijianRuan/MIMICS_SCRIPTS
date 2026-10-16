@@ -117,7 +117,7 @@
     {
       "id": "S01",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "Mask 快照返回类型改变，真实导入队列无法写撤销回执",
       "classification": "new_regression",
       "previous_ids": [
@@ -151,12 +151,14 @@
         "重启/重试能补写恢复依据且不重复创建工程，随后通过真实 Mimics 撤销链路验收。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "90ec501",
+      "fix_note": "快照交接固定为普通字典契约：新增 _receipt_payload 把 _capture_mask_snapshot 的 _MaskIdentity 展平为 name/guid/pixel_count/sha256 普通字典，create_mcs_from_manifest 按该契约填 receipt；队列循环回执写失败计入 receipt_failed 并写入最终 update_status（resume 沿袭），不再仅写日志后显示完整成功。测试：test_receipt_handoff_uses_real_producer_payload（真实生产者返回值喂队列，回执四字段一致指向最终 .mcs）、test_receipt_failure_is_visible_in_status（回执失败在状态可见）。验证：smoke 8/8（工件 20261016T210247_smoke.json）。"
     },
     {
       "id": "S02",
       "priority": "P0",
-      "status": "open",
+      "status": "fixed",
       "title": "有效预测成功发布后仍删除旧结果，保护只覆盖失败路径",
       "classification": "remaining",
       "previous_ids": [
@@ -191,12 +193,14 @@
         "发布失败/取消/磁盘满时原结果不变，结果页说明最终发布路径及保留的旧版本。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "88930ec",
+      "fix_note": "publish_prediction_output 成功发布后保留 replaced 副本（不再 unlink）：旧结果移至 {stem}.replaced-{hex}{suffixes}（戳在扩展名之前，nibabel 可直接打开），返回值改为 (output_path, replaced_path)，旧内容经明确路径找回；失败路径校验/回滚语义不变。测试：test_publish_prediction_output_returns_kept_replaced_copy、test_inference_success_keeps_previous_result_recoverable。验证：smoke 8/8（工件 20261016T203123_smoke.json）。"
     },
     {
       "id": "S03",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "发布校验只加载文件头，截断体素、4D 和概率值仍能发布",
       "classification": "newly_identified_boundary",
       "previous_ids": [
@@ -231,12 +235,14 @@
         "分别覆盖 candidate 与 staging 检查、传输/复制中断和后台完成状态，不能只测试完全不可解析的垃圾字节。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "028e5b3",
+      "fix_note": "validate_prediction_nifti 补齐体素级校验：恰为 3D（4D 拒绝）、逐层强制读体素（头正常但截断报「体素数据不完整」）、NaN/Inf 拒绝、小数概率值拒绝、负标签拒绝，全部在触碰最终目标前。测试：test_publish_rejects_header_only_truncated_voxels（合法 gzip 仅 352 字节头）、test_publish_rejects_four_dimensional_and_fractional。验证：smoke 8/8（工件 20261016T211117_smoke.json）。"
     },
     {
       "id": "S04",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "旧 v2 或缺 SHA 快照仍按像素数放行删除",
       "classification": "remaining",
       "previous_ids": [
@@ -273,12 +279,14 @@
         "真实 Windows/Mimics 导入→保存/不保存编辑→撤销→重启，人工工作从明确恢复点可找回。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "e9ebd30",
+      "fix_note": "_content_edited 缺 SHA 一律视为无法证明未修改（保留 Mask 报人工处理），不再按像素数放行；编辑提示文案说明缺内容快照情形。测试：test_undo_s04_missing_sha_keeps_mask_even_on_matching_count（空 SHA + 相同计数不自动删除）。验证：smoke 8/8（工件 20261016T212137_smoke.json）。"
     },
     {
       "id": "S05",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "冻结验证集与新启发式取并集，让合法两病例续训变空集",
       "classification": "new_regression",
       "previous_ids": [
@@ -314,12 +322,14 @@
         "明确重新划分与冻结约束矛盾时展示具体变化；检查真实 materialize→最终 writer→trainer 读取顺序。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "912a590",
+      "fix_note": "_write_flexict_splits 冻结集合成为拆分权威：有冻结集时 validation = 冻结集（患者组扩展）、其余病例进训练侧，不再与默认启发式取并集；无冻结集才走启发式；空侧 fail-closed 保留。测试：test_frozen_group_emptying_train_side_fails_closed（2 例整组冻结真不可拆）、test_frozen_group_keeps_remaining_cases_training、test_frozen_two_case_retrain_keeps_original_split、test_frozen_four_case_rebuild_does_not_grow_validation。验证：smoke 8/8（工件 20261016T213857_smoke.json）。"
     },
     {
       "id": "S06",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "DICOM 校验仍放行缺位置、平面内跳动和不一致像素间距",
       "classification": "remaining",
       "previous_ids": [
@@ -358,12 +368,14 @@
         "原始层面→体素角点→Mimics 所选 Image→导出 Mask 以实际物理位置核对，不能只检查 shape。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "9ac6d5b",
+      "fix_note": "_validate_dicom_slice_grid 补齐：部分层缺 IPP/IOP/PixelSpacing 拒绝（整序列缺才 legacy 兜底）；逐层 PixelSpacing 一致性（部分缺失/不可解析/非有限/非正/不一致拒绝）；位置非有限拒绝；步进检查改为法向均匀 + 面内分量与其中位数比较（线性倾斜通过、非线性跳动拒绝）。测试：test_dicom_helpers_refuse_incomplete_or_drifting_geometry（zigzag/缺中间 IPP/混合像素间距）。验证：smoke 8/8（工件 20261016T215127_smoke.json）。"
     },
     {
       "id": "S07",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "标签语义校验与文件匹配使用不同规约，两个标签指向同一分割",
       "classification": "new_regression",
       "previous_ids": [
@@ -400,12 +412,14 @@
         "验证实际 materialized label 和逐标签体素数，允许顺序替换也不能绕过源身份检查。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "5edb092",
+      "fix_note": "_find_label_files 两遍匹配：_semantic_label_key（NFKC+casefold）精确命中优先，仅无精确命中才用分隔符折叠宽松匹配；prepare_source_grid_cases 新增跨标签所有权检查——同一源文件被两个不同输出标签认领即 RuntimeError 点名两标签与文件，无论 overlap_policy。测试：test_find_label_files_prefers_exact_over_separator_folded、test_prepare_refuses_one_file_claimed_by_two_labels。验证：smoke 8/8（工件 20261016T222111_smoke.json）。"
     },
     {
       "id": "S08",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "Mimics 侧已不等锁，外部“标记已标注”仍同步等待两秒",
       "classification": "remaining",
       "previous_ids": [
@@ -440,12 +454,14 @@
         "Windows msvcrt、只读/离线/UNC 和进程退出验收；排队失败与应用失败分别反馈。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "749efe7",
+      "fix_note": "外部复核窗口状态写入后台化：_set_case_state_async daemon 线程调 set_case_state，结果经 Queue 由 _poll_background_results drain——成功刷新行、失败 friendly_error 可重试（UI31 语义不变）；点击立即返回并显示进行中。测试：test_mark_annotated_writes_off_gui_thread（msvcrt 跨进程持锁时点击 <0.5s 返回、不显示假成功；解锁后 drain 落盘为已标注）。验证：smoke 8/8（工件 20261016T235945_smoke.json）。"
     },
     {
       "id": "S09",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "两个 AL 预测彼此同网格，仍可能共同偏离该病例输入",
       "classification": "remaining",
       "previous_ids": [
@@ -485,12 +501,14 @@
         "两端真实模型/GPU 与 Mimics 辅助带位置仍需目标机，离线契约通过不得宣称当前患者准确率。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "d4f17c3",
+      "fix_note": "新增 _al_validate_prediction_grids：run_batch 前逐病例逐配置核对每份预测 shape/affine 与 input_geometries.json（缺文件/不可读/网格不一致/几何未知四类原因），不合格病例不入本轮并把原因追加写入 uncertainty_log.txt；valid 为空时 RuntimeError 中文报错。测试：test_al_rejects_predictions_sharing_wrong_grid（两份预测共同 x 平移 100mm 拒绝）。验证：smoke 8/8（工件 20261016T230903_smoke.json）。"
     },
     {
       "id": "S10",
       "priority": "P1",
-      "status": "open",
+      "status": "fixed",
       "title": "AL 重试已拒绝的病例仍从旧不确定度文件进入本轮排名",
       "classification": "newly_identified_recovery_risk",
       "previous_ids": [
@@ -528,12 +546,14 @@
         "覆盖完整 folder-prediction→run_batch→analyze→bands→status/UI，不能只断言 run_batch 返回值为空。"
       ],
       "evidence": "A：当前生产函数/跨模块链路的隔离复现",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "d4f17c3",
+      "fix_note": "不确定度产物按轮隔离：每轮写独立 uncertainty_run_{timestamp} 目录，status 携带 uncertainty_dir/ranking_csv，load_ranking 与 Mimics overlay _al_mask_paths 优先读本轮路径（无键旧作业回退旧固定目录，补充修复 4e4bebc）；_al_predict_configuration 每轮先清空 predictions 目录旧 *.nii.gz（重试不得继承旧预测）；本轮成功为空即 RuntimeError。测试：test_al_retry_does_not_rank_stale_uncertainty（worker 跳过条件按完整文件名匹配，旧不确定度不进入新排名）。验证：smoke 8/8（工件 20261016T230903_smoke.json）；补充修复验证 cross_workflow 2/2 + smoke 8/8（工件 20261017T033436_smoke.json）。"
     },
     {
       "id": "S11",
       "priority": "P2",
-      "status": "open",
+      "status": "fixed",
       "title": "训练完成长文案不换行，把状态卡和按钮撑出可见区",
       "classification": "new_regression",
       "previous_ids": [
@@ -562,7 +582,9 @@
         "验收真实父表面/控件 visibleRegion 与截图，不只看 fontMetrics(button.text) 小于 button.width。"
       ],
       "evidence": "A：真实 Qt 完成状态截图与布局测量；非 Windows DPI 实机验收",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_commit": "0f82808",
+      "fix_note": "progress_detail QLabel 启用 setWordWrap(True)（与同页 diagnosis/auc/comparison 标签一致），853×440 下长文案换行，状态卡/查看版本按钮不再撑出可视区、无横向滚动条。测试：test_completion_long_copy_wraps_within_viewport（wordWrap 断言 + 高于单行 elapsed_label + 卡片/按钮右缘在窗口内）。验证：smoke 8/8（工件 20261016T233548_smoke.json）。"
     }
   ],
   "counts": {
