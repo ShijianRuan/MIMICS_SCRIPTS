@@ -5876,3 +5876,53 @@ Chooser.cancel 无属性遮蔽。
 
 验证：test_ui_workflow_regressions 21 passed + 31 subtests、
 model_center 6/6、smoke 8/8（20261015T224446_smoke.json）。
+
+## R81 复审轮（2026-10-15/16）：双代理复审 + 修复 + 入账
+
+> 用户指令：继续开启独立代理评审代码，关注旧问题和新问题，然后修复。
+> 对 R81 修复轮（96448ae..HEAD，17 卡）做正确性 + 可用性双代理复审。
+
+### 复审结论（15 项发现全部处置）
+
+- **6 项修复**（各带失败路径测试 + 独立 smoke 门禁）：
+  - v1 回执拒绝提前到确认框/开工程之前 + `_delete_masks` 死代码删除
+    + chooser 提示 QSS（d7d39f0）
+  - Mask 名匹配三处统一 casefold（bridge/预检/worker，5b8bea3）
+  - 「查看这个版本」目标消失时中文提示（892139e）
+  - AL 排序剔除病例可见：completed status 增 excluded_case_count +
+    uncertainty_log，状态行/完成提示显示（667f1cf）
+  - 网格/几何错误中文化：DICOM 校验 5 条 + 预测发布 3 条（a14f8f4）
+- **2 项核实为误报**（不加投机代码）：预检不反映显式 mask_paths
+  （显式行仅在按名选择列表为空时出现，两路径互斥）；staging 固定名
+  跨 job 复用（job_id 含时间戳+uuid，目录已存在即拒绝创建）。
+- **2 项验收偏差转需求缺口**：R10 验收第 2 条（授权后原文件再改动的
+  拒绝覆盖交互）→ D24；R15「同网格异病例」（affine 检查不覆盖，需
+  病例指纹）→ D25。
+- **2 项入账**：D26（R13 菜单名目标机验证）、D27（英文残留下轮清理）。
+- **1 项沿袭观察补登待办**：冻结验证集名单读取失败静默解冻
+  （flexict_pipeline / nnunet_pipeline 同模式，P2，含验收标准）。
+
+### 验证
+
+- 每项修复独立定向测试 + smoke 8/8（工件 20261016T091209 / 094444 /
+  095512_smoke.json）。
+- **fast 门禁 30/30 全绿**：工件
+  `.mimics_runtime/regression/20261016T140124_fast.json`。首次跑出
+  29/30——a14f8f4 中文化时漏改 test_flexict_integration 的英文
+  "grid" 断言（已同源修过 nnunet/remote 两处），修正于 a55a95f
+  （断言改中文「网格与源图不一致」）后重跑全绿。
+- 新增 6 个失败路径测试：v1 回执 confirm=True 下不弹确认框/不开工程/
+  return 8；casefold straße/STRASSE 双侧断言；model_gone 提示弹窗；
+  run_batch 返回空时 excluded_case_count == 全量；剔除数进状态行；
+  中文错误文案断言更新。
+
+### 净代码变化
+
++233/−110 净 +123（产品 ~+78/−109 含死代码删除；测试 +145/−1；
+d7d39f0..a14f8f4）。新增维护面 0（excluded_case_count /
+uncertainty_log 为 status payload 字段扩展，复用既有合并写通道）。
+入账 docs commit 4661aea。
+
+### 外部资源使用
+
+本轮未使用远程服务器与真实数据集（纯本机修复），无清理义务。
