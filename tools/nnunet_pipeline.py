@@ -41,6 +41,7 @@ from nnunet_common import (  # noqa: E402
     medical_stem,
     normalize_request,
     path_signature,
+    _semantic_label_key,
     read_json,
     register_model,
     replace_with_retry,
@@ -345,15 +346,26 @@ def _find_label_files(
     aliases: list[str],
     source_mode: str = "alternatives",
 ) -> list[Path]:
+    exact_wanted = {_semantic_label_key(value) for value in aliases}
     wanted = {_label_name_key(value) for value in aliases}
     case_key = _label_name_key(case_id)
-    matches: dict[str, Path] = {}
+    # S07: exact (Unicode-semantic) matches win; the lossy separator folding
+    # ("-", ".", " " -> "_") is only a fallback for export-side filename
+    # variants. Without the two passes, "Liver-Left" and "Liver_Left" —
+    # two DISTINCT labels under normalize_labels' NFKC+casefold identity —
+    # both matched the same source file and one label silently vanished.
+    exact_matches: dict[str, Path] = {}
+    loose_matches: dict[str, Path] = {}
     for directory in _candidate_label_dirs(label_root, case_id):
         for path in sorted(directory.iterdir()):
             if not _is_medical_file(path):
                 continue
-            if _label_name_key(medical_stem(path)) in wanted:
-                matches[os.path.normcase(str(path.resolve()))] = path.resolve()
+            stem = medical_stem(path)
+            key = os.path.normcase(str(path.resolve()))
+            if _semantic_label_key(stem) in exact_wanted:
+                exact_matches[key] = path.resolve()
+            elif _label_name_key(stem) in wanted:
+                loose_matches[key] = path.resolve()
     if label_root.is_dir():
         for path in sorted(label_root.iterdir()):
             if not _is_medical_file(path):
@@ -364,7 +376,10 @@ def _find_label_files(
                     "{}_{}".format(case_key, alias),
                     "{}__{}".format(case_key, alias),
                 }:
-                    matches[os.path.normcase(str(path.resolve()))] = path.resolve()
+                    loose_matches[os.path.normcase(str(path.resolve()))] = (
+                        path.resolve()
+                    )
+    matches = exact_matches if exact_matches else loose_matches
     paths = sorted(matches.values(), key=lambda path: os.path.normcase(str(path)))
     if source_mode == "alternatives" and len(paths) > 1:
         raise RuntimeError(
@@ -730,6 +745,23 @@ def prepare_source_grid_cases(
             if not found and request["missing_label_policy"] == "require_all":
                 missing.append(label["name"])
             label_files.append(found)
+        # S07: one source file claimed by two DIFFERENT output labels is a
+        # name-convention ambiguity (e.g. "Liver-Left" vs "Liver_Left" both
+        # keying to the same file), not voxel overlap — overlap_policy must
+        # not decide it. Refuse before materialization, naming both labels.
+        claims: dict[str, str] = {}
+        for label, found in zip(request["labels"], label_files):
+            for path in found:
+                key = os.path.normcase(str(path))
+                if key in claims and claims[key] != label["name"]:
+                    raise RuntimeError(
+                        "病例 {0} 中，输出标签“{1}”和“{2}”匹配到了同一个源文件"
+                        " {3}（名称规约歧义，无法确定各自的真实来源）。请重命名"
+                        "源文件或修改标签别名，使两个标签各自指向不同的文件。".format(
+                            case_id, claims[key], label["name"], Path(path).name
+                        )
+                    )
+                claims[key] = label["name"]
         if missing:
             skipped.append(
                 {

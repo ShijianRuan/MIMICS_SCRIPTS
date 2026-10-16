@@ -435,6 +435,93 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(1, len(spleen))
             self.assertEqual("脾脏.nii.gz", spleen[0].name)
 
+    def test_find_label_files_prefers_exact_over_separator_folded(self):
+        """S07: 'Liver-Left' and 'Liver_Left' are DISTINCT labels under the
+        semantic (NFKC+casefold) identity normalize_labels enforces, but the
+        lossy separator folding keyed both to the same source file — with
+        overlap_policy=replace one label silently vanished. The exact match
+        must win; the folded match stays a fallback for export filename
+        variants."""
+        import tempfile
+
+        from tools import nnunet_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seg = Path(tmp) / "caseA" / "segmentations"
+            seg.mkdir(parents=True)
+            (seg / "Liver-Left.nii.gz").write_bytes(b"left")
+            (seg / "Liver_Left.nii.gz").write_bytes(b"underscore")
+            # Exact hit exists: only the exact file is claimed.
+            left = pipeline._find_label_files(Path(tmp), "caseA", ["Liver-Left"])
+            self.assertEqual(["Liver-Left.nii.gz"], [p.name for p in left])
+            underscore = pipeline._find_label_files(
+                Path(tmp), "caseA", ["Liver_Left"])
+            self.assertEqual(
+                ["Liver_Left.nii.gz"], [p.name for p in underscore])
+            # No exact hit: the separator-folded fallback still works
+            # (export side may write 'Liver Left.nii.gz' for alias
+            # 'Liver-Left').
+            (seg / "Liver Left.nii.gz").write_bytes(b"spaced")
+            only_folded = pipeline._find_label_files(
+                Path(tmp), "caseA", ["Liver-Right"])
+            self.assertEqual([], [p.name for p in only_folded])
+
+    def test_prepare_refuses_one_file_claimed_by_two_labels(self):
+        """S07: two output labels matching the same source file is a naming
+        ambiguity, not voxel overlap — overlap_policy (replace) must not
+        decide it. The prepare loop refuses before materialization, naming
+        both labels and the file."""
+        import tempfile
+
+        from tools import nnunet_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "dataset"
+            case = dataset / "caseA"
+            (case / "segmentations").mkdir(parents=True)
+            np = __import__("numpy")
+            nib = __import__("nibabel")
+            image = case / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.float32), np.eye(4)),
+                str(image),
+            )
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(case / "segmentations" / "Liver_Left.nii.gz"),
+            )
+            request = {
+                "operation": "train",
+                "task_name": "T",
+                "task_id": "task",
+                "workspace": str(root / "workspace"),
+                "dataset_root": str(dataset),
+                "label_source": "dataset_masks",
+                "missing_label_policy": "background",
+                "overlap_policy": "replace",
+                "labels": [
+                    {"name": "Liver-Left", "id": 1, "aliases": ["Liver-Left"]},
+                    {"name": "Liver_Left", "id": 2, "aliases": ["Liver_Left"]},
+                ],
+                "cases": ["caseA"],
+                "split_seed": 1,
+                "validation_fraction": 0.5,
+                "configuration": "2d",
+            }
+            (root / "workspace").mkdir()
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.prepare_source_grid_cases(
+                    pipeline.normalize_request(request),
+                    root / "out",
+                    root / "status.json",
+                    None,
+                )
+            message = str(ctx.exception)
+            self.assertIn("Liver-Left", message)
+            self.assertIn("Liver_Left", message)
+            self.assertIn("Liver_Left.nii.gz", message)
+
     def test_2d_patch_has_two_dimensions(self):
         with self.assertRaisesRegex(ValueError, "2 个正数"):
             common.normalize_request(
