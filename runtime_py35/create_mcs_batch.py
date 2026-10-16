@@ -229,6 +229,33 @@ def _capture_mask_snapshot(mask):
     )
 
 
+def _receipt_payload(receipt_case_id, result, mask_results, created_mask_objects):
+    """Receipt payload handed from create_mcs_from_manifest to the queue loop.
+
+    S01: this payload crosses a plain-data handoff boundary — the queue-loop
+    consumer reads it with dict .get() AFTER the producer returned (project
+    closed). Mask snapshots must be flattened to plain dicts here, never
+    handed over as live _MaskIdentity instances.
+    """
+    return {
+        "case_id": receipt_case_id,
+        "mask_names": [mr["name"] for mr in mask_results],
+        "manifest_data": dict(result),
+        "mask_objects": [
+            {
+                "name": identity.name,
+                "guid": identity.guid,
+                "pixel_count": identity.pixel_count,
+                "sha256": identity.sha256,
+            }
+            for identity in (
+                _capture_mask_snapshot(mask)
+                for mask in created_mask_objects
+            )
+        ],
+    }
+
+
 def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DAYS):
     """Delete import receipts past the retention window (best effort).
 
@@ -1165,15 +1192,9 @@ def create_mcs_from_manifest(work_dir, output_mcs):
     # no longer exists after publication, breaking undo. The payload is
     # handed back and written by the caller once the .mcs is at its final
     # destination.
-    result["receipt"] = {
-        "case_id": receipt_case_id,
-        "mask_names": [mr["name"] for mr in mask_results],
-        "manifest_data": dict(result),
-        "mask_objects": [
-            _capture_mask_snapshot(mask)
-            for mask in created_mask_objects
-        ],
-    }
+    result["receipt"] = _receipt_payload(
+        receipt_case_id, result, mask_results, created_mask_objects
+    )
 
     # Close project to free memory
     try:
@@ -1239,6 +1260,9 @@ def main(output_dir=None, runtime_dir=None):
     total_failed = int(
         previous_status.get("creation_failed", previous_status.get("failed", 0)) or 0
     ) if resume_counts else 0
+    # S01: receipt-write failures must stay visible in the task status — a
+    # created .mcs without a receipt looks like success but cannot be undone.
+    receipt_failed = int(previous_status.get("receipt_failed", 0) or 0) if resume_counts else 0
     cancelled = False
 
     try:
@@ -1507,6 +1531,7 @@ def main(output_dir=None, runtime_dir=None):
                                 ],
                             )
                         except Exception as receipt_exc:
+                            receipt_failed += 1
                             log_message(
                                 output_dir,
                                 "Created {0}, but import receipt could not be written: {1}".format(
@@ -1627,6 +1652,7 @@ def main(output_dir=None, runtime_dir=None):
             "cancelled" if cancelled else "closed",
             completed=total_completed,
             failed=total_failed,
+            receipt_failed=receipt_failed,
         )
         return 0
     finally:

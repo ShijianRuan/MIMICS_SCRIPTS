@@ -3733,6 +3733,133 @@ class TestCreateMcsBatch(unittest.TestCase):
             }],
             payload["created_masks_v2"])
 
+    def test_receipt_handoff_uses_real_producer_payload(self):
+        """S01: the receipt payload must survive the producer→queue handoff
+        with the REAL snapshot producer. The regression: the producer handed
+        _MaskIdentity objects to the queue loop, which read them with dict
+        .get() — every real import completed without a receipt (undo
+        silently impossible) and only a log line mentioned it."""
+        import hashlib
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "work", "case_s01")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_s01.mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs, "source_fingerprint": "fp"}, handle)
+        descriptor = os.path.join(queue_dir, "case_s01.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_s01", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        class _LiveMask(object):
+            name = "Liver"
+            guid = "g-s01"
+            number_of_pixels = 7
+
+            def get_voxel_buffer(self):
+                return b"voxels"
+
+        # The REAL producer payload: live masks through _receipt_payload
+        # (which snapshots via the real _capture_mask_snapshot).
+        real_payload = create_mcs_batch._receipt_payload(
+            "case_s01",
+            {"output_mcs": output_mcs, "source_fingerprint": "fp"},
+            [{"name": "Liver"}],
+            [_LiveMask()],
+        )
+        for entry in real_payload["mask_objects"]:
+            self.assertIsInstance(entry, dict)
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        try:
+            def fake_create(_work_dir, staging_path):
+                with open(staging_path, "w") as handle:
+                    handle.write("mcs")
+                return {
+                    "output_mcs": output_mcs,
+                    "source_fingerprint": "fp",
+                    "receipt": real_payload,
+                }
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            self.assertEqual(0, create_mcs_batch.main(output_dir, runtime_dir=runtime_dir))
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+
+        expected_sha = "sha256:" + hashlib.sha256(b"voxels").hexdigest()
+        receipt_path = os.path.join(output_dir, ".case_s01.import_receipt.json")
+        self.assertTrue(os.path.isfile(receipt_path))
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(
+            [{
+                "name": "Liver", "guid": "g-s01", "pixel_count": 7,
+                "sha256": expected_sha,
+            }],
+            payload["created_masks_v2"])
+
+    def test_receipt_failure_is_visible_in_status(self):
+        """S01: a receipt-write failure must not be buried — the final task
+        status records receipt_failed, because a created .mcs without a
+        receipt looks like success but cannot be undone."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        work_dir = os.path.join(self.tmp, "work", "case_s01b")
+        queue_dir = os.path.join(runtime_dir, "prepared_queue")
+        os.makedirs(output_dir)
+        os.makedirs(work_dir)
+        os.makedirs(queue_dir)
+        output_mcs = os.path.join(output_dir, "case_s01b.mcs")
+        with open(os.path.join(work_dir, "prepare_manifest.json"), "w") as handle:
+            json.dump({"output_mcs": output_mcs}, handle)
+        descriptor = os.path.join(queue_dir, "case_s01b.json")
+        with open(descriptor, "w") as handle:
+            json.dump({"case_id": "case_s01b", "work_dir": work_dir, "output_mcs": output_mcs}, handle)
+        with open(os.path.join(runtime_dir, create_mcs_batch.QUEUE_DONE_FILE), "w") as handle:
+            json.dump({"status": "done"}, handle)
+
+        old_create = create_mcs_batch.create_mcs_from_manifest
+        old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
+        old_write = create_mcs_batch.write_import_receipt
+        try:
+            def fake_create(_work_dir, staging_path):
+                with open(staging_path, "w") as handle:
+                    handle.write("mcs")
+                return {
+                    "output_mcs": output_mcs,
+                    "receipt": {
+                        "case_id": "case_s01b",
+                        "mask_names": ["Liver"],
+                        "manifest_data": {},
+                        "mask_objects": [{"name": "Liver", "guid": "g1"}],
+                    },
+                }
+            def failing_write(*args, **kwargs):
+                raise OSError("synthetic receipt failure")
+            create_mcs_batch.create_mcs_from_manifest = fake_create
+            create_mcs_batch.write_import_receipt = failing_write
+            create_mcs_batch.main(output_dir, runtime_dir=runtime_dir)
+        finally:
+            create_mcs_batch.create_mcs_from_manifest = old_create
+            create_mcs_batch.write_import_receipt = old_write
+            create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
+
+        with open(os.path.join(runtime_dir, create_mcs_batch.STATUS_FILE), "r", encoding="utf-8") as handle:
+            status = json.load(handle)
+        self.assertEqual(1, status.get("receipt_failed"))
+        # The .mcs itself still counts as created.
+        self.assertEqual(1, status.get("creation_completed"))
+
     def test_publish_failure_leaves_no_consumable_receipt(self):
         """F30 failure path: when the publish (staging rename) fails, the
         receipt must NOT be written — a receipt whose target never arrived
