@@ -6765,8 +6765,10 @@ class TestEdgeCases(unittest.TestCase):
                 ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
                 ds.SeriesInstanceUID = uid
                 ds.Rows = ds.Columns = 4
-                ds.PixelSpacing = (
+                spacing = (
                     pixel_spacings[k] if pixel_spacings else [1.0, 1.0])
+                if spacing is not None:
+                    ds.PixelSpacing = spacing
                 ds.SliceThickness = 10.0
                 ds.Modality = "CT"
                 ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
@@ -6801,6 +6803,26 @@ class TestEdgeCases(unittest.TestCase):
             spacing, [(0, 0, 0), (0, 0, 1), (0, 0, 2)],
             pixel_spacings=[[1.0, 1.0], [2.0, 2.0], [1.0, 1.0]])
         expect_rejected(spacing, "像素间距不一致")
+
+        # S06 re-review: PARTIAL spacing absence must reject. The old loop
+        # broke out on the first slice without PixelSpacing and skipped the
+        # consistency check, so [2,2]/missing/[3,3] passed on slice 0's grid.
+        for name, spacings in (
+            ("partial_mid", [[2.0, 2.0], None, [3.0, 3.0]]),
+            ("partial_first", [None, [2.0, 2.0], [3.0, 3.0]]),
+            ("partial_last", [[2.0, 2.0], [3.0, 3.0], None]),
+        ):
+            folder = os.path.join(self.tmp, name)
+            write_series(
+                folder, [(0, 0, 0), (0, 0, 1), (0, 0, 2)],
+                pixel_spacings=spacings)
+            expect_rejected(folder, "缺少像素间距")
+
+        # S06 re-review: a series with NO positions at all must not be
+        # handed a fabricated origin and slice step.
+        no_pos = os.path.join(self.tmp, "all_missing_ipp")
+        write_series(no_pos, [None, None, None])
+        expect_rejected(no_pos, "缺少层面位置")
 
     # -- resource lock edge cases --
     def test_lock_release_wrong_token(self):

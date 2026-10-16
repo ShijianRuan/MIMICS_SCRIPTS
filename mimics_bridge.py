@@ -1699,9 +1699,11 @@ def _validate_dicom_slice_grid(headers: list) -> None:
     any series that is not a uniform stack along a single normal would be
     silently squashed onto a fabricated regular grid and that wrong grid
     would propagate into masks, AI input, and exports. Fail closed with the
-    specific problem named instead. Series entirely without position tags
-    keep the legacy count-based geometry (the caller still refuses mixed
-    series, sizes, and multi-frame input above).
+    specific problem named instead. Series entirely without PixelSpacing
+    keep the legacy [1, 1] in-plane fallback; position or orientation
+    evidence must be present on every slice, and a series with no position
+    at all has no trusted coordinates (a fabricated origin/step would
+    poison training grids, so it is refused too).
     """
     # S06: geometry evidence must be COMPLETE on every slice. A series where
     # some slices carry positions and others do not cannot be proven a
@@ -1712,8 +1714,14 @@ def _validate_dicom_slice_grid(headers: list) -> None:
         if getattr(ds, "ImagePositionPatient", None) is None
     ]
     if len(unpositioned) == len(headers):
-        # No positioned slice at all: legacy count-based geometry.
-        return
+        # No positioned slice at all (S06 re-review): the affine would be
+        # built from a fabricated origin and slice step. Defaults are not
+        # trusted coordinates — refuse instead of guessing.
+        raise ValueError(
+            "该 DICOM 序列的所有层面都缺少层面位置（ImagePositionPatient），"
+            "无法确定物理坐标（原点与层间距将被凭空构造），已拒绝导入。"
+            "请回原图源重新导出带位置的序列。"
+        )
     if unpositioned:
         raise ValueError(
             "该 DICOM 序列有 {0} 个层面缺少层面位置（ImagePositionPatient，"
@@ -1734,31 +1742,43 @@ def _validate_dicom_slice_grid(headers: list) -> None:
                 len(unoriented),
                 getattr(unoriented[0], "filename", "<unknown>"))
         )
+    # S06 re-review: collect completeness FIRST, then validate. The old
+    # loop broke out with an empty list on the first slice without
+    # PixelSpacing, which silently skipped the consistency check for the
+    # slices that DID carry (possibly conflicting) spacing.
+    missing_spacing = [
+        ds for ds in headers
+        if getattr(ds, "PixelSpacing", None) is None
+    ]
+    if missing_spacing and len(missing_spacing) < len(headers):
+        raise ValueError(
+            "该 DICOM 序列有 {0} 个层面缺少像素间距（PixelSpacing，如 {1}），"
+            "间距不完整的序列无法证明为统一网格，已拒绝导入。"
+            "请回原图源重新导出。".format(
+                len(missing_spacing),
+                getattr(missing_spacing[0], "filename", "<unknown>"))
+        )
     spacings = []
-    for ds in headers:
-        ps = getattr(ds, "PixelSpacing", None)
-        if ps is None:
-            # All slices without PixelSpacing keep the legacy [1, 1]
-            # fallback; a PARTIAL absence cannot prove one in-plane grid.
-            spacings = []
-            break
-        try:
-            values = tuple(round(float(v), 6) for v in ps)
-        except (TypeError, ValueError):
-            raise ValueError(
-                "DICOM 序列中存在无法解析的像素间距（PixelSpacing）："
-                "{0}".format(getattr(ds, "filename", "<unknown>"))
-            )
-        if (
-            len(values) != 2
-            or not all(np.isfinite(values))
-            or min(values) <= 0
-        ):
-            raise ValueError(
-                "DICOM 序列中存在非法像素间距（PixelSpacing {0}）：{1}".format(
-                    list(ps), getattr(ds, "filename", "<unknown>"))
-            )
-        spacings.append(values)
+    if not missing_spacing:
+        for ds in headers:
+            ps = getattr(ds, "PixelSpacing", None)
+            try:
+                values = tuple(round(float(v), 6) for v in ps)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "DICOM 序列中存在无法解析的像素间距（PixelSpacing）："
+                    "{0}".format(getattr(ds, "filename", "<unknown>"))
+                )
+            if (
+                len(values) != 2
+                or not all(np.isfinite(values))
+                or min(values) <= 0
+            ):
+                raise ValueError(
+                    "DICOM 序列中存在非法像素间距（PixelSpacing {0}）：{1}".format(
+                        list(ps), getattr(ds, "filename", "<unknown>"))
+                )
+            spacings.append(values)
     if spacings and len(set(spacings)) > 1:
         raise ValueError(
             "该 DICOM 序列的像素间距不一致（{0} 种），无法表示为统一网格，"
@@ -1889,27 +1909,26 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
     slice_dir = np.cross(row_cosine, column_cosine)
     slice_dir = slice_dir / np.linalg.norm(slice_dir)
 
+    # _validate_dicom_slice_grid (upstream in _read_dicom_series_headers)
+    # refuses series with missing or unparseable positions, so every header
+    # carries a finite position — no fabricated-origin fallback remains.
     positions = [(ds, _image_position(ds)) for ds in headers]
     positions = [(ds, pos) for ds, pos in positions if pos is not None]
-    if positions:
-        positions.sort(key=lambda item: float(np.dot(item[1], slice_dir)))
-        origin_lps = positions[0][1]
-        slice_step = None
-        if len(positions) > 1:
-            position_steps = [
-                positions[i][1] - positions[i - 1][1]
-                for i in range(1, len(positions))
-            ]
-            valid_steps = [
-                value for value in position_steps
-                if float(np.dot(value, slice_dir)) > 1e-6
-            ]
-            if valid_steps:
-                slice_step = np.median(np.asarray(valid_steps, dtype=float), axis=0)
-                slice_thickness = abs(float(np.dot(slice_step, slice_dir)))
-    else:
-        origin_lps = np.array([0.0, 0.0, 0.0], dtype=float)
-        slice_step = None
+    positions.sort(key=lambda item: float(np.dot(item[1], slice_dir)))
+    origin_lps = positions[0][1]
+    slice_step = None
+    if len(positions) > 1:
+        position_steps = [
+            positions[i][1] - positions[i - 1][1]
+            for i in range(1, len(positions))
+        ]
+        valid_steps = [
+            value for value in position_steps
+            if float(np.dot(value, slice_dir)) > 1e-6
+        ]
+        if valid_steps:
+            slice_step = np.median(np.asarray(valid_steps, dtype=float), axis=0)
+            slice_thickness = abs(float(np.dot(slice_step, slice_dir)))
 
     affine_lps = np.eye(4)
     affine_lps[:3, 0] = row_cosine * float(pixel_spacing[1])
