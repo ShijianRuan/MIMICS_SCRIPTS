@@ -1600,6 +1600,73 @@ def _al_materialize_inputs(job_dir: Path, request: dict[str, Any],
     return sorted(case_ids)
 
 
+def _al_validate_prediction_grids(
+    predictions: dict[str, Path],
+    case_ids: list[str],
+    geometry_path: Path,
+    log_path: Path,
+) -> list[str]:
+    """S09: every prediction must match its CASE's input grid before it
+    enters the disagreement math.
+
+    run_batch compares the two models' outputs against each other; two
+    predictions that share the same stale or wrong grid pass that pair
+    check while both deviate from the case input. This pre-check compares
+    each configuration's prediction against the input geometry recorded at
+    materialization time (input_geometries.json) and drops any case whose
+    prediction cannot be proven on-grid, appending the per-case reason to
+    the uncertainty log run_batch also writes (append mode, same file).
+    """
+    import nibabel as nib
+    import numpy as np
+
+    geometry_doc = read_json_file(geometry_path, {}) or {}
+    geo_by_case = {
+        str(key): value
+        for key, value in (geometry_doc.get("cases") or {}).items()
+        if isinstance(value, dict)
+    }
+    valid: list[str] = []
+    for case_id in case_ids:
+        geometry = geo_by_case.get(case_id) or {}
+        expected_shape = tuple(
+            int(value) for value in geometry.get("source_shape") or [])
+        expected_affine = geometry.get("source_voxel_to_ras_matrix")
+        reason = ""
+        if not expected_shape or expected_affine is None:
+            reason = "输入几何未知，无法核对预测网格"
+        else:
+            for configuration, directory in sorted(predictions.items()):
+                path = directory / "{}.nii.gz".format(case_id)
+                if not path.is_file():
+                    reason = "缺少 {0} 配置的预测文件".format(configuration)
+                    break
+                try:
+                    image = nib.load(str(path))
+                except Exception as exc:
+                    reason = "{0} 预测无法读取（{1}）".format(configuration, exc)
+                    break
+                if tuple(image.shape[:3]) != expected_shape or not np.allclose(
+                    image.affine,
+                    np.asarray(expected_affine, dtype=float),
+                    atol=1e-4,
+                    rtol=0.0,
+                ):
+                    reason = "{0} 预测的网格与该病例输入不一致".format(
+                        configuration)
+                    break
+        if reason:
+            try:
+                with open(str(log_path), "a", encoding="utf-8") as handle:
+                    handle.write("[{0}] [跳过] {1}: {2}\n".format(
+                        time.strftime("%Y-%m-%d %H:%M:%S"), case_id, reason))
+            except OSError:
+                pass
+        else:
+            valid.append(case_id)
+    return valid
+
+
 def _al_predict_configuration(job_dir: Path,
                               request: dict[str, Any],
                               roots: dict[str, Path],
@@ -1617,6 +1684,14 @@ def _al_predict_configuration(job_dir: Path,
                 configuration, model_dir))
     predictions = job_dir / "predictions_{}".format(configuration)
     predictions.mkdir(parents=True, exist_ok=True)
+    # S10: this directory holds THIS run's outputs only. A retried run whose
+    # model produced nothing for a case would otherwise inherit the previous
+    # run's prediction file and pass the grid pre-check on stale data.
+    for stale in predictions.glob("*.nii.gz"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     update_status(
         status_path,
         status="batch_predicting_2d" if configuration == "2d"
@@ -1766,13 +1841,32 @@ def run_active_learning(job_dir: Path) -> int:
             progress_percent=75,
         )
         _raise_if_cancelled(control_path)
-        uncertainty_dir = job_dir / "uncertainty"
+        # S10: a fresh, per-run directory. analyze_uncertainty_dir ranks
+        # whatever *_uncertainty_*.nii.gz it finds in the folder — sharing
+        # one "uncertainty" dir across retries let a previously successful
+        # run's files keep failed cases in the ranking (and the bands) as
+        # if they were current results. Old run dirs stay on disk as
+        # history; they are never mixed into this run's ranking.
+        uncertainty_dir = job_dir / "uncertainty_run_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"))
         # The one sanctioned sys.path seam into the standalone repo.
         repo = flexict_repo_dir(load_config())
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
         from uncertainty import analyze_uncertainty_dir, run_batch  # noqa: E402
 
+        # S09: each prediction is first checked against its case's input
+        # grid (the pair check inside run_batch cannot see a shared wrong
+        # grid), with per-case skip reasons in the uncertainty log.
+        valid_case_ids = _al_validate_prediction_grids(
+            predictions, case_ids,
+            job_dir / "input_geometries.json",
+            job_dir / "uncertainty_log.txt")
+        if not valid_case_ids:
+            raise RuntimeError(
+                "本轮没有病例成功计算不确定度（{0} 例全部在预测网格核对中被"
+                "剔除），排名未生成。逐例原因见任务日志：{1}".format(
+                    len(case_ids), job_dir / "uncertainty_log.txt"))
         # Cases the uncertainty batch skips (grid mismatch, missing mask)
         # vanish silently otherwise — the review window shows fewer rows than
         # the job was submitted with, with no reason anywhere in the UI.
@@ -1781,7 +1875,7 @@ def run_active_learning(job_dir: Path) -> int:
         metrics = run_batch(
             mask_dirs=[str(predictions["2d"]), str(predictions["3d_fullres"])],
             out_dir=str(uncertainty_dir),
-            case_names=case_ids,
+            case_names=valid_case_ids,
             filename_template="{case}.nii.gz",
             method=method,
             min_masks=2,
@@ -1797,6 +1891,11 @@ def run_active_learning(job_dir: Path) -> int:
             save_plots=False,
             log_path=str(job_dir / "uncertainty_log.txt"),
         )
+        if not metrics:
+            raise RuntimeError(
+                "本轮没有病例成功计算不确定度（{0} 例全部被剔除或处理失败），"
+                "排名未生成。逐例原因见任务日志：{1}".format(
+                    len(case_ids), job_dir / "uncertainty_log.txt"))
         excluded_case_count = max(0, len(case_ids) - len(metrics))
         ranking = analyze_uncertainty_dir(
             str(uncertainty_dir),

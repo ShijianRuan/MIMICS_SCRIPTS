@@ -1348,8 +1348,9 @@ class TestActiveLearningLifecycle(unittest.TestCase):
             scores = [row["integrated"] for row in ranking]
             self.assertEqual(scores, sorted(scores, reverse=True))
             self.assertEqual(status["top_case"], ranking[0]["case"])
-            # uncertainty artifacts on disk
-            uncertainty_dir = job_dir / "uncertainty"
+            # uncertainty artifacts on disk (S10: per-run directory)
+            uncertainty_dir = Path(str(status["uncertainty_dir"]))
+            self.assertTrue(uncertainty_dir.name.startswith("uncertainty_run_"))
             self.assertTrue((uncertainty_dir / "ranking.csv").is_file())
             bands = status.get("uncertainty_bands") or {}
             # a 2-model disagreement pair can only reach level 5 on the x10
@@ -1368,7 +1369,9 @@ class TestActiveLearningLifecycle(unittest.TestCase):
     def test_al_reports_excluded_case_count(self):
         """R81 复审: a case the uncertainty batch skips (grid mismatch,
         missing mask) must be visible in the completed status — otherwise the
-        ranking silently shortens and the annotator never learns why."""
+        ranking silently shortens and the annotator never learns why.
+        S10: when EVERY case fails there is no ranking to deliver, so the
+        job fails with the log path instead of a fabricated success."""
         with tempfile.TemporaryDirectory() as tmp:
             job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
             # run_active_learning imports run_batch from the standalone
@@ -1384,7 +1387,9 @@ class TestActiveLearningLifecycle(unittest.TestCase):
                     side_effect=self._fake_predict_worker([])), \
                  mock.patch("flexict_pipeline._acquire_local_gpu",
                             return_value=None), \
-                 mock.patch.object(uncertainty, "run_batch", return_value=[]), \
+                 mock.patch.object(
+                     uncertainty, "run_batch",
+                     return_value=[{"case": cases[0]}]), \
                  mock.patch.object(
                      uncertainty, "analyze_uncertainty_dir",
                      return_value=[]):
@@ -1394,9 +1399,117 @@ class TestActiveLearningLifecycle(unittest.TestCase):
 
             status = read_json(job_dir / "status.json", {}) or {}
             self.assertEqual(status["status"], "completed")
-            self.assertEqual(status["excluded_case_count"], len(cases))
+            self.assertEqual(
+                status["excluded_case_count"], len(cases) - 1)
             self.assertTrue(status["uncertainty_log"].endswith(
                 "uncertainty_log.txt"))
+
+    def test_al_rejects_predictions_sharing_wrong_grid(self):
+        """S09: two predictions that share the SAME wrong grid pass the
+        pair-affine check inside run_batch — both deviate from the case
+        input, so each prediction is first checked against the case's
+        recorded input geometry. A fully-degenerate run fails with the log
+        path instead of ranking on wrong-grid data."""
+        import nibabel as nib
+        import numpy as np
+
+        def shifted_worker(capture):
+            def fake_worker(stage, params, *args, **kwargs):
+                capture.append(dict(params))
+                source_dir = Path(params["input_path"])
+                output = Path(params["output_path"])
+                output.mkdir(parents=True, exist_ok=True)
+                model_folder = Path(params["model_folder"])
+                configuration = (
+                    "2d" if "2d" in model_folder.name else "3d_fullres")
+                for image_path in sorted(source_dir.glob("*.nii.gz")):
+                    source = nib.load(str(image_path))
+                    affine = np.asarray(source.affine, dtype=float).copy()
+                    affine[0, 3] += 100.0  # BOTH models drift identically
+                    prediction = np.zeros(source.shape[:3], dtype=np.uint8)
+                    prediction[1:-1, 1:-1, 1:-1] = 1
+                    nib.save(
+                        nib.Nifti1Image(prediction, affine),
+                        str(output / image_path.name))
+                return {"status": "ok", "result": {}}
+            return fake_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=1)
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=shifted_worker([])), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                exit_code = fp.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 1)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("没有病例成功计算不确定度", str(status.get("error")))
+            log = (job_dir / "uncertainty_log.txt").read_text(
+                encoding="utf-8")
+            self.assertIn("网格与该病例输入不一致", log)
+
+    def test_al_retry_does_not_rank_stale_uncertainty(self):
+        """S10: a retried AL job ranks only THIS run's successful cases.
+        The previous run's uncertainty files stay on disk as history but
+        must not keep a now-failed case in the ranking."""
+        def partial_worker(stage, params, *args, **kwargs):
+            source_dir = Path(params["input_path"])
+            output = Path(params["output_path"])
+            output.mkdir(parents=True, exist_ok=True)
+            model_folder = Path(params["model_folder"])
+            configuration = (
+                "2d" if "2d" in model_folder.name else "3d_fullres")
+            import nibabel as nib
+            import numpy as np
+
+            for image_path in sorted(source_dir.glob("*.nii.gz")):
+                if configuration == "2d" and image_path.name == "case01.nii.gz":
+                    continue  # this run's 2D model produced nothing for case01
+                source = nib.load(str(image_path))
+                prediction = np.zeros(source.shape[:3], dtype=np.uint8)
+                prediction[1:-1, 1:-1, 1:-1] = 1
+                nib.save(
+                    nib.Nifti1Image(prediction, source.affine),
+                    str(output / image_path.name))
+            return {"status": "ok", "result": {}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                first_code = fp.run_active_learning(job_dir)
+            self.assertEqual(first_code, 0)
+            from nnunet_common import read_json, write_json_atomic
+
+            first_status = read_json(job_dir / "status.json", {}) or {}
+            first_dir = Path(str(first_status["uncertainty_dir"]))
+            self.assertEqual(3, len(first_status.get("ranking") or []))
+            # Reset the job to a runnable state, then retry with the 2D
+            # model failing to produce case01.
+            write_json_atomic(job_dir / "control.json", {"action": "run"})
+            with mock.patch.object(
+                    fp, "_spawn_worker", side_effect=partial_worker), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None):
+                second_code = fp.run_active_learning(job_dir)
+            self.assertEqual(second_code, 0)
+            second_status = read_json(job_dir / "status.json", {}) or {}
+            ranked = [row["case"] for row in second_status.get("ranking") or []]
+            self.assertEqual(2, len(ranked))
+            self.assertNotIn("case01", ranked)
+            self.assertEqual(1, second_status.get("excluded_case_count"))
+            # The old run's artifacts survive as history, separate from the
+            # new run's directory.
+            self.assertTrue((first_dir / "ranking.csv").is_file())
+            self.assertNotEqual(
+                str(first_dir), str(second_status["uncertainty_dir"]))
 
     def test_al_fails_without_pair(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -105,7 +105,14 @@ def load_ranking(job_dir: str | Path) -> list[dict[str, Any]]:
     ranking = status.get("ranking")
     if isinstance(ranking, list) and ranking:
         return [dict(row) for row in ranking]
-    csv_path = Path(job_dir) / "uncertainty" / "ranking.csv"
+    # Prefer the per-run ranking CSV the pipeline records in status (S10:
+    # each run writes its own uncertainty_run_* directory); the fixed
+    # "uncertainty" path only serves jobs written before that change.
+    csv_path = (
+        Path(str(status.get("ranking_csv") or ""))
+        if status.get("ranking_csv")
+        else Path(job_dir) / "uncertainty" / "ranking.csv"
+    )
     if not csv_path.is_file():
         return []
     rows = []
