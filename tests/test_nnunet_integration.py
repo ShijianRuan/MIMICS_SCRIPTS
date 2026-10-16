@@ -1895,6 +1895,95 @@ class SpatialContractTests(unittest.TestCase):
                 int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
             )
 
+    def test_publish_rejects_header_only_truncated_voxels(self):
+        """S03: a gzip file with a valid NIfTI header but no voxel payload
+        must fail at the publish boundary — nib.load's header read is lazy,
+        the failure would otherwise surface in Mimics after the old result
+        was already replaced."""
+        import gzip
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            full = nib.Nifti1Image(
+                np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)
+            ).to_bytes()
+            candidate = root / "header_only.nii.gz"
+            with open(candidate, "wb") as handle:
+                handle.write(gzip.compress(full[:352]))
+            # The header alone loads — this is exactly the lazy-read trap.
+            self.assertEqual(len(nib.load(str(candidate)).shape), 3)
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.publish_prediction_output(candidate, output, None)
+            self.assertIn("体素数据不完整", str(ctx.exception))
+            # The reviewed result is untouched.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
+
+    def test_publish_rejects_four_dimensional_and_fractional(self):
+        """S03: a 4D volume or a fractional probability map is not an
+        integer 3D segmentation and must never reach the output path."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            four_d = root / "four_d.nii.gz"
+            nib.save(
+                nib.Nifti1Image(
+                    np.ones((2, 2, 2, 2), dtype=np.uint8), np.eye(4)
+                ),
+                str(four_d),
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.publish_prediction_output(four_d, output, None)
+            self.assertIn("不是 3D 分割结果", str(ctx.exception))
+
+            fractional = root / "fractional.nii.gz"
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((2, 2, 2), 0.25, dtype=np.float32), np.eye(4)
+                ),
+                str(fractional),
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.publish_prediction_output(fractional, output, None)
+            self.assertIn("小数概率值", str(ctx.exception))
+
+            nan = root / "nan.nii.gz"
+            data = np.ones((2, 2, 2), dtype=np.float32)
+            data[0, 0, 0] = float("nan")
+            nib.save(nib.Nifti1Image(data, np.eye(4)), str(nan))
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.publish_prediction_output(nan, output, None)
+            self.assertIn("NaN", str(ctx.exception))
+
+            # A whole-valued float and a normal multi-label map still pass.
+            whole_float = root / "whole.nii.gz"
+            nib.save(
+                nib.Nifti1Image(
+                    np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.float32).reshape(2, 2, 2),
+                    np.eye(4),
+                ),
+                str(whole_float),
+            )
+            out_path, replaced = pipeline.publish_prediction_output(
+                whole_float, output, None
+            )
+            self.assertEqual(out_path, output)
+
     def test_publish_prediction_output_refuses_corrupt_candidate(self):
         """R10: corrupt bytes can never reach the published output path."""
         with tempfile.TemporaryDirectory() as temp:
