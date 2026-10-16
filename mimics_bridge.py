@@ -1712,8 +1712,8 @@ def _validate_dicom_slice_grid(headers: list) -> None:
                 (ds, np.array([float(v) for v in ipp], dtype=float)))
         except (TypeError, ValueError):
             raise ValueError(
-                "unparseable ImagePositionPatient in DICOM series: {}"
-                .format(getattr(ds, "filename", "<unknown>"))
+                "DICOM 序列中存在无法解析的层面位置（ImagePositionPatient）："
+                "{0}".format(getattr(ds, "filename", "<unknown>"))
             )
     if len(positions) < 2:
         # 0 or 1 positioned slice cannot be non-uniform; missing tags fall
@@ -1729,9 +1729,9 @@ def _validate_dicom_slice_grid(headers: list) -> None:
     }
     if len(iops) > 1:
         raise ValueError(
-            "the DICOM series mixes slice orientations ({0} distinct "
-            "ImageOrientationPatient values); refusing to guess a grid"
-            .format(len(iops))
+            "该 DICOM 序列混用了 {0} 种层面方向（ImageOrientationPatient 不一"
+            "致），无法确定统一网格，已拒绝导入。请检查是否混入了其他序列的"
+            "图像后重新导出。".format(len(iops))
         )
 
     first = positions[0][0]
@@ -1744,8 +1744,8 @@ def _validate_dicom_slice_grid(headers: list) -> None:
     norm = float(np.linalg.norm(slice_dir))
     if norm <= 1e-9:
         raise ValueError(
-            "degenerate DICOM slice orientation (parallel row/column "
-            "cosines); refusing to guess a grid"
+            "该 DICOM 序列的层面方向退化（行/列方向向量平行），无法确定统一"
+            "网格，已拒绝导入。请回原图源检查导出设置。"
         )
     slice_dir = slice_dir / norm
 
@@ -1755,8 +1755,8 @@ def _validate_dicom_slice_grid(headers: list) -> None:
     if max(projections) - min(projections) <= 1e-6:
         # All slices sit at the same position: duplicates, not a volume.
         raise ValueError(
-            "the DICOM series has {0} slices all at the same position; "
-            "duplicated exports cannot form a volume".format(len(positions))
+            "该 DICOM 序列的 {0} 个层面位于同一位置（疑似重复导出），无法"
+            "构成三维体积，已拒绝导入。请回原图源重新导出。".format(len(positions))
         )
     ordered = sorted(
         range(len(projections)), key=lambda i: projections[i])
@@ -1764,19 +1764,18 @@ def _validate_dicom_slice_grid(headers: list) -> None:
              for i in range(1, len(ordered))]
     if min(steps) <= 1e-6:
         raise ValueError(
-            "the DICOM series contains duplicated slice positions "
-            "(expected step {0:.6g} mm); re-exported or overlapping series "
-            "cannot form a regular volume".format(float(np.median(steps)))
+            "该 DICOM 序列存在重复层面位置（预期层间距 {0:.6g} mm），重复导出"
+            "或层面交叠无法构成规则体积，已拒绝导入。请回原图源重新导出。".format(
+                float(np.median(steps)))
         )
     expected = float(np.median(steps))
     tolerance = max(1e-4, abs(expected) * 1e-3)
     for value in steps:
         if abs(value - expected) > tolerance:
             raise ValueError(
-                "the DICOM series is not evenly spaced (slice steps differ "
-                "by more than {0:.6g} mm); rescan/padded/irregular series "
-                "cannot be represented as a regular volume".format(
-                    abs(value - expected))
+                "该 DICOM 序列层间距不均匀（相邻层面步长差超过 {0:.6g} mm），"
+                "重扫/补层/不规则序列无法表示为规则体积，已拒绝导入。请回原"
+                "图源重新导出。".format(abs(value - expected))
             )
 
 

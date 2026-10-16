@@ -6539,17 +6539,17 @@ class TestEdgeCases(unittest.TestCase):
         # become a fabricated regular [0,1.5,3] grid.
         write_series(os.path.join(self.tmp, "uneven"), [0.0, 1.0, 3.0])
         expect_rejected(
-            os.path.join(self.tmp, "uneven"), "not evenly spaced")
+            os.path.join(self.tmp, "uneven"), "层间距不均匀")
         # Duplicated position (archive overwrite / duplicate export): the
         # duplicate slice must not silently widen the volume.
         write_series(
             os.path.join(self.tmp, "dup"), [0.0, 1.0, 1.0, 2.0])
         expect_rejected(
-            os.path.join(self.tmp, "dup"), "duplicated slice positions")
+            os.path.join(self.tmp, "dup"), "重复层面位置")
         # Every slice at the same position: not a volume at all.
         write_series(os.path.join(self.tmp, "flat"), [1.0, 1.0, 1.0])
         expect_rejected(
-            os.path.join(self.tmp, "flat"), "same position")
+            os.path.join(self.tmp, "flat"), "位于同一位置")
         # Mixed orientations inside one series UID: no single normal.
         mixed_iop = os.path.join(self.tmp, "mixed_iop")
         os.makedirs(mixed_iop)
@@ -6577,7 +6577,7 @@ class TestEdgeCases(unittest.TestCase):
             ds.ImageOrientationPatient = iop
             ds.ImagePositionPatient = [0.0, 0.0, z]
             ds.save_as(ds.filename, enforce_file_format=True)
-        expect_rejected(mixed_iop, "slice orientations")
+        expect_rejected(mixed_iop, "混用了")
 
         # Regular grids still pass, including reversed order and a
         # tilt-compatible slice step with an in-plane offset (classic

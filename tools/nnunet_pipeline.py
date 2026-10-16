@@ -1838,9 +1838,8 @@ def publish_prediction_output(
                 )
             ):
                 raise RuntimeError(
-                    "Prediction grid does not match the source image. "
-                    "The result was not published and the existing file "
-                    "was left unchanged."
+                    "模型输出的网格与源图不一致，结果未发布、原文件未改动。"
+                    "请用与该数据同源的模型重新推理。"
                 )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate == output_path:
@@ -2404,7 +2403,7 @@ def run_inference(job_dir: Path) -> int:
             source.affine, prediction.affine, atol=1e-4, rtol=0.0
         ):
             raise RuntimeError(
-                "Prediction grid does not match the source image. The result was not offered to Mimics."
+                "模型输出的网格与源图不一致，结果未提供给 Mimics。请用与该数据同源的模型重新推理。"
             )
         publish_prediction_output(
             staged_output,

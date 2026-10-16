@@ -4705,7 +4705,7 @@ class RemotePredictionPublishTests(unittest.TestCase):
                 "request_path": str(request_path),
                 "status_path": str(root / "status.json"),
             }
-            with self.assertRaisesRegex(RuntimeError, "grid does not match"):
+            with self.assertRaisesRegex(RuntimeError, "网格与源图不一致"):
                 controller._apply_remote_prediction_output(
                     spec, "nnunet_infer", bundle, {}
                 )

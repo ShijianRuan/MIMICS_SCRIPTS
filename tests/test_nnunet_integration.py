@@ -1668,7 +1668,7 @@ class SpatialContractTests(unittest.TestCase):
             self.assertEqual(returncode, 1)
             status = common.read_json(job / "status.json")
             self.assertEqual(status["status"], "failed")
-            self.assertIn("grid does not match", status["error"])
+            self.assertIn("网格与源图不一致", status["error"])
 
     def test_inference_rejects_source_changed_since_mimics_import(self):
         import nibabel as nib
@@ -1782,7 +1782,7 @@ class SpatialContractTests(unittest.TestCase):
             self.assertEqual(returncode, 1)
             status = common.read_json(job / "status.json")
             self.assertEqual(status["status"], "failed")
-            self.assertIn("grid does not match", status["error"])
+            self.assertIn("网格与源图不一致", status["error"])
             # The reviewed result is byte-for-byte intact.
             survivor = np.asarray(nib.load(str(published)).dataobj)
             self.assertEqual(int(survivor.sum()), 7)
