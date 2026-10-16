@@ -1097,7 +1097,7 @@ class TestInferenceLifecycle(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             status = read_json(job_dir / "status.json", {}) or {}
             self.assertEqual(status["status"], "failed")
-            self.assertIn("grid", str(status.get("error") or "").lower())
+            self.assertIn("网格与源图不一致", str(status.get("error") or ""))
 
     def test_stale_source_geometry_rejected_before_gpu(self):
         """If the on-disk image no longer matches the launch-time geometry,
