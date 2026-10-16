@@ -1808,7 +1808,11 @@ def publish_prediction_output(
     already exists, moves the old file aside so a failed or wrong-grid result
     can never silently destroy a previously reviewed prediction.
 
-    Returns the resolved output path; on any failure the old file is intact.
+    Returns ``(output_path, replaced_path)``. ``replaced_path`` is None when
+    there was no previous output; otherwise it is the kept-aside copy of the
+    previous result (S02: the previous file survives a SUCCESSFUL publish
+    too, so a valid-but-wrong replacement stays recoverable). On any failure
+    the old file is intact.
     """
     candidate = Path(candidate).expanduser().resolve()
     output_path = Path(output_path).expanduser().resolve()
@@ -1843,7 +1847,7 @@ def publish_prediction_output(
                 )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate == output_path:
-        return output_path
+        return output_path, None
     # Keep the original suffix (e.g. .nii.gz) intact so the staged copy is
     # still a recognizable NIfTI for nibabel's extension-based loading during
     # the second validation pass.
@@ -1859,9 +1863,13 @@ def publish_prediction_output(
         # a partial copy (disk full mid-write) must fail here, not in Mimics.
         validate_prediction_nifti(staging)
         if output_path.exists():
+            # Stamp BEFORE the suffixes so the kept-aside copy keeps a
+            # recognizable .nii.gz name (nibabel and Mimics can open it
+            # directly on the recovery path).
             replaced = output_path.with_name(
-                "{}.replaced-{}".format(
-                    output_path.name, uuid.uuid4().hex[:8]
+                "{}.replaced-{}{}".format(
+                    output_path.stem, uuid.uuid4().hex[:8],
+                    "".join(output_path.suffixes),
                 )
             )
             os.replace(str(output_path), str(replaced))
@@ -1878,12 +1886,10 @@ def publish_prediction_output(
                 staging.unlink()
             except OSError:
                 pass
-    if replaced is not None:
-        try:
-            replaced.unlink()
-        except OSError:
-            pass
-    return output_path
+    # S02: keep the replaced copy. The old result must stay recoverable even
+    # after a SUCCESSFUL publish — a valid file is not proof the new content
+    # is what the annotator wanted (e.g. a re-run over a hand-reviewed mask).
+    return output_path, replaced
 
 
 def _record_log_compaction(status_path: Path, log_path: Path) -> None:
@@ -2405,13 +2411,17 @@ def run_inference(job_dir: Path) -> int:
             raise RuntimeError(
                 "模型输出的网格与源图不一致，结果未提供给 Mimics。请用与该数据同源的模型重新推理。"
             )
-        publish_prediction_output(
+        _, replaced_previous = publish_prediction_output(
             staged_output,
             output_path,
             {
                 "source_shape": list(source.shape[:3]),
                 "source_voxel_to_ras_matrix": source.affine.tolist(),
             },
+        )
+        publish_extras = (
+            {"replaced_previous_output": str(replaced_previous)}
+            if replaced_previous is not None else {}
         )
         update_status(
             status_path,
@@ -2424,6 +2434,7 @@ def run_inference(job_dir: Path) -> int:
             completed_at_epoch=time.time(),
             worker_pid=None,
             worker_start_marker=None,
+            **publish_extras,
         )
         return 0
     except InterruptedError:

@@ -1787,6 +1787,114 @@ class SpatialContractTests(unittest.TestCase):
             survivor = np.asarray(nib.load(str(published)).dataobj)
             self.assertEqual(int(survivor.sum()), 7)
 
+    def test_inference_success_keeps_previous_result_recoverable(self):
+        """S02: a VALID new prediction over an existing reviewed result must
+        leave the old content recoverable — validity is not proof the
+        annotator wanted the replacement."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = root / "job"
+            job.mkdir()
+            image = root / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)),
+                str(image),
+            )
+            model = root / "model"
+            model.mkdir()
+            manifest = model / "mimics_model_manifest.json"
+            common.write_json_atomic(
+                manifest,
+                {
+                    "schema_version": common.MODEL_SCHEMA_VERSION,
+                    "model_id": "model",
+                    "model_dir": str(model),
+                    "labels": [{"name": "A", "id": 1}],
+                },
+            )
+            published = root / "reviewed_prediction.nii.gz"
+            previous = np.zeros((4, 4, 4), dtype=np.uint8)
+            previous[0, 0, 0] = 7
+            nib.save(nib.Nifti1Image(previous, np.eye(4)), str(published))
+            common.write_json_atomic(
+                job / "request.json",
+                {
+                    "operation": "infer",
+                    "job_id": "infer",
+                    "workspace": str(root / "workspace"),
+                    "image_path": str(image),
+                    "model_manifest": str(manifest),
+                    "output_path": str(published),
+                },
+            )
+            common.write_json_atomic(job / "control.json", {"action": "run"})
+
+            def fake_worker(stage, params, *args, **kwargs):
+                nib.save(
+                    nib.Nifti1Image(np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                    str(Path(params["output_path"])),
+                )
+                return {"predicted": True}
+
+            with mock.patch.object(
+                pipeline, "_spawn_worker", side_effect=fake_worker
+            ), mock.patch.object(
+                pipeline, "_acquire_local_gpu", return_value=None
+            ):
+                returncode = pipeline.run_inference(job)
+            self.assertEqual(returncode, 0)
+            status = common.read_json(job / "status.json")
+            self.assertEqual(status["status"], "completed")
+            # The recovery path is recorded in the task result and the old
+            # content is still there, byte-for-byte recoverable.
+            replaced = Path(str(status["replaced_previous_output"]))
+            self.assertTrue(replaced.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 7
+            )
+            # The new content IS published at the requested path.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(published)).dataobj).sum()), 64
+            )
+            # No staging leftovers next to the output.
+            self.assertEqual(
+                sorted(p.name for p in published.parent.glob("*.staged*")), []
+            )
+
+    def test_publish_prediction_output_returns_kept_replaced_copy(self):
+        """S02: the publish boundary returns the kept-aside old copy so
+        every caller (local, FlexiCT, remote) can surface the recovery path."""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            out_path, replaced = pipeline.publish_prediction_output(
+                candidate, output, None
+            )
+            self.assertEqual(out_path, output)
+            self.assertIsNotNone(replaced)
+            self.assertTrue(replaced.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 0
+            )
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
+
     def test_publish_prediction_output_refuses_corrupt_candidate(self):
         """R10: corrupt bytes can never reach the published output path."""
         with tempfile.TemporaryDirectory() as temp:

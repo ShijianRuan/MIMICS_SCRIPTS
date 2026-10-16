@@ -1399,13 +1399,17 @@ def run_inference(job_dir: Path) -> int:
         ):
             raise RuntimeError(
                 "模型输出的网格与源图不一致，结果未提供给 Mimics。请用与该数据同源的模型重新推理。")
-        publish_prediction_output(
+        _, replaced_previous = publish_prediction_output(
             staged_output,
             output_path,
             {
                 "source_shape": list(source.shape[:3]),
                 "source_voxel_to_ras_matrix": source.affine.tolist(),
             },
+        )
+        publish_extras = (
+            {"replaced_previous_output": str(replaced_previous)}
+            if replaced_previous is not None else {}
         )
         update_status(
             status_path,
@@ -1420,6 +1424,7 @@ def run_inference(job_dir: Path) -> int:
             completed_at_epoch=time.time(),
             worker_pid=None,
             worker_start_marker=None,
+            **publish_extras,
         )
         return 0
     except InterruptedError:

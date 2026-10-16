@@ -2865,12 +2865,14 @@ def _apply_remote_prediction_output(
     # R10: validate (readable NIfTI, source grid) BEFORE touching the target
     # and publish through a unique staging name; a corrupt download or a
     # wrong-grid result must never replace a previously reviewed file.
-    publish_prediction_output(
+    _, replaced_previous = publish_prediction_output(
         downloaded,
         output_path,
         local_request.get("source_geometry_expected"),
     )
     remote_status["output_path"] = str(output_path)
+    if replaced_previous is not None:
+        remote_status["replaced_previous_output"] = str(replaced_previous)
 
 
 def _remove_remote_prepared_namespace(
