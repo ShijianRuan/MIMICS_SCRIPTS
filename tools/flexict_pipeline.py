@@ -617,18 +617,25 @@ def _write_flexict_splits(rows: list[dict[str, Any]],
                 if (group_by_case.get(other) or other) == group:
                     frozen.add(other)
         frozen &= set(str(row["case_id"]) for row in rows)
-    train, validation = _split_train_val(rows, request)
     if frozen:
-        # The heuristic split may not have picked every frozen case; pin
-        # them into val and pull them out of train. Empty sides stay the
-        # caller's fail-closed error (UI30).
-        validation = sorted(set(validation) | frozen)
-        train = [case for case in train if case not in frozen]
+        # S05: the frozen set (with its patient-group expansion) IS the
+        # validation contract — the heuristic only runs for a fresh split.
+        # Merging heuristic picks into the frozen set made a legitimate
+        # two-case retrain fail with "train 0 / val 2" and silently grew
+        # the validation side on rebuilds: every remaining case trains.
+        validation = sorted(frozen)
+        train = [
+            str(row["case_id"])
+            for row in rows
+            if str(row["case_id"]) not in frozen
+        ]
         if not train or not validation:
             raise ValueError(
                 "冻结验证集约束后训练/验证拆分为空（训练 {0} 例 / 验证 {1} 例）。"
                 "旧验证病例及其患者组必须留在验证侧，请增加病例或调整验证"
                 "病例的选择。".format(len(train), len(validation)))
+    else:
+        train, validation = _split_train_val(rows, request)
     folds = [{
         "train": [case_key_by_id[value] for value in train],
         "val": [case_key_by_id[value] for value in validation],

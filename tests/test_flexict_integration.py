@@ -2425,15 +2425,11 @@ class TestFrozenValidationContract(unittest.TestCase):
             # user's explicit choice, not silently.
             self.assertIn("case00", second_split["train"])
 
-    def test_frozen_group_emptying_train_side_fails_closed(self):
-        """A frozen val that swallows every case must fail before any GPU
-        lock or preprocessing burn, with a readable Chinese error.
-
-        First run validates case00. The rebuild groups case00+case01 as one
-        patient, so the frozen set expands to {case00, case01}; the
-        heuristic picks case02 for val, and pinning the frozen pair leaves
-        train empty — the frozen-contract guard must fire (not a silent
-        empty training run)."""
+    def test_frozen_group_keeps_remaining_cases_training(self):
+        """S05: the frozen set (group-expanded) IS the validation contract.
+        The old code unioned the heuristic's val pick into the frozen pair,
+        manufacturing an empty train side out of a perfectly workable
+        dataset — a legitimate retrain was refused with 训练 0 例."""
         with tempfile.TemporaryDirectory() as tmp:
             dataset_root = Path(tmp) / "dataset"
             for name in ("case00", "case01", "case02"):
@@ -2445,11 +2441,73 @@ class TestFrozenValidationContract(unittest.TestCase):
             _workspace, status = self._run_job(
                 tmp, ["case00", "case01", "case02"], dataset_root,
                 overrides={"patient_groups": {
+                    "case00": "patientA", "case01": "patientA"}})
+            self.assertEqual("completed", status["status"])
+            split = self._final_split_ids(_workspace)
+            # The frozen pair (case00 + its patient group) is the whole val
+            # side; the remaining case trains. No heuristic pick is merged in.
+            self.assertEqual(["case00", "case01"], split["val"])
+            self.assertEqual(["case02"], split["train"])
+
+    def test_frozen_group_emptying_train_side_fails_closed(self):
+        """A frozen val that genuinely swallows every case (the whole
+        dataset is one patient group with a frozen member) must fail before
+        any GPU lock or preprocessing burn, with a readable Chinese error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01"):
+                _make_case(dataset_root, name)
+            first, _ = self._run_job(
+                tmp, ["case00", "case01"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            self.assertEqual(self._final_split_ids(first)["val"], ["case00"])
+            _workspace, status = self._run_job(
+                tmp, ["case00", "case01"], dataset_root,
+                overrides={"patient_groups": {
                     "case00": "patientA", "case01": "patientA"}},
                 expect_exit=1)
             self.assertEqual(status["status"], "failed")
             self.assertIn("冻结验证集约束后", status["error"])
             self.assertIn("训练 0 例", status["error"])
+
+    def test_frozen_two_case_retrain_keeps_original_split(self):
+        """S05: a two-case rebuild with a frozen val keeps the original
+        c0-val / c1-train split. The old heuristic-union turned this into
+        训练 0 例 / 验证 2 例 and demanded more data."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01"):
+                _make_case(dataset_root, name)
+            first, _ = self._run_job(
+                tmp, ["case00", "case01"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            self.assertEqual(self._final_split_ids(first)["val"], ["case00"])
+            _workspace, status = self._run_job(
+                tmp, ["case00", "case01"], dataset_root)
+            self.assertEqual("completed", status["status"])
+            split = self._final_split_ids(_workspace)
+            self.assertEqual(["case00"], split["val"])
+            self.assertEqual(["case01"], split["train"])
+
+    def test_frozen_four_case_rebuild_does_not_grow_validation(self):
+        """S05: rebuilding with one frozen val case keeps exactly one val
+        case — the heuristic must not silently merge an extra pick into
+        the frozen contract."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = Path(tmp) / "dataset"
+            for name in ("case00", "case01", "case02", "case03"):
+                _make_case(dataset_root, name)
+            first, _ = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root, overrides={"val_case_ids": ["case00"]})
+            _workspace, status = self._run_job(
+                tmp, ["case00", "case01", "case02", "case03"],
+                dataset_root)
+            self.assertEqual("completed", status["status"])
+            split = self._final_split_ids(_workspace)
+            self.assertEqual(["case00"], split["val"])
+            self.assertEqual(
+                ["case01", "case02", "case03"], split["train"])
 
     def test_previous_frozen_val_translates_chinese_case_keys(self):
         """splits store nnU-Net case keys; a Chinese case id has key != id,

@@ -792,6 +792,18 @@ class DiscoveryTests(unittest.TestCase):
             self.assertIn("case00", fold["val"])
             self.assertIn("case01", fold["val"])
 
+    def test_split_folds_frozen_never_empties_train_side(self):
+        # S05: the rotated fill window must never starve training. On a
+        # two-case rebuild with one frozen val case, the old unconditional
+        # union could hand fold 0 train=[] (train on nothing).
+        rows = self._split_rows(2)
+        folds = pipeline._split_folds(
+            rows, self._request(), frozen_validation=["case00"])
+        for fold in folds:
+            self.assertIn("case00", fold["val"])
+            self.assertNotIn("case00", fold["train"])
+            self.assertEqual(["case01"], fold["train"])
+
     def test_split_folds_frozen_case_missing_from_rows_is_ignored(self):
         # A frozen case that no longer exists must not break the split.
         rows = self._split_rows(10)

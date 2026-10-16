@@ -909,10 +909,20 @@ def _split_folds(
     folds = []
     for fold_index in range(5):
         start = (fold_index * count) % len(case_ids)
-        validation = {
-            case_ids[(start + offset) % len(case_ids)] for offset in range(count)
-        }
-        validation |= frozen
+        window = [
+            case_ids[(start + offset) % len(case_ids)]
+            for offset in range(count)
+        ]
+        # S05: frozen is the authoritative validation contract; the rotated
+        # window only fills toward the target size and must never starve
+        # training. Unioning the window into frozen unconditionally made
+        # fold 0 train on nothing when a small dataset's window happened to
+        # cover every non-frozen case.
+        validation = set(frozen)
+        for case in window:
+            if len(case_ids) - len(validation) <= 1:
+                break
+            validation.add(case)
         folds.append(
             {
                 "train": sorted(value for value in case_ids if value not in validation),
