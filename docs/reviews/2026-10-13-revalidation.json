@@ -421,7 +421,7 @@
       ],
       "target_environment_validation": "not_run",
       "fix_commit": "3119208",
-      "fix_note": "统一发布边界 publish_prediction_output：先校验（NIfTI 可读+源网格）再发布，唯一 staging 名，旧文件移 .replaced-* 保护；远程两处发布点与本地 nnU-Net/FlexiCT 推理均改走该边界。失败路径测试见 tests/test_remote_training.py RemotePredictionPublishTests 与 tests/test_nnunet_integration.py test_inference_wrong_grid_preserves_previous_published_result；smoke 门禁 8/8（20261014T094443）。"
+      "fix_note": "统一发布边界 publish_prediction_output：先校验（NIfTI 可读+源网格）再发布，唯一 staging 名，旧文件移 .replaced-* 保护；远程两处发布点与本地 nnU-Net/FlexiCT 推理均改走该边界。失败路径测试见 tests/test_remote_training.py RemotePredictionPublishTests 与 tests/test_nnunet_integration.py test_inference_wrong_grid_preserves_previous_published_result；smoke 门禁 8/8（20261014T094443）。 复审（2026-10-16）：验收第2条「授权后原文件又被改动则拒绝静默覆盖」实际未实现——publish_prediction_output 在授权校验通过后直接替换，无原文件再校验交互。属需求缺口而非实现缺陷，登记 D24 需用户决策。"
     },
     {
       "id": "R11",
@@ -600,7 +600,7 @@
       ],
       "target_environment_validation": "not_run",
       "fix_commit": "3bca099",
-      "fix_note": "load_masks 逐份比较 affine（allclose, atol=1e-4，容忍重采样写回的浮点抖动），不一致时抛错指出具体文件；run_batch 既有单例失败机制将其记为处理失败、不写输出、不进 ranking.csv。失败路径测试：同 shape 平移 100mm 预测 → 失败入日志不进排名（test_run_batch_rejects_same_shape_mismatched_affine）；浮点 jitter 不误拒（test_load_masks_affine_tolerance）。验证：test_flexict_pkg 12/12、AL 生命周期 10/10、smoke 8/8（工件 20261014T205524_smoke.json）。"
+      "fix_note": "load_masks 逐份比较 affine（allclose, atol=1e-4，容忍重采样写回的浮点抖动），不一致时抛错指出具体文件；run_batch 既有单例失败机制将其记为处理失败、不写输出、不进 ranking.csv。失败路径测试：同 shape 平移 100mm 预测 → 失败入日志不进排名（test_run_batch_rejects_same_shape_mismatched_affine）；浮点 jitter 不误拒（test_load_masks_affine_tolerance）。验证：test_flexict_pkg 12/12、AL 生命周期 10/10、smoke 8/8（工件 20261014T205524_smoke.json）。 复审（2026-10-16）：affine 比对不覆盖「同网格异病例」（affine 一致但 voxels 属于另一病例）场景，需病例指纹设计，登记 D25 需用户决策。 配套改进：AL 排序被剔除病例不再静默消失，completed 状态新增 excluded_case_count 与 uncertainty_log 字段并在 UI 状态行提示（commit 667f1cf）。"
     },
     {
       "id": "R16",
