@@ -2310,6 +2310,56 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_mark_annotated_writes_off_gui_thread(self):
+        """S08: the annotate click must not wait on the cross-process guard
+        on the GUI thread — Mimics holding the lock used to freeze the
+        window for the guard's whole bounded wait (~2 s). The write runs on
+        a worker; the row only turns 已标注 after the state really landed
+        (a failed write stays retryable, UI31)."""
+        if os.name != "nt":
+            self.skipTest("guard-hold simulation uses msvcrt")
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                window.table.selectRow(0)
+                job_dir = Path(window._job_dir)
+                guard_file = job_dir / "annotation_state.json.guard"
+                guard_file.write_bytes(b"\0")
+                # Simulate Mimics holding the single-writer guard.
+                handle = open(str(guard_file), "a+b")
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                try:
+                    started = time.time()
+                    window._mark_annotated()
+                    elapsed = time.time() - started
+                    # The click returns immediately: no synchronous lock
+                    # wait on the GUI thread.
+                    self.assertLess(elapsed, 0.5)
+                    self.assertIn("正在标记已标注", window.status_label.text())
+                    # While the lock is held the write cannot land — the row
+                    # still shows the pending state, not a fake success.
+                    self.assertNotEqual(
+                        "已标注", window.table.item(0, 4).text())
+                finally:
+                    msvcrt.locking(
+                        handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    handle.close()
+                # Lock released: the background write completes and the
+                # poll timer refreshes the row from the real state file.
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if window.table.item(0, 4).text() == "已标注":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(
+                    "已标注", window.table.item(0, 4).text())
+                self.assertIn("已标注 1 例", window.status_label.text())
+            finally:
+                window.window.close()
+
     def test_failed_request_message_survives_refresh(self):
         # F14/T14: the poll sets the outcome AFTER refreshing the table.
         with tempfile.TemporaryDirectory() as tmp:

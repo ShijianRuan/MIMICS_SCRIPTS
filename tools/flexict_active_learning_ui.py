@@ -445,6 +445,11 @@ class ActiveLearningWindow:
         # scans on a worker thread and drains via the poll timer.
         self._refresh_results: Queue = Queue()
         self._refresh_pending = False
+        # S08: annotating/skipping writes annotation_state.json under a
+        # cross-process guard; when Mimics holds the lock the bounded wait
+        # (up to 2 s) must not run on the GUI thread. Same worker + poll
+        # pattern as the scans above.
+        self._state_write_results: Queue = Queue()
         self._refresh_async()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -580,6 +585,24 @@ class ActiveLearningWindow:
             self.start_run_button.setEnabled(True)
             self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
             self.pair_label.setText('任务创建超时。请重试。')
+        # S08: drain async annotate/skip writes. Success refreshes the row
+        # (only then does it show as annotated — UI31); a failure keeps the
+        # old row and says so, leaving the click retryable.
+        applied_any = False
+        first_error = ""
+        while True:
+            try:
+                _case_id, error = self._state_write_results.get_nowait()
+            except Empty:
+                break
+            if error:
+                first_error = first_error or error
+            else:
+                applied_any = True
+        if applied_any:
+            self._job_selected()
+        if first_error:
+            self.status_label.setText(friendly_error(first_error))
         try:
             payload = self._submit_results.get_nowait()
         except Empty:
@@ -1007,27 +1030,35 @@ class ActiveLearningWindow:
             )
         )
 
+    def _set_case_state_async(self, case_id: str, value: str, verb: str):
+        """S08: the state write can block on the cross-process guard for up
+        to its timeout while Mimics holds the lock — running it directly in
+        the click handler froze the window for those seconds. Write on a
+        worker thread (the guard serializes concurrent writers); the poll
+        timer applies the outcome and refreshes the row."""
+        job_dir = self._job_dir
+
+        def write():
+            try:
+                set_case_state(job_dir, case_id, value)
+                self._state_write_results.put((case_id, None))
+            except Exception as exc:
+                self._state_write_results.put((case_id, str(exc)))
+
+        worker = threading.Thread(
+            target=write, name="al-state-write", daemon=True)
+        worker.start()
+        self.status_label.setText('正在{0} {1}…'.format(verb, case_id))
+
     def _mark_annotated(self):
         case_id = self._selected_case()
         if case_id and self._job_dir:
-            try:
-                set_case_state(self._job_dir, case_id, "annotated")
-            except Exception as exc:
-                # UI31: the state file was NOT updated — say so instead of
-                # showing the row as annotated on the next refresh.
-                self.status_label.setText(friendly_error(exc))
-                return
-            self._job_selected()
+            self._set_case_state_async(case_id, "annotated", "标记已标注")
 
     def _mark_skipped(self):
         case_id = self._selected_case()
         if case_id and self._job_dir:
-            try:
-                set_case_state(self._job_dir, case_id, "skipped")
-            except Exception as exc:
-                self.status_label.setText(friendly_error(exc))
-                return
-            self._job_selected()
+            self._set_case_state_async(case_id, "skipped", "标记跳过")
 
     def _export_csv(self):
         if not self._rows:
