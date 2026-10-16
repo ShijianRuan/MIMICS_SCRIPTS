@@ -727,9 +727,14 @@ class ActiveLearningWindow:
             self._seen_running_job_id = ""
             self.refresh()
             if self._jobs:
-                self.status_label.setText(
-                    '排序完成：{0} 例。双击行即可在 Mimics 中打开并叠加。'.format(
-                        len(self._rows)))
+                excluded = int(
+                    (self._jobs[0] or {}).get("excluded_case_count") or 0)
+                text = '排序完成：{0} 例。双击行即可在 Mimics 中打开并叠加。'.format(
+                    len(self._rows))
+                if excluded:
+                    text += '（另有 {0} 例因数据问题被剔除，原因见任务日志）'.format(
+                        excluded)
+                self.status_label.setText(text)
 
     # -- data ---------------------------------------------------------------
 
@@ -877,6 +882,16 @@ class ActiveLearningWindow:
                 self._jobs[self.job_combo.currentIndex()]):
             text += (" 注意：双模型对的分歧图只有一级，中带与高带覆盖"
                      "相同的体素。")
+        # R81 复审: cases the uncertainty batch excluded (grid mismatch,
+        # missing mask) silently shortened the ranking — say so and point at
+        # the log holding the per-case Chinese reasons.
+        job = (self._jobs[self.job_combo.currentIndex()]
+               if self._jobs else {})
+        excluded = int(job.get("excluded_case_count") or 0)
+        if excluded > 0:
+            log_path = str(job.get("uncertainty_log") or "")
+            text += " 注意：有 {0} 例因数据问题被剔除出排序（如网格不一致），原因见任务日志{1}。".format(
+                excluded, "：{0}".format(log_path) if log_path else "")
         self.status_label.setText(text)
 
     def _case_image_hint(self, case_id: str) -> str:

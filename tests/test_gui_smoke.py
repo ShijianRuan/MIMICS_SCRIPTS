@@ -2275,6 +2275,41 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_excluded_cases_named_in_status_line(self):
+        """R81 复审: cases the uncertainty batch excluded (grid mismatch)
+        silently shortened the ranking — the status line must say how many
+        were dropped and point at the log with the per-case reasons."""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp, ranking=("caseA",))
+            try:
+                job_dir = Path(window._job_dir)
+                status = json.loads(
+                    (job_dir / "status.json").read_text(encoding="utf-8"))
+                status["excluded_case_count"] = 2
+                status["uncertainty_log"] = str(job_dir / "uncertainty_log.txt")
+                (job_dir / "status.json").write_text(
+                    json.dumps(status), encoding="utf-8")
+                # _job_selected reads the cached job list, not status.json —
+                # refresh like the poll timer does so the new fields land.
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._refresh_async()
+                    window._poll_background_results()
+                    if window._jobs and int(
+                            window._jobs[0].get("excluded_case_count") or 0):
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(
+                    window._jobs and window._jobs[0].get("excluded_case_count"),
+                    "refresh never picked up the excluded fields")
+                window._job_selected()
+                text = window.status_label.text()
+                self.assertIn("2 例因数据问题被剔除", text)
+                self.assertIn("uncertainty_log.txt", text)
+            finally:
+                window.window.close()
+
     def test_failed_request_message_survives_refresh(self):
         # F14/T14: the poll sets the outcome AFTER refreshing the table.
         with tempfile.TemporaryDirectory() as tmp:

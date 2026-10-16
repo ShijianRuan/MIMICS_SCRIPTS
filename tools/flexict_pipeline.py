@@ -1761,7 +1761,12 @@ def run_active_learning(job_dir: Path) -> int:
             sys.path.insert(0, str(repo))
         from uncertainty import analyze_uncertainty_dir, run_batch  # noqa: E402
 
-        run_batch(
+        # Cases the uncertainty batch skips (grid mismatch, missing mask)
+        # vanish silently otherwise — the review window shows fewer rows than
+        # the job was submitted with, with no reason anywhere in the UI.
+        # run_batch's return value is the per-case success list; the log holds
+        # the Chinese skip reasons for the annotator to read.
+        metrics = run_batch(
             mask_dirs=[str(predictions["2d"]), str(predictions["3d_fullres"])],
             out_dir=str(uncertainty_dir),
             case_names=case_ids,
@@ -1780,6 +1785,7 @@ def run_active_learning(job_dir: Path) -> int:
             save_plots=False,
             log_path=str(job_dir / "uncertainty_log.txt"),
         )
+        excluded_case_count = max(0, len(case_ids) - len(metrics))
         ranking = analyze_uncertainty_dir(
             str(uncertainty_dir),
             method=method,
@@ -1813,6 +1819,8 @@ def run_active_learning(job_dir: Path) -> int:
             uncertainty_bands=bands,
             ranking=summary,
             top_case=summary[0]["case"] if summary else "",
+            excluded_case_count=excluded_case_count,
+            uncertainty_log=str(job_dir / "uncertainty_log.txt"),
             completed_at_epoch=time.time(),
             worker_pid=None,
             worker_start_marker=None,

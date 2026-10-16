@@ -1365,6 +1365,39 @@ class TestActiveLearningLifecycle(unittest.TestCase):
             for case_id in cases:
                 self.assertIn(case_id, geometries.get("cases") or {})
 
+    def test_al_reports_excluded_case_count(self):
+        """R81 复审: a case the uncertainty batch skips (grid mismatch,
+        missing mask) must be visible in the completed status — otherwise the
+        ranking silently shortens and the annotator never learns why."""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
+            # run_active_learning imports run_batch from the standalone
+            # flexict repo via its sys.path seam; patch it there.
+            from flexict_common import flexict_repo_dir
+            repo = flexict_repo_dir()
+            if str(repo) not in sys.path:
+                sys.path.insert(0, str(repo))
+            import uncertainty  # noqa: E402
+
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None), \
+                 mock.patch.object(uncertainty, "run_batch", return_value=[]), \
+                 mock.patch.object(
+                     uncertainty, "analyze_uncertainty_dir",
+                     return_value=[]):
+                exit_code = fp.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["excluded_case_count"], len(cases))
+            self.assertTrue(status["uncertainty_log"].endswith(
+                "uncertainty_log.txt"))
+
     def test_al_fails_without_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset_root = Path(tmp) / "pool"
