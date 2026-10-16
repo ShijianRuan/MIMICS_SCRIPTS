@@ -6738,6 +6738,70 @@ class TestEdgeCases(unittest.TestCase):
             "gantry-tilt slice step lost its in-plane component",
         )
 
+    def test_dicom_helpers_refuse_incomplete_or_drifting_geometry(self):
+        """S06: the old check only compared positions' projections onto the
+        slice normal — an in-plane centre jump was squashed away, a slice
+        missing its position tag let count inference fabricate its
+        coordinates, and mixed pixel spacing silently used slice 0's grid."""
+        import pydicom
+        from pydicom.dataset import FileDataset, FileMetaDataset
+        from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
+        from mimics_bridge import get_image_affine_from_dicom, get_image_shape_from_dicom
+
+        def write_series(folder, points, pixel_spacings=None):
+            # points: per-slice (x, y, z) or None to omit the position tag.
+            os.makedirs(folder)
+            uid = generate_uid()
+            for k, point in enumerate(points):
+                file_meta = FileMetaDataset()
+                file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                file_meta.MediaStorageSOPClassUID = CTImageStorage
+                file_meta.MediaStorageSOPInstanceUID = generate_uid()
+                ds = FileDataset(
+                    os.path.join(folder, f"s{k:04d}.dcm"), {},
+                    file_meta=file_meta, preamble=b"\0" * 128,
+                )
+                ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+                ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+                ds.SeriesInstanceUID = uid
+                ds.Rows = ds.Columns = 4
+                ds.PixelSpacing = (
+                    pixel_spacings[k] if pixel_spacings else [1.0, 1.0])
+                ds.SliceThickness = 10.0
+                ds.Modality = "CT"
+                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                if point is not None:
+                    ds.ImagePositionPatient = [
+                        float(point[0]), float(point[1]), float(point[2])]
+                ds.save_as(ds.filename, enforce_file_format=True)
+
+        def expect_rejected(folder, message_part):
+            for helper in (get_image_affine_from_dicom,
+                           get_image_shape_from_dicom):
+                with self.assertRaises(ValueError) as caught:
+                    helper(folder)
+                self.assertIn(message_part, str(caught.exception))
+
+        # In-plane zigzag: normal projections are 0/1/2 (uniform), but the
+        # slice centres jump sideways 8 mm and back.
+        zigzag = os.path.join(self.tmp, "zigzag")
+        write_series(zigzag, [(0, 0, 0), (8, 0, 1), (0, 0, 2)])
+        expect_rejected(zigzag, "平面内跳动")
+
+        # A middle slice missing its position tag: the remaining positions
+        # must not be extrapolated over the unproven slice.
+        missing = os.path.join(self.tmp, "missing_ipp")
+        write_series(missing, [(0, 0, 0), None, (0, 0, 2)])
+        expect_rejected(missing, "缺少层面位置")
+
+        # Mixed pixel spacing across slices: one in-plane grid is not
+        # provable, slice 0's spacing must not be applied to all.
+        spacing = os.path.join(self.tmp, "spacing")
+        write_series(
+            spacing, [(0, 0, 0), (0, 0, 1), (0, 0, 2)],
+            pixel_spacings=[[1.0, 1.0], [2.0, 2.0], [1.0, 1.0]])
+        expect_rejected(spacing, "像素间距不一致")
+
     # -- resource lock edge cases --
     def test_lock_release_wrong_token(self):
         import runtime_common

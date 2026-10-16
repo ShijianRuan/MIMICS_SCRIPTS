@@ -1692,32 +1692,98 @@ def _read_dicom_series_headers(dicom_folder: str) -> list:
 
 
 def _validate_dicom_slice_grid(headers: list) -> None:
-    """Refuse non-uniform / duplicated / reversed slice positions (R09).
+    """Refuse non-uniform / duplicated / reversed / incomplete slice
+    geometry (R09/S06).
 
     The geometry helpers summarize a series as origin + one slice step, so
     any series that is not a uniform stack along a single normal would be
     silently squashed onto a fabricated regular grid and that wrong grid
     would propagate into masks, AI input, and exports. Fail closed with the
-    specific problem named instead. Series without position tags keep the
-    legacy count-based geometry (the caller still refuses mixed series,
-    sizes, and multi-frame input above).
+    specific problem named instead. Series entirely without position tags
+    keep the legacy count-based geometry (the caller still refuses mixed
+    series, sizes, and multi-frame input above).
     """
+    # S06: geometry evidence must be COMPLETE on every slice. A series where
+    # some slices carry positions and others do not cannot be proven a
+    # single grid — the old check skipped the unpositioned slices and let
+    # count-based inference fabricate their coordinates.
+    unpositioned = [
+        ds for ds in headers
+        if getattr(ds, "ImagePositionPatient", None) is None
+    ]
+    if len(unpositioned) == len(headers):
+        # No positioned slice at all: legacy count-based geometry.
+        return
+    if unpositioned:
+        raise ValueError(
+            "该 DICOM 序列有 {0} 个层面缺少层面位置（ImagePositionPatient，"
+            "如 {1}），位置不完整的序列无法证明为规则网格，已拒绝导入。"
+            "请回原图源重新导出。".format(
+                len(unpositioned),
+                getattr(unpositioned[0], "filename", "<unknown>"))
+        )
+    unoriented = [
+        ds for ds in headers
+        if getattr(ds, "ImageOrientationPatient", None) is None
+    ]
+    if unoriented:
+        raise ValueError(
+            "该 DICOM 序列有 {0} 个层面缺少层面方向（ImageOrientationPatient，"
+            "如 {1}），方向不完整的序列无法确定统一网格，已拒绝导入。"
+            "请回原图源重新导出。".format(
+                len(unoriented),
+                getattr(unoriented[0], "filename", "<unknown>"))
+        )
+    spacings = []
+    for ds in headers:
+        ps = getattr(ds, "PixelSpacing", None)
+        if ps is None:
+            # All slices without PixelSpacing keep the legacy [1, 1]
+            # fallback; a PARTIAL absence cannot prove one in-plane grid.
+            spacings = []
+            break
+        try:
+            values = tuple(round(float(v), 6) for v in ps)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "DICOM 序列中存在无法解析的像素间距（PixelSpacing）："
+                "{0}".format(getattr(ds, "filename", "<unknown>"))
+            )
+        if (
+            len(values) != 2
+            or not all(np.isfinite(values))
+            or min(values) <= 0
+        ):
+            raise ValueError(
+                "DICOM 序列中存在非法像素间距（PixelSpacing {0}）：{1}".format(
+                    list(ps), getattr(ds, "filename", "<unknown>"))
+            )
+        spacings.append(values)
+    if spacings and len(set(spacings)) > 1:
+        raise ValueError(
+            "该 DICOM 序列的像素间距不一致（{0} 种），无法表示为统一网格，"
+            "已拒绝导入。请回原图源重新导出。".format(
+                sorted(set(spacings))[:3])
+        )
+
     positions = []
     for ds in headers:
-        ipp = getattr(ds, "ImagePositionPatient", None)
-        if ipp is None:
-            continue
         try:
-            positions.append(
-                (ds, np.array([float(v) for v in ipp], dtype=float)))
+            pos = np.array(
+                [float(v) for v in ds.ImagePositionPatient], dtype=float)
         except (TypeError, ValueError):
             raise ValueError(
                 "DICOM 序列中存在无法解析的层面位置（ImagePositionPatient）："
                 "{0}".format(getattr(ds, "filename", "<unknown>"))
             )
+        if not np.isfinite(pos).all():
+            raise ValueError(
+                "DICOM 序列的层面位置含非有限数值：{0}".format(
+                    getattr(ds, "filename", "<unknown>"))
+            )
+        positions.append((ds, pos))
     if len(positions) < 2:
-        # 0 or 1 positioned slice cannot be non-uniform; missing tags fall
-        # back to the count-based legacy geometry.
+        # A single positioned slice cannot be non-uniform.
         return
 
     iops = {
@@ -1725,7 +1791,6 @@ def _validate_dicom_slice_grid(headers: list) -> None:
             [float(v) for v in getattr(ds, "ImageOrientationPatient", [])],
             dtype=float), 6))
         for ds, _ in positions
-        if getattr(ds, "ImageOrientationPatient", None) is not None
     }
     if len(iops) > 1:
         raise ValueError(
@@ -1760,22 +1825,40 @@ def _validate_dicom_slice_grid(headers: list) -> None:
         )
     ordered = sorted(
         range(len(projections)), key=lambda i: projections[i])
-    steps = [projections[ordered[i]] - projections[ordered[i - 1]]
+    steps = [positions[ordered[i]][1] - positions[ordered[i - 1]][1]
              for i in range(1, len(ordered))]
-    if min(steps) <= 1e-6:
+    normal_steps = [float(np.dot(step, slice_dir)) for step in steps]
+    if min(normal_steps) <= 1e-6:
         raise ValueError(
             "该 DICOM 序列存在重复层面位置（预期层间距 {0:.6g} mm），重复导出"
             "或层面交叠无法构成规则体积，已拒绝导入。请回原图源重新导出。".format(
-                float(np.median(steps)))
+                float(np.median(normal_steps)))
         )
-    expected = float(np.median(steps))
+    expected = float(np.median(normal_steps))
     tolerance = max(1e-4, abs(expected) * 1e-3)
-    for value in steps:
-        if abs(value - expected) > tolerance:
+    # S06: a uniform LINEAR stack allows a constant in-plane step component
+    # (classic gantry tilt moves slice centres sideways by the same vector
+    # every slice) — the affine keeps that sideways component. What is NOT
+    # representable is a NON-linear stack: steps whose in-plane component
+    # drifts (the old projection-only check squashed that away silently).
+    in_plane_steps = [
+        step - normal * slice_dir
+        for step, normal in zip(steps, normal_steps)
+    ]
+    median_in_plane = np.median(np.asarray(in_plane_steps, dtype=float), axis=0)
+    for normal, in_plane in zip(normal_steps, in_plane_steps):
+        if abs(normal - expected) > tolerance:
             raise ValueError(
                 "该 DICOM 序列层间距不均匀（相邻层面步长差超过 {0:.6g} mm），"
                 "重扫/补层/不规则序列无法表示为规则体积，已拒绝导入。请回原"
-                "图源重新导出。".format(abs(value - expected))
+                "图源重新导出。".format(abs(normal - expected))
+            )
+        drift = float(np.linalg.norm(in_plane - median_in_plane))
+        if drift > tolerance:
+            raise ValueError(
+                "该 DICOM 序列的层面位置存在平面内跳动（层面步进的面内分量"
+                "漂移 {0:.6g} mm，非线性堆叠），无法表示为统一网格，已拒绝"
+                "导入。请回原图源重新导出。".format(drift)
             )
 
 
