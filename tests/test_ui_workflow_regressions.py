@@ -470,6 +470,22 @@ class TestUiWorkflow(unittest.TestCase):
                 '10月14日肝脏适配',
                 w.model_table.item(w.model_table.currentRow(), 1).text())
 
+    def test_show_completed_model_reports_when_row_is_gone(self):
+        # R81 复审: the completion card's button can outlive its target — the
+        # registry may be pruned/edited between completion and the click. The
+        # click must say so instead of silently showing an unselected table.
+        import nninteractive_task_model_center as ui
+        with mock.patch.object(ui, 'find_environment_python', return_value=sys.executable):
+            w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
+        infos = []
+        with mock.patch.object(QtWidgets.QMessageBox, 'information',
+                               side_effect=lambda *a, **k: infos.append(a) or QtWidgets.QMessageBox.Ok):
+            w.view_completed_model_button.setProperty('model_id', 'model_gone')
+            w.show_completed_model()
+        self.assertTrue(infos, "a vanished target must be reported, not swallowed")
+        self.assertIn('未找到该模型版本', " ".join(str(a) for a in infos[0]))
+        self.assertTrue(w.show_failed.isChecked(), "the filter must still be lifted")
+
     def _drop_check(self, kind, chosen):
         import import_drop_window as ui
         source = self.root / 'synthetic-source'

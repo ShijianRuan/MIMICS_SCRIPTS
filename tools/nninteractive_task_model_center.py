@@ -2631,6 +2631,15 @@ class ModelCenter:
                     item, self.QtWidgets.QAbstractItemView.PositionAtCenter
                 )
                 return
+        # The version disappeared between completion and this click (registry
+        # pruned/edited elsewhere). Say so instead of silently landing on an
+        # unfiltered-but-unselected table.
+        self.QtWidgets.QMessageBox.information(
+            self.window,
+            "未找到该模型版本",
+            "未在模型列表中找到完成卡片指向的版本（可能已被删除）。\n"
+            "列表已切换为显示全部版本，请手动选择。",
+        )
 
     def use_model(self, model_id):
         registry = load_registry(self.workspace)
