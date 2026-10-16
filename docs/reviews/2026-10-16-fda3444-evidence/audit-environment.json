@@ -1,0 +1,63 @@
+{
+  "python": "3.12.14",
+  "packages": [
+    {
+      "name": "iniconfig",
+      "version": "2.3.1"
+    },
+    {
+      "name": "nibabel",
+      "version": "5.4.2"
+    },
+    {
+      "name": "numpy",
+      "version": "2.3.5"
+    },
+    {
+      "name": "packaging",
+      "version": "26.3"
+    },
+    {
+      "name": "pip",
+      "version": "25.0.1"
+    },
+    {
+      "name": "pluggy",
+      "version": "1.7.0"
+    },
+    {
+      "name": "pydicom",
+      "version": "3.0.2"
+    },
+    {
+      "name": "Pygments",
+      "version": "2.21.0"
+    },
+    {
+      "name": "PySide6_Essentials",
+      "version": "6.12.0"
+    },
+    {
+      "name": "pytest",
+      "version": "9.1.1"
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.1"
+    },
+    {
+      "name": "shiboken6",
+      "version": "6.12.0"
+    },
+    {
+      "name": "simpleitk",
+      "version": "2.5.6"
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    }
+  ],
+  "product_environment_modified": false,
+  "target": "macOS offscreen audit, not Windows product runtime"
+}

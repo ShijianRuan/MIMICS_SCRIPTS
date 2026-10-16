@@ -1,0 +1,3835 @@
+{
+  "source_commit": "fda3444427360dfba0515648da1b7b04bd1eb94b",
+  "scope": "AST + actual dispatcher test; not native Mimics/GPU functional acceptance.",
+  "entries": [
+    {
+      "entry": "scripting_library/01_Data/01_Import_Data.py",
+      "line": 28,
+      "module": "import_drop_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "导入图像/病例/数据集",
+      "entry_decision": "常用；保留。文件、拖放和粘贴共用一条识别流程",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/01_Data/02_Import_Masks.py",
+      "line": 25,
+      "module": "mask_import",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "已有工程补充分割",
+      "entry_decision": "常用；保留。与创建新工程的导入不同",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/01_Data/03_Export_Masks.py",
+      "line": 23,
+      "module": "mimics_export",
+      "function": "quick_export_main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "导出当前工程标签",
+      "entry_decision": "常用；保留。不能用保存 .mcs 代替标签导出",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/01_Data/04_Task_Status.py",
+      "line": 29,
+      "module": "batch_status_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "导入导出任务进度/停止",
+      "entry_decision": "上下文入口；保留，完成后应能直接到结果位置",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/01_Data/05_Undo_Last_Import.py",
+      "line": 27,
+      "module": "import_undo_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "撤回上次外部分割导入",
+      "entry_decision": "恢复入口；保留，但手工修改保护仍未完成，见 UI15",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/00_Manage_AI_Models.py",
+      "line": 29,
+      "module": "model_manager_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "跨方法导入模型包和查看默认模型",
+      "entry_decision": "管理入口；保留。默认选择与当前标注会话必须区分",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/Annotate_With_ScribblePrompt.py",
+      "line": 23,
+      "module": "interactive_algorithms_mimics",
+      "function": "main",
+      "action_attribute": "ACTION_SCRIBBLEPROMPT",
+      "action_value": null,
+      "purpose": "提示驱动的单片修正",
+      "entry_decision": "可选辅助；保留，并强调作用平面/切片",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/FlexiCT/01_Train_Model.py",
+      "line": 23,
+      "module": "flexict_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_TRAIN",
+      "action_value": null,
+      "purpose": "FlexiCT CT 任务训练",
+      "entry_decision": "高级；保留，方法选择不应承诺几例必然得到可用模型",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/FlexiCT/02_Predict_Current_Case.py",
+      "line": 23,
+      "module": "flexict_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_PREDICT",
+      "action_value": null,
+      "purpose": "FlexiCT 当前病例预测",
+      "entry_decision": "常用；保留，有模型状态崩溃已修复",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/FlexiCT/03_Active_Learning_Review.py",
+      "line": 23,
+      "module": "flexict_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_ACTIVE_LEARNING",
+      "action_value": null,
+      "purpose": "病例排序与分歧提示复核",
+      "entry_decision": "可选；保留，同一页新建和复核，完成状态仍有语义问题",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/FlexiCT/04_Show_Status_and_Stop.py",
+      "line": 23,
+      "module": "flexict_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_STATUS",
+      "action_value": null,
+      "purpose": "FlexiCT 任务状态和停止",
+      "entry_decision": "上下文入口；保留，服务停止与单任务停止不同",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnInteractive/01_Annotate_Official_Model.py",
+      "line": 23,
+      "module": "nninteractive_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "直接使用官方交互模型",
+      "entry_decision": "常用；保留，首次环境缺失应给明确修复路径",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnInteractive/02_Annotate_Custom_Model.py",
+      "line": 23,
+      "module": "nninteractive_finetune_mimics",
+      "function": "main",
+      "action_attribute": "ACTION_ANNOTATE",
+      "action_value": null,
+      "purpose": "选择已有自定义模型再开始标注",
+      "entry_decision": "常用；保留。模型选择不是训练入口",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnInteractive/03_Train_and_Manage_Custom_Models.py",
+      "line": 23,
+      "module": "nninteractive_finetune_mimics",
+      "function": "main",
+      "action_attribute": "ACTION_MANAGE",
+      "action_value": null,
+      "purpose": "交互模型训练、进度与版本",
+      "entry_decision": "高级工作流；保留，合并在一个模型中心合理",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnUNet/01_Train_Model.py",
+      "line": 23,
+      "module": "nnunet_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_TRAIN",
+      "action_value": null,
+      "purpose": "nnU-Net 数据准备与训练",
+      "entry_decision": "高级；保留，数据映射优先，高级参数折叠",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnUNet/02_Predict_Current_Case.py",
+      "line": 23,
+      "module": "nnunet_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_PREDICT",
+      "action_value": null,
+      "purpose": "nnU-Net 当前病例预测",
+      "entry_decision": "常用；保留。所选 Mask 提供排序提示，不限制输出标签",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnUNet/03_Show_Status_Models.py",
+      "line": 23,
+      "module": "nnunet_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_STATUS",
+      "action_value": null,
+      "purpose": "nnU-Net 作业状态与模型",
+      "entry_decision": "上下文入口；保留，不能由通用模型列表替代停止/日志",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/02_AI/nnUNet/04_Batch_Predict_Dataset.py",
+      "line": 23,
+      "module": "nnunet_mimics",
+      "function": "main",
+      "action_attribute": "BUTTON_BATCH_PREDICT",
+      "action_value": null,
+      "purpose": "nnU-Net 批量病例预测",
+      "entry_decision": "常用批量；保留，与单例选源和结果应用方式不同",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/03_Review/01_Identify_Mask_At_Cursor.py",
+      "line": 27,
+      "module": "mask_identifier",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "重叠器官区域确认当前 Mask",
+      "entry_decision": "常用复核；保留，应反馈未命中/多重命中",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/03_Review/02_Window_From_Selected_Mask.py",
+      "line": 23,
+      "module": "window_level_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": "auto",
+      "purpose": "按所选器官调整窗宽窗位",
+      "entry_decision": "常用；保留。与手选预设是两种不同的操作",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/03_Review/03_Window_Level.py",
+      "line": 24,
+      "module": "window_level_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": "choose",
+      "purpose": "手选预设、撤销、编辑预设",
+      "entry_decision": "常用；保留。撤销和编辑继续在该入口内，无需另加菜单",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/01_Clear_Cache.py",
+      "line": 21,
+      "module": "mimics_stop_background",
+      "function": "clear_cache_main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "清理本工具缓存",
+      "entry_decision": "管理员恢复；保留，避免与任务停止混在标注主路径",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Environment/01_Setup_Repair_Environment.py",
+      "line": 26,
+      "module": "setup_environment",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "安装/修复依赖环境",
+      "entry_decision": "管理员首次配置；保留，普通标注者不应反复操作",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Environment/02_Environment_Guidance.py",
+      "line": 26,
+      "module": "env_guidance_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "检查依赖、模型和路径问题",
+      "entry_decision": "故障引导；保留。重新检查应支持键盘激活",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Environment/03_Edit_Configs.py",
+      "line": 23,
+      "module": "config_editor_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "高级参数配置",
+      "entry_decision": "管理员；保留，中文功能标签降低配置文件识别成本",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Health/01_System_Health.py",
+      "line": 27,
+      "module": "system_health_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "查看本机服务/任务健康状态",
+      "entry_decision": "管理员/故障时；保留，查看应优先于清理",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Health/02_Stop_All_Owned_Services.py",
+      "line": 23,
+      "module": "mimics_stop_background",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "停止工具拥有的本机后台服务",
+      "entry_decision": "管理员紧急恢复；保留，不等于停止所有远程容器",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    },
+    {
+      "entry": "scripting_library/99_Admin/Health/03_Collect_Diagnostics.py",
+      "line": 27,
+      "module": "collect_diagnostics_mimics",
+      "function": "main",
+      "action_attribute": null,
+      "action_value": null,
+      "purpose": "收集故障诊断材料",
+      "entry_decision": "管理员/支持；保留，应说明保存位置和诊断范围",
+      "verification": "Current 28-entry and family dispatcher tests passed; native effects are boundary stubs."
+    }
+  ],
+  "ui_source_files": [
+    "tools/batch_status_viewer.py",
+    "tools/config_editor_ui.py",
+    "tools/env_guidance.py",
+    "tools/flexict_active_learning_ui.py",
+    "tools/flexict_prediction_setup_ui.py",
+    "tools/flexict_status_viewer.py",
+    "tools/flexict_training_setup_ui.py",
+    "tools/import_drop_window.py",
+    "tools/io_path_setup_ui.py",
+    "tools/mask_file_picker_ui.py",
+    "tools/model_manager_ui.py",
+    "tools/nninteractive_task_model_center.py",
+    "tools/nninteractive_task_model_chooser.py",
+    "tools/nnunet_batch_predict_ui.py",
+    "tools/nnunet_prediction_setup_ui.py",
+    "tools/nnunet_status_viewer.py",
+    "tools/nnunet_training_setup_ui.py",
+    "tools/remote_compute_ui.py",
+    "tools/system_health_panel.py",
+    "tools/window_level_editor_ui.py"
+  ],
+  "controls": [
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 263,
+      "type": "QPushButton",
+      "args": [
+        "'刷新'"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 268,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "len(self.COLUMNS)"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 292,
+      "type": "QPushButton",
+      "args": [
+        "'打开任务文件夹'"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 294,
+      "type": "QPushButton",
+      "args": [
+        "'打开状态文件位置'"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 296,
+      "type": "QPushButton",
+      "args": [
+        "'停止'"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 303,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 185,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 227,
+      "type": "QPushButton",
+      "args": [
+        "'回滚上次保存'"
+      ]
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 232,
+      "type": "QPushButton",
+      "args": [
+        "'保存'"
+      ]
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 289,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 294,
+      "type": "QCheckBox",
+      "args": []
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 297,
+      "type": "QLineEdit",
+      "args": [
+        "str(current if current is not None else '')"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 493,
+      "type": "QPushButton",
+      "args": [
+        "'重新检查'"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 497,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 467,
+      "type": "QPushButton",
+      "args": [
+        "'修复：{0}'.format('运行迁移' if issue['fix_action'].startswith('migrate:') else '运行安装/修复环境')"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 340,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 343,
+      "type": "QPushButton",
+      "args": [
+        "'刷新'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 346,
+      "type": "QPushButton",
+      "args": [
+        "'新建排序…'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 354,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "6"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 385,
+      "type": "QPushButton",
+      "args": [
+        "'打开并叠加'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 388,
+      "type": "QPushButton",
+      "args": [
+        "'叠加不确定度'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 391,
+      "type": "QPushButton",
+      "args": [
+        "'应用共识 Mask'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 397,
+      "type": "QPushButton",
+      "args": [
+        "'标记为已标注'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 400,
+      "type": "QPushButton",
+      "args": [
+        "'标记为跳过'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 404,
+      "type": "QPushButton",
+      "args": [
+        "'导出 CSV'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 407,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 471,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 479,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 486,
+      "type": "QPushButton",
+      "args": [
+        "'开始排序'"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 90,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "4"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 119,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 122,
+      "type": "QPushButton",
+      "args": [
+        "'开始预测'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 99,
+      "type": "QPushButton",
+      "args": [
+        "'刷新'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 130,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 135,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 139,
+      "type": "QPlainTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 147,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "6"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 179,
+      "type": "QPushButton",
+      "args": [
+        "'停止'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 182,
+      "type": "QPushButton",
+      "args": [
+        "'重新挂接'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 188,
+      "type": "QPushButton",
+      "args": [
+        "'以相同设置重试'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 191,
+      "type": "QPushButton",
+      "args": [
+        "'打开作业文件夹'"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 195,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 95,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 110,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 113,
+      "type": "QPushButton",
+      "args": [
+        "'开始训练'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 143,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 175,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 208,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 213,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 231,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "4"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 246,
+      "type": "QPushButton",
+      "args": [
+        "'重新扫描病例'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 256,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 287,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 300,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 308,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 316,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 324,
+      "type": "QCheckBox",
+      "args": [
+        "'由 nnU-Net 规划器自动决定 batch size'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 331,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 343,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 348,
+      "type": "QCheckBox",
+      "args": [
+        "'允许排在后面的标签覆盖重叠体素'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 356,
+      "type": "QCheckBox",
+      "args": [
+        "'继续上次中断的训练'"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 384,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "5"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 573,
+      "type": "QCheckBox",
+      "args": []
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 579,
+      "type": "QCheckBox",
+      "args": []
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 675,
+      "type": "QPushButton",
+      "args": [
+        "'选择文件...'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 676,
+      "type": "QPushButton",
+      "args": [
+        "'选择文件夹...'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 677,
+      "type": "QPushButton",
+      "args": [
+        "'粘贴路径'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 689,
+      "type": "QLineEdit",
+      "args": [
+        "remembered_mode.get('output_path') or '' if remembered_mode.get('output_custom') else ''"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 695,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 710,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 712,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 720,
+      "type": "QRadioButton",
+      "args": [
+        "'全部 Mask'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 721,
+      "type": "QRadioButton",
+      "args": [
+        "'选定的名称'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 722,
+      "type": "QRadioButton",
+      "args": [
+        "'仅图像'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 738,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 750,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 757,
+      "type": "QPushButton",
+      "args": [
+        "'清空'"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 758,
+      "type": "QPushButton",
+      "args": [
+        "'导入'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 491,
+      "type": "QTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 496,
+      "type": "QPushButton",
+      "args": [
+        "'打开输出'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 497,
+      "type": "QPushButton",
+      "args": [
+        "'打开日志'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 498,
+      "type": "QPushButton",
+      "args": [
+        "'停止'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 500,
+      "type": "QPushButton",
+      "args": [
+        "'最小化'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 501,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 597,
+      "type": "QRadioButton",
+      "args": [
+        "'全部 Mask'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 598,
+      "type": "QRadioButton",
+      "args": [
+        "'选定的名称'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 616,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 621,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 658,
+      "type": "QRadioButton",
+      "args": [
+        "'跳过已存在'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 659,
+      "type": "QRadioButton",
+      "args": [
+        "'覆盖已存在'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 714,
+      "type": "QCheckBox",
+      "args": [
+        "'在本机记住这些文件夹'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 718,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 719,
+      "type": "QPushButton",
+      "args": [
+        "'开始导出'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 517,
+      "type": "QLineEdit",
+      "args": [
+        "str(initial or '')"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 519,
+      "type": "QPushButton",
+      "args": [
+        "'粘贴'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 526,
+      "type": "QPushButton",
+      "args": [
+        "'选择文件夹...'"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 676,
+      "type": "QCheckBox",
+      "args": [
+        "fmt_label"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 524,
+      "type": "QPushButton",
+      "args": [
+        "'选择文件...'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 107,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 112,
+      "type": "QPushButton",
+      "args": [
+        "'添加文件...'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 113,
+      "type": "QPushButton",
+      "args": [
+        "'粘贴路径'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 114,
+      "type": "QPushButton",
+      "args": [
+        "'移除所选'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 115,
+      "type": "QPushButton",
+      "args": [
+        "'清空'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 137,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 138,
+      "type": "QPushButton",
+      "args": [
+        "'导入 Mask'"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 366,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "7"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 384,
+      "type": "QPlainTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 398,
+      "type": "QPushButton",
+      "args": [
+        "'导入模型包...'"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 402,
+      "type": "QPushButton",
+      "args": [
+        "'设为默认模型'"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 405,
+      "type": "QPushButton",
+      "args": [
+        "'移除失效条目'"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 409,
+      "type": "QPushButton",
+      "args": [
+        "'刷新'"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 412,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 350,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 372,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 393,
+      "type": "QLineEdit",
+      "args": [
+        "str(initial or '')"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 395,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 447,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 486,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 494,
+      "type": "QPushButton",
+      "args": [
+        "'扫描数据'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 509,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 533,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 571,
+      "type": "QCheckBox",
+      "args": [
+        "'手动指定训练病例与验证集分配'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 584,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 588,
+      "type": "QCheckBox",
+      "args": [
+        "'显示不可用病例'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 593,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "4"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 613,
+      "type": "QRadioButton",
+      "args": [
+        "'CLoPA-IN  ·  轻量强度域自适应（CT / MR 通用）'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 616,
+      "type": "QRadioButton",
+      "args": [
+        "'CLoPA-CN  ·  Instance 归一化 + 部分卷积自适应'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 635,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 645,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 663,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 675,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 699,
+      "type": "QPushButton",
+      "args": [
+        "'开始训练'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 735,
+      "type": "QPushButton",
+      "args": [
+        "'查看这个版本'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 750,
+      "type": "QPlainTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 758,
+      "type": "QPushButton",
+      "args": [
+        "'打开作业文件夹'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 801,
+      "type": "QPushButton",
+      "args": [
+        "'有新日志'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 807,
+      "type": "QPlainTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 816,
+      "type": "QPushButton",
+      "args": [
+        "'暂停并释放 GPU'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 818,
+      "type": "QPushButton",
+      "args": [
+        "'继续训练'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 820,
+      "type": "QPushButton",
+      "args": [
+        "'停止训练'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 823,
+      "type": "QPushButton",
+      "args": [
+        "'打开日志'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 825,
+      "type": "QPushButton",
+      "args": [
+        "'隐藏窗口'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 860,
+      "type": "QPushButton",
+      "args": [
+        "'导入模型包'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 866,
+      "type": "QPushButton",
+      "args": [
+        "'导出当前模型'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 872,
+      "type": "QCheckBox",
+      "args": [
+        "'显示失败与未改进的版本'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 876,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "6"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 1472,
+      "type": "QCheckBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 1487,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 2460,
+      "type": "QPushButton",
+      "args": [
+        "'使用中' if row.get('model_id') == recommended else '启用'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 62,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 75,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 80,
+      "type": "QCheckBox",
+      "args": [
+        "'显示未改进的模型'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 90,
+      "type": "QPlainTextEdit",
+      "args": [
+        "''"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 103,
+      "type": "QCheckBox",
+      "args": [
+        "'为当前工程记住此目标与模型'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 111,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 113,
+      "type": "QPushButton",
+      "args": [
+        "'使用此模型标注'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 69,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 74,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 82,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "5"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 94,
+      "type": "QCheckBox",
+      "args": [
+        "'启用镜像 TTA'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 100,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 112,
+      "type": "QCheckBox",
+      "args": [
+        "'无 GPU 时用 CPU'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 139,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 142,
+      "type": "QPushButton",
+      "args": [
+        "'开始批量预测'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 164,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 95,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "5"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 106,
+      "type": "QCheckBox",
+      "args": [
+        "'启用镜像 TTA'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 122,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 125,
+      "type": "QPushButton",
+      "args": [
+        "'开始预测'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 120,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 126,
+      "type": "QPushButton",
+      "args": [
+        "'刷新'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 157,
+      "type": "QListWidget",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 162,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 166,
+      "type": "QPlainTextEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 174,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "8"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 203,
+      "type": "QPushButton",
+      "args": [
+        "'停止'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 206,
+      "type": "QPushButton",
+      "args": [
+        "'重新挂接'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 212,
+      "type": "QPushButton",
+      "args": [
+        "'以相同设置重试'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 215,
+      "type": "QPushButton",
+      "args": [
+        "'打开作业文件夹'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 219,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 84,
+      "type": "QTabWidget",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 98,
+      "type": "QPushButton",
+      "args": [
+        "'取消'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 101,
+      "type": "QPushButton",
+      "args": [
+        "'开始训练'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 140,
+      "type": "QToolButton",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 165,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 209,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 240,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 249,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 254,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 263,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 275,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 282,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 287,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "4"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 304,
+      "type": "QPushButton",
+      "args": [
+        "'导入标签集...'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 309,
+      "type": "QPushButton",
+      "args": [
+        "'添加标签'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 311,
+      "type": "QPushButton",
+      "args": [
+        "'移除所选'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 318,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 330,
+      "type": "QCheckBox",
+      "args": [
+        "'允许排在后面的标签覆盖重叠体素'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 346,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 377,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 385,
+      "type": "QCheckBox",
+      "args": [
+        "'由 nnU-Net 自动决定 spacing'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 405,
+      "type": "QCheckBox",
+      "args": [
+        "'由 nnU-Net 自动决定 patch 大小'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 430,
+      "type": "QCheckBox",
+      "args": [
+        "'由 nnU-Net 自动决定 batch size'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 434,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 449,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 466,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 474,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 485,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 494,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 502,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 511,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 540,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 549,
+      "type": "QCheckBox",
+      "args": [
+        "'继续上次中断的同名 Fold'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 552,
+      "type": "QCheckBox",
+      "args": [
+        "'后续推理启用镜像 TTA'"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 641,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 656,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 395,
+      "type": "QDoubleSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 416,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 139,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 143,
+      "type": "QPushButton",
+      "args": [
+        "'新建'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 146,
+      "type": "QPushButton",
+      "args": [
+        "'删除'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 160,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 161,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 162,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 165,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 166,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 170,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 175,
+      "type": "QCheckBox",
+      "args": [
+        "'在本机安全地记住密码'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 179,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 181,
+      "type": "QPushButton",
+      "args": [
+        "'浏览...'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 189,
+      "type": "QLineEdit",
+      "args": [
+        "DEFAULT_REMOTE_ROOT"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 193,
+      "type": "QLineEdit",
+      "args": [
+        "DEFAULT_IMAGE"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 194,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 200,
+      "type": "QCheckBox",
+      "args": [
+        "'复用未变化的已上传训练数据'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 207,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 213,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 218,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 228,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 238,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 248,
+      "type": "QSpinBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 306,
+      "type": "QToolButton",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 347,
+      "type": "QPushButton",
+      "args": [
+        "'测试连接'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 354,
+      "type": "QPushButton",
+      "args": [
+        "'查看已缓存数据集...'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 358,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 361,
+      "type": "QPushButton",
+      "args": [
+        "'保存'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 784,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "4"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 809,
+      "type": "QPushButton",
+      "args": [
+        "'关闭'"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 828,
+      "type": "QComboBox",
+      "args": []
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 831,
+      "type": "QPushButton",
+      "args": [
+        "'管理服务器...'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 372,
+      "type": "QPushButton",
+      "args": [
+        "'立即刷新'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 373,
+      "type": "QPushButton",
+      "args": [
+        "'清理失效状态'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 375,
+      "type": "QPushButton",
+      "args": [
+        "'停止本机后台服务'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 492,
+      "type": "QPushButton",
+      "args": [
+        "'打开文件夹'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 534,
+      "type": "QPushButton",
+      "args": [
+        "'环境指引'"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 437,
+      "type": "QPushButton",
+      "args": [
+        "'打开状态文件'"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 86,
+      "type": "QTableWidget",
+      "args": [
+        "0",
+        "3"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 96,
+      "type": "QLineEdit",
+      "args": []
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 105,
+      "type": "QPushButton",
+      "args": [
+        "'添加预设'"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 107,
+      "type": "QPushButton",
+      "args": [
+        "'移除所选'"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 109,
+      "type": "QPushButton",
+      "args": [
+        "'回滚上次保存'"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 116,
+      "type": "QPushButton",
+      "args": [
+        "'保存'"
+      ]
+    }
+  ],
+  "signal_bindings": [
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 282,
+      "signal": "self.table.itemSelectionChanged",
+      "handler": [
+        "self._selection_changed"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 293,
+      "signal": "self.open_folder.clicked",
+      "handler": [
+        "self._open_folder"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 295,
+      "signal": "self.open_log.clicked",
+      "handler": [
+        "self._open_status_location"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 298,
+      "signal": "self.stop.clicked",
+      "handler": [
+        "self._stop_selected"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 304,
+      "signal": "close.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/batch_status_viewer.py",
+      "line": 327,
+      "signal": "self.refresh_button.clicked",
+      "handler": [
+        "lambda _checked=False: self.refresher.request()"
+      ]
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 228,
+      "signal": "self.rollback.clicked",
+      "handler": [
+        "self._rollback"
+      ]
+    },
+    {
+      "file": "tools/config_editor_ui.py",
+      "line": 234,
+      "signal": "save.clicked",
+      "handler": [
+        "self._save"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 494,
+      "signal": "recheck.clicked",
+      "handler": [
+        "lambda : dialog.done(2)"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 498,
+      "signal": "close.clicked",
+      "handler": [
+        "dialog.accept"
+      ]
+    },
+    {
+      "file": "tools/env_guidance.py",
+      "line": 481,
+      "signal": "fix_btn.clicked",
+      "handler": [
+        "_clicked"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 341,
+      "signal": "self.job_combo.currentIndexChanged",
+      "handler": [
+        "self._job_selected"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 344,
+      "signal": "refresh.clicked",
+      "handler": [
+        "self.refresh"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 349,
+      "signal": "self.new_button.clicked",
+      "handler": [
+        "self._new_ranking_clicked"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 369,
+      "signal": "self.table.itemDoubleClicked",
+      "handler": [
+        "self._open_and_overlay_selected"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 386,
+      "signal": "self.open_button.clicked",
+      "handler": [
+        "self._open_and_overlay_selected"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 389,
+      "signal": "self.overlay_button.clicked",
+      "handler": [
+        "self._overlay_selected"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 392,
+      "signal": "self.consensus_button.clicked",
+      "handler": [
+        "self._apply_consensus"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 398,
+      "signal": "self.annotated_button.clicked",
+      "handler": [
+        "self._mark_annotated"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 401,
+      "signal": "self.skip_button.clicked",
+      "handler": [
+        "self._mark_skipped"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 405,
+      "signal": "self.export_button.clicked",
+      "handler": [
+        "self._export_csv"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 408,
+      "signal": "close.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 416,
+      "signal": "self.table.itemSelectionChanged",
+      "handler": [
+        "lambda : self._set_actions_enabled(bool(self._rows))"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 447,
+      "signal": "self.poll_timer.timeout",
+      "handler": [
+        "self._poll_requests"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 452,
+      "signal": "self.fast_timer.timeout",
+      "handler": [
+        "self._poll_background_results"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 480,
+      "signal": "self.pool_browse_button.clicked",
+      "handler": [
+        "self._browse_pool"
+      ]
+    },
+    {
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 489,
+      "signal": "self.start_run_button.clicked",
+      "handler": [
+        "self._submit_new_run"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 120,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 124,
+      "signal": "self.start.clicked",
+      "handler": [
+        "self._submit"
+      ]
+    },
+    {
+      "file": "tools/flexict_prediction_setup_ui.py",
+      "line": 131,
+      "signal": "self._timer.timeout",
+      "handler": [
+        "self._poll_background_results"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 100,
+      "signal": "refresh.clicked",
+      "handler": [
+        "self.refresh"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 131,
+      "signal": "self.jobs.currentRowChanged",
+      "handler": [
+        "self._show_selected_job"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 180,
+      "signal": "self.stop_button.clicked",
+      "handler": [
+        "self._stop"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 183,
+      "signal": "self.reattach_button.clicked",
+      "handler": [
+        "self._reattach"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 189,
+      "signal": "self.retry_button.clicked",
+      "handler": [
+        "self._retry"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 192,
+      "signal": "self.open_button.clicked",
+      "handler": [
+        "self._open_folder"
+      ]
+    },
+    {
+      "file": "tools/flexict_status_viewer.py",
+      "line": 196,
+      "signal": "close.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 111,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 115,
+      "signal": "self.start_button.clicked",
+      "handler": [
+        "self._submit"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 121,
+      "signal": "self._submission_timer.timeout",
+      "handler": [
+        "self._poll_submission"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 157,
+      "signal": "button.clicked",
+      "handler": [
+        "browse"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 207,
+      "signal": "self.label_edit.textChanged",
+      "handler": [
+        "_check_label_names"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 221,
+      "signal": "self.dataset_edit.textChanged",
+      "handler": [
+        "self._refresh_cases"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 247,
+      "signal": "self.rescan_button.clicked",
+      "handler": [
+        "self._rescan_cases_async"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 335,
+      "signal": "self.auto_batch.toggled",
+      "handler": [
+        "lambda checked: self.batch_spin.setEnabled(not checked)"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 575,
+      "signal": "use_check.toggled",
+      "handler": [
+        "lambda checked, r=row: r.update({'use_train': checked})"
+      ]
+    },
+    {
+      "file": "tools/flexict_training_setup_ui.py",
+      "line": 581,
+      "signal": "val_check.toggled",
+      "handler": [
+        "lambda checked, r=row: r.update({'use_val': checked})"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 771,
+      "signal": "mask_named.toggled",
+      "handler": [
+        "show_named_masks"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1000,
+      "signal": "scan_timer.timeout",
+      "handler": [
+        "poll_scan_results"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1083,
+      "signal": "output_edit.textChanged",
+      "handler": [
+        "output_edited"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1120,
+      "signal": "paste_button.clicked",
+      "handler": [
+        "paste_paths"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1138,
+      "signal": "browse.clicked",
+      "handler": [
+        "browse_output"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1162,
+      "signal": "mask_path_browse.clicked",
+      "handler": [
+        "browse_mask_paths"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1191,
+      "signal": "pick_files.clicked",
+      "handler": [
+        "browse_source_files"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1192,
+      "signal": "pick_folder.clicked",
+      "handler": [
+        "browse_source_folder"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1198,
+      "signal": "clear.clicked",
+      "handler": [
+        "clear_all"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1236,
+      "signal": "submit_timer.timeout",
+      "handler": [
+        "poll_submit_results"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1379,
+      "signal": "submit.clicked",
+      "handler": [
+        "do_submit"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1405,
+      "signal": "recent_list.itemDoubleClicked",
+      "handler": [
+        "open_recent_log"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1409,
+      "signal": "recent_timer.timeout",
+      "handler": [
+        "refresh_recent"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1420,
+      "signal": "idle_timer.timeout",
+      "handler": [
+        "check_idle"
+      ]
+    },
+    {
+      "file": "tools/import_drop_window.py",
+      "line": 1424,
+      "signal": "app.aboutToQuit",
+      "handler": [
+        "lambda : unregister_window_process(ownership_token) if ownership_token else None"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 631,
+      "signal": "mask_candidate_list.itemClicked",
+      "handler": [
+        "lambda item: _toggle_name_in_field(mask_names, item.text())"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 643,
+      "signal": "mask_names.textChanged",
+      "handler": [
+        "_filter_candidates_while_typing"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 646,
+      "signal": "mask_names.editingFinished",
+      "handler": [
+        "lambda : _filter_list_widget(mask_candidate_list, '')"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 649,
+      "signal": "mask_names.textChanged",
+      "handler": [
+        "lambda _text: _sync_candidate_check_state(mask_names, mask_candidate_list)"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 653,
+      "signal": "mask_named.toggled",
+      "handler": [
+        "mask_names.setEnabled"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 654,
+      "signal": "mask_named.toggled",
+      "handler": [
+        "mask_candidate_list.setEnabled"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 709,
+      "signal": "source_edit.textChanged",
+      "handler": [
+        "lambda _text: refresh_default()"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 710,
+      "signal": "output_edit.textChanged",
+      "handler": [
+        "output_edited"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 991,
+      "signal": "task_timer.timeout",
+      "handler": [
+        "poll_task"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 993,
+      "signal": "open_output.clicked",
+      "handler": [
+        "lambda : open_path((task_state.get('descriptor') or {}).get('output_path'))"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 994,
+      "signal": "open_log.clicked",
+      "handler": [
+        "lambda : open_path((task_state.get('descriptor') or {}).get('log_path'))"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 995,
+      "signal": "stop_task.clicked",
+      "handler": [
+        "request_stop"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 996,
+      "signal": "hide_task.clicked",
+      "handler": [
+        "window.showMinimized"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 997,
+      "signal": "close_task.clicked",
+      "handler": [
+        "window.accept"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 1019,
+      "signal": "submission_timer.timeout",
+      "handler": [
+        "poll_submission"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 1120,
+      "signal": "cancel.clicked",
+      "handler": [
+        "cancel_window"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 1121,
+      "signal": "submit.clicked",
+      "handler": [
+        "submit_window"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 1122,
+      "signal": "window.rejected",
+      "handler": [
+        "cancel_window"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 571,
+      "signal": "paste_button.clicked",
+      "handler": [
+        "paste_value"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 572,
+      "signal": "button.clicked",
+      "handler": [
+        "browse_folder_path"
+      ]
+    },
+    {
+      "file": "tools/io_path_setup_ui.py",
+      "line": 574,
+      "signal": "file_button.clicked",
+      "handler": [
+        "browse_file_path"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 215,
+      "signal": "add_files.clicked",
+      "handler": [
+        "browse"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 216,
+      "signal": "paste.clicked",
+      "handler": [
+        "paste_paths"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 217,
+      "signal": "remove.clicked",
+      "handler": [
+        "remove_selected"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 218,
+      "signal": "clear.clicked",
+      "handler": [
+        "clear_paths"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 219,
+      "signal": "submit.clicked",
+      "handler": [
+        "finish"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 220,
+      "signal": "cancel.clicked",
+      "handler": [
+        "dialog.reject"
+      ]
+    },
+    {
+      "file": "tools/mask_file_picker_ui.py",
+      "line": 221,
+      "signal": "dialog.rejected",
+      "handler": [
+        "cancelled"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 381,
+      "signal": "self.table.itemSelectionChanged",
+      "handler": [
+        "self._update_action_buttons"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 400,
+      "signal": "self.import_button.clicked",
+      "handler": [
+        "self._import_clicked"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 403,
+      "signal": "self.use_button.clicked",
+      "handler": [
+        "self._use_clicked"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 406,
+      "signal": "self.remove_button.clicked",
+      "handler": [
+        "self._remove_clicked"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 410,
+      "signal": "refresh.clicked",
+      "handler": [
+        "self._reload"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 413,
+      "signal": "close.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/model_manager_ui.py",
+      "line": 419,
+      "signal": "self._timer.timeout",
+      "handler": [
+        "self._poll"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 307,
+      "signal": "self._case_population_timer.timeout",
+      "handler": [
+        "self._populate_case_chunk"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 310,
+      "signal": "self._case_filter_timer.timeout",
+      "handler": [
+        "self._apply_case_filters"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 316,
+      "signal": "self.timer.timeout",
+      "handler": [
+        "self.refresh_status"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 359,
+      "signal": "self.task_combo.currentIndexChanged",
+      "handler": [
+        "self._task_selection_changed"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 362,
+      "signal": "self.task_combo.lineEdit().editingFinished",
+      "handler": [
+        "self._task_editing_finished"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 379,
+      "signal": "self.tabs.currentChanged",
+      "handler": [
+        "self.on_tab_changed"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 411,
+      "signal": "browse.clicked",
+      "handler": [
+        "choose"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 450,
+      "signal": "self.source_combo.currentIndexChanged",
+      "handler": [
+        "self._update_source_visibility"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 491,
+      "signal": "self.mask_edit.textEdited",
+      "handler": [
+        "self._mark_mask_manually_edited"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 495,
+      "signal": "self.scan_button.clicked",
+      "handler": [
+        "self.scan_cases"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 519,
+      "signal": "self.initial_mask_source_combo.currentIndexChanged",
+      "handler": [
+        "self._update_initial_mask_visibility"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 575,
+      "signal": "self.choose_specific_cases.toggled",
+      "handler": [
+        "self._update_case_selection_visibility"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 586,
+      "signal": "self.case_filter_edit.textChanged",
+      "handler": [
+        "self._schedule_case_filters"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 589,
+      "signal": "self.show_unavailable_cases.toggled",
+      "handler": [
+        "self._apply_case_filters"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 655,
+      "signal": "self.training_goal.currentIndexChanged",
+      "handler": [
+        "self._update_initial_mask_visibility"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 666,
+      "signal": "self.start_model.activated",
+      "handler": [
+        "self._mark_start_model_selected"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 702,
+      "signal": "self.start_button.clicked",
+      "handler": [
+        "self.start_training"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 736,
+      "signal": "self.view_completed_model_button.clicked",
+      "handler": [
+        "self.show_completed_model"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 759,
+      "signal": "self.open_job_folder_button.clicked",
+      "handler": [
+        "self.open_job_folder"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 803,
+      "signal": "self.new_log_button.clicked",
+      "handler": [
+        "self.follow_latest_log"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 817,
+      "signal": "self.pause_button.clicked",
+      "handler": [
+        "lambda : self.request_action('pause')"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 819,
+      "signal": "self.resume_button.clicked",
+      "handler": [
+        "self.resume_training"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 822,
+      "signal": "self.stop_button.clicked",
+      "handler": [
+        "self.request_primary_stop"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 824,
+      "signal": "self.open_log_button.clicked",
+      "handler": [
+        "self.open_log"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 826,
+      "signal": "hide.clicked",
+      "handler": [
+        "self.window.hide"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 864,
+      "signal": "self.import_model_button.clicked",
+      "handler": [
+        "self.import_model_package"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 870,
+      "signal": "self.export_model_button.clicked",
+      "handler": [
+        "self.export_current_model"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 873,
+      "signal": "self.show_failed.toggled",
+      "handler": [
+        "self.refresh_models"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 1475,
+      "signal": "check.stateChanged",
+      "handler": [
+        "lambda state, case_index=index: self._case_choice_changed(case_index, selected=bool(state))"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 1497,
+      "signal": "split.currentIndexChanged",
+      "handler": [
+        "lambda _index, combo=split, case_index=index: self._case_choice_changed(case_index, split=str(combo.currentData() or 'exclude').lower())"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_center.py",
+      "line": 2470,
+      "signal": "button.clicked",
+      "handler": [
+        "lambda _checked=False, model_id=row.get('model_id'): self.use_model(model_id)"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 73,
+      "signal": "self.task_combo.currentIndexChanged",
+      "handler": [
+        "self.refresh_models"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 76,
+      "signal": "self.model_combo.currentIndexChanged",
+      "handler": [
+        "self.refresh_summary"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 81,
+      "signal": "self.show_all.toggled",
+      "handler": [
+        "self.refresh_models"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 112,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.cancel"
+      ]
+    },
+    {
+      "file": "tools/nninteractive_task_model_chooser.py",
+      "line": 115,
+      "signal": "use.clicked",
+      "handler": [
+        "self.accept"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 140,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 144,
+      "signal": "self.start.clicked",
+      "handler": [
+        "self._submit"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 158,
+      "signal": "self._timer.timeout",
+      "handler": [
+        "self._poll_background_results"
+      ]
+    },
+    {
+      "file": "tools/nnunet_batch_predict_ui.py",
+      "line": 177,
+      "signal": "button.clicked",
+      "handler": [
+        "browse"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 123,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 127,
+      "signal": "self.start.clicked",
+      "handler": [
+        "self._submit"
+      ]
+    },
+    {
+      "file": "tools/nnunet_prediction_setup_ui.py",
+      "line": 134,
+      "signal": "self._timer.timeout",
+      "handler": [
+        "self._poll_background_results"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 121,
+      "signal": "self.task_combo.currentIndexChanged",
+      "handler": [
+        "self.refresh"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 127,
+      "signal": "refresh.clicked",
+      "handler": [
+        "self.refresh"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 158,
+      "signal": "self.jobs.currentRowChanged",
+      "handler": [
+        "self._show_selected_job"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 204,
+      "signal": "self.stop_button.clicked",
+      "handler": [
+        "self._stop"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 207,
+      "signal": "self.reattach_button.clicked",
+      "handler": [
+        "self._reattach"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 213,
+      "signal": "self.retry_button.clicked",
+      "handler": [
+        "self._retry"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 216,
+      "signal": "self.open_button.clicked",
+      "handler": [
+        "self._open_folder"
+      ]
+    },
+    {
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 220,
+      "signal": "close.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 99,
+      "signal": "cancel.clicked",
+      "handler": [
+        "self.window.close"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 103,
+      "signal": "self.start_button.clicked",
+      "handler": [
+        "self._submit"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 109,
+      "signal": "self._submission_timer.timeout",
+      "handler": [
+        "self._poll_submission"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 154,
+      "signal": "toggle.toggled",
+      "handler": [
+        "refresh"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 191,
+      "signal": "button.clicked",
+      "handler": [
+        "browse"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 239,
+      "signal": "self.task_edit.textChanged",
+      "handler": [
+        "_check_task_name"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 267,
+      "signal": "self.source_combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_source"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 308,
+      "signal": "import_button.clicked",
+      "handler": [
+        "self._import_label_set"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 310,
+      "signal": "add_button.clicked",
+      "handler": [
+        "lambda : self._add_label_row('', '')"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 312,
+      "signal": "remove_button.clicked",
+      "handler": [
+        "self._remove_label_rows"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 381,
+      "signal": "self.configuration_combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_configuration"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 387,
+      "signal": "self.auto_spacing.toggled",
+      "handler": [
+        "self._refresh_configuration"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 407,
+      "signal": "self.auto_patch.toggled",
+      "handler": [
+        "self._refresh_configuration"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 432,
+      "signal": "self.auto_batch.toggled",
+      "handler": [
+        "self._refresh_configuration"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 458,
+      "signal": "self.trainer_combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_trainer"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 459,
+      "signal": "self.trainer_combo.lineEdit().editingFinished",
+      "handler": [
+        "self._refresh_trainer"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 477,
+      "signal": "self.fold_combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_fold"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 539,
+      "signal": "self.gpu_devices_edit.textChanged",
+      "handler": [
+        "_check_gpu_devices"
+      ]
+    },
+    {
+      "file": "tools/nnunet_training_setup_ui.py",
+      "line": 550,
+      "signal": "self.continue_check.toggled",
+      "handler": [
+        "self._refresh_continue_training"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 141,
+      "signal": "self.profile_combo.currentIndexChanged",
+      "handler": [
+        "self._load_selected"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 144,
+      "signal": "self.new_button.clicked",
+      "handler": [
+        "self._new_profile"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 147,
+      "signal": "self.delete_button.clicked",
+      "handler": [
+        "self._delete_profile"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 169,
+      "signal": "self.auth_combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_auth"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 182,
+      "signal": "self.key_button.clicked",
+      "handler": [
+        "self._browse_key"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 317,
+      "signal": "self.advanced_toggle.toggled",
+      "handler": [
+        "toggle_advanced"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 348,
+      "signal": "self.test_button.clicked",
+      "handler": [
+        "self._test_connection"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 355,
+      "signal": "self.cache_button.clicked",
+      "handler": [
+        "self._show_cached_datasets"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 359,
+      "signal": "close_button.clicked",
+      "handler": [
+        "self.dialog.accept"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 363,
+      "signal": "self.save_button.clicked",
+      "handler": [
+        "self._save"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 368,
+      "signal": "self.timer.timeout",
+      "handler": [
+        "self._poll_result"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 810,
+      "signal": "close.clicked",
+      "handler": [
+        "dialog.accept"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 829,
+      "signal": "self.combo.currentIndexChanged",
+      "handler": [
+        "self._refresh_hint"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 832,
+      "signal": "self.manage_button.clicked",
+      "handler": [
+        "self._manage"
+      ]
+    },
+    {
+      "file": "tools/remote_compute_ui.py",
+      "line": 337,
+      "signal": "getattr(widget, signal)",
+      "handler": [
+        "self._refresh_toggle_from_form"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 570,
+      "signal": "_result_timer.timeout",
+      "handler": [
+        "_poll_results"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 597,
+      "signal": "refresh_btn.clicked",
+      "handler": [
+        "refresh"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 619,
+      "signal": "sweep_btn.clicked",
+      "handler": [
+        "do_sweep"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 641,
+      "signal": "stop_btn.clicked",
+      "handler": [
+        "do_stop"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 645,
+      "signal": "timer.timeout",
+      "handler": [
+        "refresh"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 493,
+      "signal": "btn.clicked",
+      "handler": [
+        "lambda _=False, p=q['path']: _open_folder(p)"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 535,
+      "signal": "btn.clicked",
+      "handler": [
+        "lambda _=False: env_guidance.show_dialog(Path(_ROOT))"
+      ]
+    },
+    {
+      "file": "tools/system_health_panel.py",
+      "line": 438,
+      "signal": "btn.clicked",
+      "handler": [
+        "lambda _=False, p=str(proc['state_path']): _open_folder(os.path.dirname(p))"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 98,
+      "signal": "self.keywords.editingFinished",
+      "handler": [
+        "self._store_keywords"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 101,
+      "signal": "self.table.currentCellChanged",
+      "handler": [
+        "self._show_keywords"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 102,
+      "signal": "self.table.itemChanged",
+      "handler": [
+        "self._cell_changed"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 106,
+      "signal": "add.clicked",
+      "handler": [
+        "self._add_row"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 108,
+      "signal": "remove.clicked",
+      "handler": [
+        "self._remove_row"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 110,
+      "signal": "self.rollback.clicked",
+      "handler": [
+        "self._do_rollback"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 118,
+      "signal": "save.clicked",
+      "handler": [
+        "self._do_save"
+      ]
+    },
+    {
+      "file": "tools/window_level_editor_ui.py",
+      "line": 138,
+      "signal": "self.table.itemChanged",
+      "handler": [
+        "self._cell_changed"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+test_run_batch_rejects_same_shape_mismatched_affine (audit_pkg_test.TestUncertainty.test_run_batch_rejects_same_shape_mismatched_affine)
+R15 失败路径：同 shape 但 affine 不同的两份预测不得进入排名。 ... Diagnostic only: run_batch save_plots=False, matching current AL production calls; original test source unchanged.
+开始批量计算：共 2 例...
+
+批量进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok
+test_load_masks_affine_tolerance (audit_pkg_test.TestUncertainty.test_load_masks_affine_tolerance)
+浮点级 affine 抖动（重采样写回时的 1e-6 量级）不误拒。 ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.020s
+
+OK
+
+批量完成：成功 1/2 例，耗时 0.0s。
+日志已写入: <temporary-state>/batch.log

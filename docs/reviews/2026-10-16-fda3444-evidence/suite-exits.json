@@ -1,0 +1,122 @@
+[
+  {
+    "suite": "ui",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_ui_workflow_regressions.py"
+    ],
+    "exit": 1
+  },
+  {
+    "suite": "gui",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_gui_smoke.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "nnunet",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_nnunet_integration.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "flexict",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_flexict_integration.py"
+    ],
+    "exit": 1
+  },
+  {
+    "suite": "remote",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_remote_training.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "runtime",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_all.py",
+      "TestSyntax",
+      "TestScriptingLibraryEntries",
+      "TestImportReceiptAndUndo",
+      "TestFlexiCTActiveLearningApply",
+      "TestNNInteractiveContinuousPrompting",
+      "TestNNInteractiveSessionWriteMode",
+      "TestImportDropWindow",
+      "TestGuiThreadBlockingContract"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "cross",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_cross_workflow_transitions.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "geometry",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_geometry_manifest_regressions.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "review",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_review_workflow_regressions.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "nnint-deep",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_mimics_nnint_deep.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "nnint-functional",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_mimics_nnint_functional.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "scribble",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_interactive_algorithms.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "ui-quality",
+    "command": [
+      "<audit-python>/bin/python",
+      "tests/test_ui_quality.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "flexict-pkg",
+    "command": [
+      "<audit-python>/bin/python",
+      "integrations/flexict-finetune/tests/test_flexict_pkg.py"
+    ],
+    "exit": 1
+  }
+]

@@ -1,0 +1,267 @@
+{
+  "source_commit": "fda3444427360dfba0515648da1b7b04bd1eb94b",
+  "scope": "14 primary suite invocations; execution counts may overlap. Separate plotting-disabled diagnostic rerun excluded from totals.",
+  "suites": [
+    {
+      "suite": "ui",
+      "executed": 22,
+      "seconds": 7.926,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 1,
+      "result": "FAILED (failures=1)",
+      "command": [
+        "python",
+        "tests/test_ui_workflow_regressions.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 21
+    },
+    {
+      "suite": "gui",
+      "executed": 83,
+      "seconds": 18.389,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_gui_smoke.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 83
+    },
+    {
+      "suite": "nnunet",
+      "executed": 119,
+      "seconds": 10.891,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_nnunet_integration.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 119
+    },
+    {
+      "suite": "flexict",
+      "executed": 142,
+      "seconds": 37.585,
+      "skipped": 0,
+      "errors": 1,
+      "failures": 0,
+      "result": "FAILED (errors=1)",
+      "command": [
+        "python",
+        "tests/test_flexict_integration.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 141
+    },
+    {
+      "suite": "remote",
+      "executed": 138,
+      "seconds": 33.299,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_remote_training.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 138
+    },
+    {
+      "suite": "runtime",
+      "executed": 114,
+      "seconds": 3.066,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_all.py",
+        "TestSyntax",
+        "TestScriptingLibraryEntries",
+        "TestImportReceiptAndUndo",
+        "TestFlexiCTActiveLearningApply",
+        "TestNNInteractiveContinuousPrompting",
+        "TestNNInteractiveSessionWriteMode",
+        "TestImportDropWindow",
+        "TestGuiThreadBlockingContract"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 114
+    },
+    {
+      "suite": "cross",
+      "executed": 2,
+      "seconds": 7.814,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_cross_workflow_transitions.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 2
+    },
+    {
+      "suite": "geometry",
+      "executed": 6,
+      "seconds": 0.034,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_geometry_manifest_regressions.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 6
+    },
+    {
+      "suite": "review",
+      "executed": 11,
+      "seconds": 0.017,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_review_workflow_regressions.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 11
+    },
+    {
+      "suite": "nnint-deep",
+      "executed": 75,
+      "seconds": 0.1,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_mimics_nnint_deep.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 75
+    },
+    {
+      "suite": "nnint-functional",
+      "executed": 91,
+      "seconds": 0.328,
+      "skipped": 1,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK (skipped=1)",
+      "command": [
+        "python",
+        "tests/test_mimics_nnint_functional.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 1,
+      "passed": 90
+    },
+    {
+      "suite": "scribble",
+      "executed": 23,
+      "seconds": 0.041,
+      "skipped": 2,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK (skipped=2)",
+      "command": [
+        "python",
+        "tests/test_interactive_algorithms.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 2,
+      "passed": 21
+    },
+    {
+      "suite": "ui-quality",
+      "executed": 5,
+      "seconds": 0.31,
+      "skipped": 0,
+      "errors": 0,
+      "failures": 0,
+      "result": "OK",
+      "command": [
+        "python",
+        "tests/test_ui_quality.py"
+      ],
+      "skipped_classes": 0,
+      "skipped_methods": 0,
+      "passed": 5
+    },
+    {
+      "suite": "flexict-pkg",
+      "executed": 10,
+      "seconds": 0.326,
+      "skipped": 1,
+      "errors": 4,
+      "failures": 1,
+      "result": "FAILED (failures=1, errors=4, skipped=1)",
+      "command": [
+        "python",
+        "integrations/flexict-finetune/tests/test_flexict_pkg.py"
+      ],
+      "skipped_classes": 1,
+      "skipped_methods": 0,
+      "passed": 5
+    }
+  ],
+  "totals": {
+    "executed": 841,
+    "passed": 831,
+    "skipped": 4,
+    "skipped_methods": 3,
+    "skipped_classes": 1,
+    "errors": 5,
+    "failures": 2
+  },
+  "limitations": [
+    "5 errors require torch (4 backbone/decoder, 1 FlexiCT preflight).",
+    "1 chooser test assumes its sample text is wider than viewport with the current font: 400 <= 805 here. Actual much-longer version scenario passes; not a product clipping regression.",
+    "1 uncertainty test uses default save_plots=True and this audit environment lacks matplotlib; a diagnostic rerun with save_plots=False matching the AL production call passes both selected tests.",
+    "Windows/Mimics/GPU/SSH end-to-end not run."
+  ],
+  "diagnostic": {
+    "executed": 2,
+    "passed": 2,
+    "production_changed": false,
+    "override": "test-only run_batch(save_plots=False)",
+    "included_in_primary_totals": false
+  },
+  "rendering": {
+    "default_states": 150,
+    "font125_states": 150,
+    "screenshot_scenarios": 7,
+    "detected_button_content_clips": 0,
+    "not_windows_dpi_acceptance": true
+  }
+}

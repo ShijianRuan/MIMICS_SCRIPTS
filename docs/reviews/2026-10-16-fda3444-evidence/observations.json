@@ -1,0 +1,486 @@
+{
+  "R01_identifier": {
+    "ids": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a8f810b3",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_c8813474",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_8357b13c",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_bbf0f91d"
+    ],
+    "lengths": [
+      96,
+      96,
+      96,
+      96
+    ],
+    "all_distinct": true,
+    "idempotent": true
+  },
+  "R06_chinese_labels": {
+    "normalized": [
+      {
+        "name": "肝脏",
+        "id": 1,
+        "aliases": [
+          "肝脏"
+        ],
+        "source_mode": "alternatives"
+      },
+      {
+        "name": "脾脏",
+        "id": 2,
+        "aliases": [
+          "脾脏"
+        ],
+        "source_mode": "alternatives"
+      }
+    ]
+  },
+  "R16_background": {
+    "rejected": true,
+    "error": "标签名“background”是 nnU-Net 的保留背景项（ID 0），不能用作输出标签名；请改用其他名称。"
+  },
+  "R02_real_scanner": {
+    "case_count": 3,
+    "mapping": {
+      "A": [
+        "Liver"
+      ],
+      "B": [],
+      "C": [
+        "Spleen"
+      ]
+    },
+    "liver": [
+      [
+        "B",
+        "C"
+      ],
+      {}
+    ],
+    "two_masks": [
+      [
+        "B"
+      ],
+      {
+        "A": [
+          "spleen"
+        ],
+        "C": [
+          "liver"
+        ]
+      }
+    ]
+  },
+  "R03_status_context": {
+    "output_mcs": "<synthetic-state>/custom-output/A.mcs",
+    "output_path": "<synthetic-state>/custom-output",
+    "phase": "completed",
+    "source_path": "<synthetic-state>/batch",
+    "status": "completed",
+    "updated_at_epoch": 1792151405.1534002
+  },
+  "R04_nonblocking_marker": {
+    "seconds": 6.574997678399086e-05,
+    "queued": [
+      [
+        "<synthetic-state>/ranking",
+        "A"
+      ]
+    ],
+    "after_unlock": {
+      "cases": {
+        "A": {
+          "state": "viewed",
+          "updated_at_epoch": 1792151405.1542022
+        }
+      },
+      "schema_version": "flexict_annotation_state.v1",
+      "updated_at_epoch": 1792151405.154203
+    }
+  },
+  "external_ui_lock_wait": {
+    "seconds": 2.002550874953158,
+    "messages": [
+      "标注状态文件正被 Mimics 写入，请稍候再试。"
+    ]
+  },
+  "R05_remote_summary": [
+    "镜像 synthetic/runtime:2",
+    "工作目录 other-storage"
+  ],
+  "R11_effective_mode": {
+    "message": "源快照：None\nAI 结果 Mask：None\n本 AI 会话中的提示数：0\n\n提交提示后会启动后台推理，并立即将控制权交还给 Mimics。结果就绪后将自动应用（当前方式：更新所选掩膜）。"
+  },
+  "R14_mutated_source": {
+    "parent_mtime_unchanged": true,
+    "signature_changed": true
+  },
+  "R10_corrupt_header": {
+    "accepted": false,
+    "error": "The prediction file is not a readable NIfTI image (File <synthetic-state>/bad_header/candidate.nii.gz is not a gzip file): <synthetic-state>/bad_header/candidate.nii.gz",
+    "old_preserved": true,
+    "remaining_files": [
+      "candidate.nii.gz",
+      "prediction.nii.gz"
+    ],
+    "published_voxels_readable": true,
+    "voxel_error": ""
+  },
+  "publication_valid_overwrite": {
+    "accepted": true,
+    "error": "",
+    "old_preserved": false,
+    "remaining_files": [
+      "candidate.nii.gz",
+      "prediction.nii.gz"
+    ],
+    "published_voxels_readable": true,
+    "voxel_error": ""
+  },
+  "publication_truncated_voxels": {
+    "accepted": true,
+    "error": "",
+    "old_preserved": false,
+    "remaining_files": [
+      "candidate.nii.gz",
+      "prediction.nii.gz"
+    ],
+    "published_voxels_readable": false,
+    "voxel_error": "Expected 64 bytes, got 0 bytes from \n - could the file be damaged?"
+  },
+  "publication_four_dimensional": {
+    "accepted": true,
+    "error": "",
+    "old_preserved": false,
+    "remaining_files": [
+      "candidate.nii.gz",
+      "prediction.nii.gz"
+    ],
+    "published_voxels_readable": true,
+    "voxel_error": ""
+  },
+  "publication_fractional_labels": {
+    "accepted": true,
+    "error": "",
+    "old_preserved": false,
+    "remaining_files": [
+      "candidate.nii.gz",
+      "prediction.nii.gz"
+    ],
+    "published_voxels_readable": true,
+    "voxel_error": ""
+  },
+  "queue_snapshot_handoff": {
+    "snapshot_type": "_MaskIdentity",
+    "queue_exit": 0,
+    "mcs_exists": true,
+    "receipt_exists": false,
+    "messages": [
+      "Created snapshot_case, but import receipt could not be written: '_MaskIdentity' object has no attribute 'get'",
+      "Created: <synthetic-state>/receipt-output/snapshot_case.mcs"
+    ],
+    "final_status": {
+      "completed": 1,
+      "creation_completed": 1,
+      "creation_failed": 0,
+      "failed": 0,
+      "pid": 78453,
+      "preparation_failed": 0,
+      "status": "closed",
+      "updated_at_epoch": 1792151407.190717
+    }
+  },
+  "undo_legacy_v2": {
+    "deleted": [
+      "Liver"
+    ],
+    "edited": [],
+    "remaining": 0
+  },
+  "undo_failed_snapshot": {
+    "deleted": [
+      "Liver"
+    ],
+    "edited": [],
+    "remaining": 0
+  },
+  "undo_valid_snapshot": {
+    "deleted": [],
+    "edited": [
+      "Liver"
+    ],
+    "remaining": 1
+  },
+  "R07_frozen_four_cases": [
+    {
+      "train": [
+        "c1",
+        "c2"
+      ],
+      "val": [
+        "c0",
+        "c3"
+      ]
+    }
+  ],
+  "frozen_two_case_retrain": {
+    "accepted": false,
+    "error": "冻结验证集约束后训练/验证拆分为空（训练 0 例 / 验证 2 例）。旧验证病例及其患者组必须留在验证侧，请增加病例或调整验证病例的选择。"
+  },
+  "R15_pair_affine": {
+    "rejected": true,
+    "error": "mask 物理网格不一致: <synthetic-state>/b.nii.gz 的 affine 与参考不同（平移/方向/间距不匹配，两份预测不在同一物理坐标上，逐体素比较无意义）"
+  },
+  "both_predictions_wrong_grid": {
+    "accepted": true,
+    "output_translation_mm": [
+      100.0,
+      0.0,
+      0.0
+    ],
+    "source_translation_mm": [
+      0,
+      0,
+      0
+    ]
+  },
+  "dicom_geometry": [
+    {
+      "case": "regular",
+      "accepted": true,
+      "source_positions": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "source_pixel_spacings": null,
+      "inferred_lps_positions": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          2.0
+        ]
+      ]
+    },
+    {
+      "case": "nonuniform",
+      "accepted": false,
+      "error": "该 DICOM 序列层间距不均匀（相邻层面步长差超过 0.5 mm），重扫/补层/不规则序列无法表示为规则体积，已拒绝导入。请回原图源重新导出。"
+    },
+    {
+      "case": "duplicate",
+      "accepted": false,
+      "error": "该 DICOM 序列存在重复层面位置（预期层间距 0.5 mm），重复导出或层面交叠无法构成规则体积，已拒绝导入。请回原图源重新导出。"
+    },
+    {
+      "case": "zigzag",
+      "accepted": true,
+      "source_positions": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "source_pixel_spacings": null,
+      "inferred_lps_positions": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          2.0
+        ]
+      ]
+    },
+    {
+      "case": "missing_middle_ipp",
+      "accepted": true,
+      "source_positions": [
+        [
+          0,
+          0,
+          0
+        ],
+        null,
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "source_pixel_spacings": null,
+      "inferred_lps_positions": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          2.0
+        ],
+        [
+          0.0,
+          0.0,
+          4.0
+        ]
+      ]
+    },
+    {
+      "case": "varying_pixel_spacing",
+      "accepted": true,
+      "source_positions": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          2
+        ]
+      ],
+      "source_pixel_spacings": [
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "inferred_lps_positions": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          2.0
+        ]
+      ]
+    }
+  ],
+  "label_key_disagreement": {
+    "accepted_labels": [
+      {
+        "name": "Liver-Left",
+        "id": 1,
+        "aliases": [
+          "Liver-Left"
+        ],
+        "source_mode": "alternatives"
+      },
+      {
+        "name": "Liver_Left",
+        "id": 2,
+        "aliases": [
+          "Liver_Left"
+        ],
+        "source_mode": "alternatives"
+      }
+    ],
+    "matched_files": {
+      "Liver-Left": [
+        "Liver_Left.nii.gz"
+      ],
+      "Liver_Left": [
+        "Liver_Left.nii.gz"
+      ]
+    },
+    "materialized_values": [
+      2
+    ]
+  },
+  "al_pair_wrong_source_chain": {
+    "source_translation_mm": [
+      0,
+      0,
+      0
+    ],
+    "prediction_translation_mm": [
+      100,
+      0,
+      0
+    ],
+    "successful_cases": [
+      "caseA"
+    ],
+    "source_geometry_file_exists": true,
+    "only_model_execution_stubbed": true
+  },
+  "plot_dependency_diagnostic": {
+    "successful_cases": [],
+    "log": "[2026-10-16 19:50:07] 错误 stale_case: 处理失败 -> No module named 'matplotlib'\n"
+  },
+  "al_failed_retry_uses_old_output": {
+    "first_successes": [
+      "stale_case"
+    ],
+    "retry_successes": [],
+    "ranked_after_failed_retry": [
+      "stale_case"
+    ],
+    "retry_log": "[2026-10-16 19:50:07] 错误 stale_case: 处理失败 -> mask 物理网格不一致: <synthetic-state>/stale-b/stale_case.nii.gz 的 affine 与参考不同（平移/方向/间距不匹配，两份预测不在同一物理坐标上，逐体素比较无意义）\n"
+  }
+}

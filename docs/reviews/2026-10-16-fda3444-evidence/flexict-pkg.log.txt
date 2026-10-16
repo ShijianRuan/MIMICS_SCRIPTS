@@ -1,0 +1,105 @@
+test_backbone_build_2d_input (__main__.TestFlexictPackage.test_backbone_build_2d_input)
+flexi_ct_backbone_base branches on input rank: 4D -> 2D path. ... ERROR
+test_backbone_build_3d_input (__main__.TestFlexictPackage.test_backbone_build_3d_input)
+5D input takes the 3D patch-embed branch and produces D,H,W features. ... ERROR
+test_package_import (__main__.TestFlexictPackage.test_package_import) ... ERROR
+setUpClass (__main__.TestPretrainedWeights) ... skipped 'pretrained weights not present (weights/ is gitignored); copy from the distribution share first'
+test_primus2d_forward_fp32 (__main__.TestPrimusDecoder.test_primus2d_forward_fp32)
+Primus 2D decoder forward on an fp32 dummy tensor: finite output. ... ERROR
+test_env_var_names (__main__.TestTrainerContract.test_env_var_names) ... ok
+test_trainer_class_names (__main__.TestTrainerContract.test_trainer_class_names) ... ok
+test_trainer_init_forwards_unpack_dataset_conditionally (__main__.TestTrainerContract.test_trainer_init_forwards_unpack_dataset_conditionally)
+The __init__ seam must work on both nnU-Net API versions. ... ok
+test_load_masks_affine_tolerance (__main__.TestUncertainty.test_load_masks_affine_tolerance)
+浮点级 affine 抖动（重采样写回时的 1e-6 量级）不误拒。 ... ok
+test_run_batch_disagreement_and_ranking (__main__.TestUncertainty.test_run_batch_disagreement_and_ranking) ... 开始批量计算：共 2 例...
+
+批量进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0s
+批量完成：成功 0/2 例，耗时 0.0s。
+
+开始统计分析：共 2 例，逐例读取并计算指标...
+
+分析进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok
+test_run_batch_rejects_same_shape_mismatched_affine (__main__.TestUncertainty.test_run_batch_rejects_same_shape_mismatched_affine)
+R15 失败路径：同 shape 但 affine 不同的两份预测不得进入排名。 ...
+全部 2 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case001                            72.0            144.0     0.5000   0.5000           70.5        141.0
+   2  case002                            72.0            144.0     0.5000   0.5000           70.5        141.0
+
+差异最大（不确定度最大且区域最大）的病例: case001
+  积分不确定度=72.0  不确定体积=144.0 mm^3  最大不确定度=0.5000
+  最大连通域: 体积=141.0 mm^3  均值=0.5000  积分=70.5
+  文件: <temporary-state>/out/case001_uncertainty_disagreement.nii.gz
+
+排序报告已写入: <temporary-state>/out/ranking.csv
+开始批量计算：共 2 例...
+
+批量进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sFAIL
+
+======================================================================
+ERROR: test_backbone_build_2d_input (__main__.TestFlexictPackage.test_backbone_build_2d_input)
+flexi_ct_backbone_base branches on input rank: 4D -> 2D path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/integrations/flexict-finetune/tests/test_flexict_pkg.py", line 46, in test_backbone_build_2d_input
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_backbone_build_3d_input (__main__.TestFlexictPackage.test_backbone_build_3d_input)
+5D input takes the 3D patch-embed branch and produces D,H,W features.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/integrations/flexict-finetune/tests/test_flexict_pkg.py", line 61, in test_backbone_build_3d_input
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_package_import (__main__.TestFlexictPackage.test_package_import)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/integrations/flexict-finetune/tests/test_flexict_pkg.py", line 29, in test_package_import
+    import flexict.models as m
+  File "<repo>/integrations/flexict-finetune/flexict/models.py", line 10, in <module>
+    import torch.nn.functional as F
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+ERROR: test_primus2d_forward_fp32 (__main__.TestPrimusDecoder.test_primus2d_forward_fp32)
+Primus 2D decoder forward on an fp32 dummy tensor: finite output.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/integrations/flexict-finetune/tests/test_flexict_pkg.py", line 76, in test_primus2d_forward_fp32
+    import torch
+ModuleNotFoundError: No module named 'torch'
+
+======================================================================
+FAIL: test_run_batch_rejects_same_shape_mismatched_affine (__main__.TestUncertainty.test_run_batch_rejects_same_shape_mismatched_affine)
+R15 失败路径：同 shape 但 affine 不同的两份预测不得进入排名。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/integrations/flexict-finetune/tests/test_flexict_pkg.py", line 219, in test_run_batch_rejects_same_shape_mismatched_affine
+    self.assertEqual([m["case"] for m in metrics], ["case_ok"])
+AssertionError: Lists differ: [] != ['case_ok']
+
+Second list contains 1 additional elements.
+First extra element 0:
+'case_ok'
+
+- []
++ ['case_ok']
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.326s
+
+FAILED (failures=1, errors=4, skipped=1)
+
+批量完成：成功 0/2 例，耗时 0.0s。
+日志已写入: <temporary-state>/batch.log

@@ -1,0 +1,92 @@
+{
+  "source_commit": "fda3444427360dfba0515648da1b7b04bd1eb94b",
+  "method": "Separate post-generation verification against current code, actual probe outputs, rendered UI and raw test logs; no claim of native medical validation.",
+  "checks": [
+    {
+      "claim": "S01: production snapshot object breaks real queue receipt handoff while queue reports success",
+      "verified": true,
+      "evidence": "observations.json: queue_snapshot_handoff; native project creation is a boundary stub"
+    },
+    {
+      "claim": "S02: successful valid publication replaces old file and retains no replaced backup",
+      "verified": true,
+      "evidence": "observations.json: publication_valid_overwrite"
+    },
+    {
+      "claim": "S03: incomplete voxel payload and unsupported segmentation forms pass current publication",
+      "verified": true,
+      "evidence": "observations.json: publication_*"
+    },
+    {
+      "claim": "S04: missing reliable content proof still permits deletion; valid snapshot protects edits",
+      "verified": true,
+      "evidence": "observations.json: undo_*; native delete is a list boundary stub"
+    },
+    {
+      "claim": "S05: frozen validation is unioned with new heuristic and two-case retraining fails",
+      "verified": true,
+      "evidence": "observations.json: frozen_*"
+    },
+    {
+      "claim": "S06: old counterexamples reject, other irregular full geometry remains accepted",
+      "verified": true,
+      "evidence": "observations.json: dicom_geometry; synthetic headers"
+    },
+    {
+      "claim": "S07: two accepted labels resolve same source and ordered replacement yields only label 2",
+      "verified": true,
+      "evidence": "observations.json: label_key_disagreement"
+    },
+    {
+      "claim": "S08: host callback no longer waits, external UI callback still synchronously waits ~2s",
+      "verified": true,
+      "evidence": "observations.json: R04_nonblocking_marker/external_ui_lock_wait; no native event-loop timing claimed"
+    },
+    {
+      "claim": "S09: pair of jointly displaced outputs succeeds despite available zero-origin input geometry",
+      "verified": true,
+      "evidence": "observations.json: al_pair_wrong_source_chain; only model execution stubbed"
+    },
+    {
+      "claim": "S10: failed retry has no successes but old case is still ranked",
+      "verified": true,
+      "evidence": "observations.json: al_failed_retry_uses_old_output"
+    },
+    {
+      "claim": "Plot failure explanation actually reports missing matplotlib",
+      "verified": true,
+      "evidence": "observations.json: plot_dependency_diagnostic; disabled-plot diagnostic log separately retained"
+    },
+    {
+      "claim": "New chooser keyboard selection and completed-model navigation work in synthetic real Qt scene",
+      "verified": true,
+      "evidence": "ui-observations.json and manually inspected current PNGs"
+    },
+    {
+      "claim": "S11: completion details do not wrap and force horizontal scroll beyond the viewport",
+      "verified": true,
+      "evidence": "ui-observations.json: completion_layout plus retained-model-completion.png"
+    },
+    {
+      "claim": "Assessment totals: 17 original cards, 10 offline verified and 7 partial",
+      "verified": true,
+      "evidence": "2026-10-16-fda3444-revalidation.json"
+    },
+    {
+      "claim": "Commit and diff counts match audited range",
+      "verified": true,
+      "evidence": "git commit graph and diff"
+    },
+    {
+      "claim": "Test totals preserve class-level skip accounting",
+      "verified": true,
+      "evidence": "14 final primary logs; diagnostic repetition excluded"
+    },
+    {
+      "claim": "Current business sources match fixed source snapshot and all report links/JSON/anchors validate",
+      "verified": true,
+      "evidence": "manifest.json plus explicit local checks"
+    }
+  ],
+  "result": "pass"
+}
