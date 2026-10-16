@@ -1846,9 +1846,10 @@ def run_active_learning(job_dir: Path) -> int:
         # one "uncertainty" dir across retries let a previously successful
         # run's files keep failed cases in the ranking (and the bands) as
         # if they were current results. Old run dirs stay on disk as
-        # history; they are never mixed into this run's ranking.
-        uncertainty_dir = job_dir / "uncertainty_run_{}".format(
-            time.strftime("%Y%m%dT%H%M%S"))
+        # history; they are never mixed into this run's ranking. The uuid
+        # suffix keeps two runs started within the same second apart.
+        uncertainty_dir = job_dir / "uncertainty_run_{}_{}".format(
+            time.strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
         # The one sanctioned sys.path seam into the standalone repo.
         repo = flexict_repo_dir(load_config())
         if str(repo) not in sys.path:
@@ -1897,6 +1898,27 @@ def run_active_learning(job_dir: Path) -> int:
                 "排名未生成。逐例原因见任务日志：{1}".format(
                     len(case_ids), job_dir / "uncertainty_log.txt"))
         excluded_case_count = max(0, len(case_ids) - len(metrics))
+        # S10 re-review: the ranking and the overlay bands must consume
+        # THIS run's success list and nothing else. A case run_batch failed
+        # mid-write (uncertainty map saved, then the consensus write failed)
+        # leaves fragments in the directory that the directory scan would
+        # rank as if they were current results — quarantine them under
+        # failed/ (kept for diagnosis, invisible to the scan and the bands).
+        successful_cases = {str(row.get("case") or "") for row in metrics}
+        failed_cases = [
+            case for case in valid_case_ids if case not in successful_cases]
+        if failed_cases:
+            failed_dir = uncertainty_dir / "failed"
+            failed_dir.mkdir(parents=True, exist_ok=True)
+            for fragment in sorted(uncertainty_dir.glob("*.nii.gz")):
+                if any(
+                    fragment.name.startswith(case + "_")
+                    for case in failed_cases
+                ):
+                    # os.replace (not shutil.replace): the bundled
+                    # python_env's stripped shutil lacks replace.
+                    os.replace(
+                        str(fragment), str(failed_dir / fragment.name))
         ranking = analyze_uncertainty_dir(
             str(uncertainty_dir),
             method=method,
@@ -1905,8 +1927,18 @@ def run_active_learning(job_dir: Path) -> int:
             compute_boundary=False,
             compute_cc=False,
         )
+        # S10 contract: the ranked set IS this run's success list. Anything
+        # else means fragments leaked past the quarantine — refuse to hand
+        # the annotator a ranking they cannot trust.
+        ranked_cases = {str(row.get("case") or "") for row in ranking}
+        if ranked_cases != successful_cases:
+            raise RuntimeError(
+                "排名结果与本轮成功清单不一致（排名 {0} 例、成功 {1} 例），"
+                "排名未生成。请重试本轮不确定度计算。".format(
+                    len(ranked_cases), len(successful_cases)))
         bands = _al_write_uncertainty_bands(
-            uncertainty_dir, case_ids, method, moderate, high)
+            uncertainty_dir, sorted(successful_cases), method, moderate,
+            high)
         summary = [
             {
                 "case": str(row.get("case") or ""),

@@ -1392,7 +1392,10 @@ class TestActiveLearningLifecycle(unittest.TestCase):
                      return_value=[{"case": cases[0]}]), \
                  mock.patch.object(
                      uncertainty, "analyze_uncertainty_dir",
-                     return_value=[]):
+                     # S10 contract: the analysis must return exactly the
+                     # run's success list, so the mock stays consistent.
+                     return_value=[{"case": cases[0], "integrated": 1.0,
+                                    "uncertain_vol": 1.0, "max": 0.5}]):
                 exit_code = fp.run_active_learning(job_dir)
             self.assertEqual(exit_code, 0)
             from nnunet_common import read_json
@@ -1479,7 +1482,12 @@ class TestActiveLearningLifecycle(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
-            with mock.patch.object(
+            # S10 re-review: freeze the clock so both runs land in the SAME
+            # second — the directory must still be unique (uuid suffix) and
+            # the first run's history must survive the retry.
+            with mock.patch("flexict_pipeline.time.strftime",
+                            return_value="20260101T000000"), \
+                 mock.patch.object(
                     fp, "_spawn_worker",
                     side_effect=self._fake_predict_worker([])), \
                  mock.patch("flexict_pipeline._acquire_local_gpu",
@@ -1494,7 +1502,9 @@ class TestActiveLearningLifecycle(unittest.TestCase):
             # Reset the job to a runnable state, then retry with the 2D
             # model failing to produce case01.
             write_json_atomic(job_dir / "control.json", {"action": "run"})
-            with mock.patch.object(
+            with mock.patch("flexict_pipeline.time.strftime",
+                            return_value="20260101T000000"), \
+                 mock.patch.object(
                     fp, "_spawn_worker", side_effect=partial_worker), \
                  mock.patch("flexict_pipeline._acquire_local_gpu",
                             return_value=None):
@@ -1510,6 +1520,75 @@ class TestActiveLearningLifecycle(unittest.TestCase):
             self.assertTrue((first_dir / "ranking.csv").is_file())
             self.assertNotEqual(
                 str(first_dir), str(second_status["uncertainty_dir"]))
+
+    def test_al_quarantines_failed_case_fragments(self):
+        """S10 re-review: a case run_batch fails mid-write (uncertainty map
+        saved, then the consensus write failed) leaves fragments in THIS
+        run's fresh directory. The ranking and the overlay bands must
+        consume only the success list; the fragments stay under failed/ for
+        diagnosis instead of being ranked as current results."""
+        import nibabel as nib
+        import numpy as np
+
+        def fragment_writing_run_batch(
+                mask_dirs, out_dir, case_names, **kwargs):
+            # Every case gets real uncertainty/consensus files on disk;
+            # case01 "fails after its map was saved" (no metrics row).
+            os.makedirs(out_dir, exist_ok=True)
+            for case in case_names:
+                data = np.zeros((4, 4, 4), dtype=np.uint8)
+                data[1:-1, 1:-1, 1:-1] = 3
+                image = nib.Nifti1Image(data, np.eye(4))
+                nib.save(image, os.path.join(
+                    out_dir,
+                    "{}_uncertainty_disagreement.nii.gz".format(case)))
+                nib.save(image, os.path.join(
+                    out_dir, "{}_consensus.nii.gz".format(case)))
+            return [
+                {"case": case} for case in case_names if case != "case01"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
+            from flexict_common import flexict_repo_dir
+            repo = flexict_repo_dir()
+            if str(repo) not in sys.path:
+                sys.path.insert(0, str(repo))
+            import uncertainty  # noqa: E402
+
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None), \
+                 mock.patch.object(
+                     uncertainty, "run_batch",
+                     side_effect=fragment_writing_run_batch):
+                exit_code = fp.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            ranked = [row["case"] for row in status.get("ranking") or []]
+            self.assertEqual(2, len(ranked))
+            self.assertNotIn("case01", ranked)
+            self.assertEqual(1, status.get("excluded_case_count"))
+            uncertainty_dir = Path(str(status["uncertainty_dir"]))
+            # The failed case's fragments survive as diagnosis, quarantined
+            # out of the directory scan's reach...
+            failed = sorted(
+                path.name
+                for path in (uncertainty_dir / "failed").glob("*.nii.gz"))
+            self.assertEqual(
+                ["case01_consensus.nii.gz",
+                 "case01_uncertainty_disagreement.nii.gz"],
+                failed)
+            # ...and the bands were written only for the successful cases.
+            bands = status.get("uncertainty_bands") or {}
+            self.assertEqual(2, bands["written"]["moderate"])
+            self.assertEqual(2, bands["written"]["high"])
+            self.assertEqual(
+                [], list(
+                    (uncertainty_dir / "bands").glob("case01_*.nii.gz")))
 
     def test_al_fails_without_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2580,8 +2659,12 @@ class TestFrozenValidationContract(unittest.TestCase):
                     "case00": "patientA", "case01": "patientA"}},
                 expect_exit=1)
             self.assertEqual(status["status"], "failed")
-            self.assertIn("冻结验证集约束后", status["error"])
-            self.assertIn("训练 0 例", status["error"])
+            # T02: the shared raw-materialization writer refuses an empty
+            # training side before any GPU lock or preprocessing burn; the
+            # old message came from the (later, now unreachable for this
+            # scenario) flexict split writer.
+            self.assertIn("训练集为空", status["error"])
+            self.assertIn("已覆盖全部病例", status["error"])
 
     def test_frozen_two_case_retrain_keeps_original_split(self):
         """S05: a two-case rebuild with a frozen val keeps the original
