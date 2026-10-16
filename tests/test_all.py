@@ -14147,12 +14147,13 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertIn("修改过", summary_texts)
         self.assertIn("liver", summary_texts)
 
-    def test_undo_r17_pixel_count_edit_without_sha_keeps_mask(self):
-        """R17 fallback: a receipt entry without a sha snapshot (buffer
-        unreadable at import time) degrades to the pixel-count check -
-        here the annotator added voxels, the count differs, the mask is
-        kept. A same-count edit under this fallback stays undetected (the
-        known, documented limit of the degraded path)."""
+    def test_undo_s04_missing_sha_keeps_mask_even_on_matching_count(self):
+        """S04 fail-closed: a receipt entry without a sha snapshot (buffer
+        unreadable at import time, or a receipt written before R17) cannot
+        PROVE the mask unedited. The old pixel-count fallback deleted the
+        mask whenever the count still matched — an equal-volume hand edit
+        (move one voxel) lost manual corrections. Without proof the mask is
+        kept and reported for manual resolution."""
         import import_undo_mimics
         from create_mcs_batch import write_import_receipt
 
@@ -14169,7 +14170,8 @@ class TestImportReceiptAndUndo(unittest.TestCase):
                 self.pixel_count = pixel_count
                 self.sha256 = ""  # import-time buffer was unreadable
 
-        # Import-time: 4 pixels. Now: 6 (annotator added voxels).
+        # Import-time: 4 pixels. Live mask: also 4 pixels, but the content
+        # moved (b"1234" -> b"1324" — an equal-volume edit).
         receipt_path = write_import_receipt(
             out_dir, "s0001", mcs_path, ["liver"],
             {"source_fingerprint": "sf-1234567890abcdef"},
@@ -14178,7 +14180,7 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         saved = self._install_v2_undo_env(
             [("im1", [{
                 "name": "liver", "guid": "g-liver", "token": "tok-1",
-                "content": b"123456", "number_of_pixels": 6,
+                "content": b"1324", "number_of_pixels": 4,
             }])],
             mcs_path, save_writes=b"project-bytes",
         )
@@ -14187,6 +14189,8 @@ class TestImportReceiptAndUndo(unittest.TestCase):
             code = import_undo_mimics.undo_last_import(confirm=False)
         self.assertEqual(9, code)
         self.assertEqual([], saved["deleted"])
+        self.assertTrue(os.path.isfile(receipt_path),
+                        "receipt must survive for manual resolution")
 
     def test_undo_r17_unreadable_live_digest_fails_closed(self):
         """R17 fail-closed: the receipt records a sha, but the live mask's

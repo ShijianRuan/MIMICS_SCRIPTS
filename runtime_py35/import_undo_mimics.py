@@ -282,34 +282,27 @@ def _mask_content_digest(mask):
 
 
 def _content_edited(entry, mask):
-    """True when a live mask's content no longer matches the import-time
-    snapshot recorded in the receipt entry (R17).
+    """True when a live mask's content can no longer be PROVEN unedited
+    against the import-time snapshot recorded in the receipt entry
+    (R17/S04).
 
     Ownership (guid/token) proves who created the mask, not that its
     content is unchanged. An equal-volume hand edit - move a boundary
     voxel, delete one and add another - keeps guid, name and pixel_count
     identical; only the content digest catches it.
 
-    Degrades safely on missing proof: an entry without a recorded
-    snapshot (receipt written before R17, or the import-time buffer was
-    unreadable) falls back to the pixel-count check; a live digest that
-    cannot be computed ("" from an unreadable buffer) is treated as
-    edited - fail-closed, the mask is kept rather than risk deleting
-    manual corrections.
+    S04 fail-closed on missing proof: an entry without a recorded digest
+    (receipt written before R17, or the import-time buffer was
+    unreadable and sha256 was recorded as "") cannot prove the mask is
+    unedited, so it is treated as edited - the mask is kept and reported
+    for manual resolution. The old pixel-count fallback let an
+    equal-volume edit through and deleted hand-corrected masks. A live
+    digest that cannot be computed is likewise treated as edited.
     """
     recorded_sha = str(entry.get("sha256") or "")
-    recorded_count = entry.get("pixel_count")
-    if recorded_sha:
-        return _mask_content_digest(mask) != recorded_sha
-    try:
-        live_count = int(getattr(mask, "number_of_pixels", -1))
-    except Exception:
+    if not recorded_sha:
         return True
-    if recorded_count is None:
-        # No snapshot at all: only pixel count compared; unchanged counts
-        # pass (legacy behavior), anything else is kept.
-        return False
-    return live_count != int(recorded_count)
+    return _mask_content_digest(mask) != recorded_sha
 
 
 def _delete_owned_masks(receipt):
@@ -565,7 +558,8 @@ def undo_last_import(confirm=True):
             # them would destroy that manual work. Keep every mask and
             # the receipt; name what was kept so the user can decide.
             mimics.dialogs.message_box(
-                "以下导入的掩膜在导入后被修改过，可能包含人工修正，"
+                "以下导入的掩膜在导入后被修改过（或导入记录缺少内容快照、"
+                "无法证明未被修改），可能包含人工修正，"
                 "撤销没有删除它们：\n{0}\n\n"
                 "如确认不需要这些修正，请手动删除这些掩膜。\n"
                 "导入记录已保留，可稍后重新运行撤销。".format(
