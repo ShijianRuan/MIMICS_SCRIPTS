@@ -93,6 +93,13 @@ def _row(kind, label, payload, status_path, job_dir=""):
         total = int(total or 0)
     except (TypeError, ValueError):
         total = 0
+    try:
+        receipt_failed = int(payload.get("receipt_failed", 0) or 0)
+    except (TypeError, ValueError):
+        receipt_failed = 0
+    receipt_cases = payload.get("receipt_failed_cases") or []
+    if not isinstance(receipt_cases, (list, tuple)):
+        receipt_cases = []
     return {
         "kind": kind,
         "label": label,
@@ -107,7 +114,25 @@ def _row(kind, label, payload, status_path, job_dir=""):
         "status_path": str(status_path),
         "job_dir": str(job_dir or (Path(status_path).parent if status_path else "")),
         "output_path": str(payload.get("output_path") or ""),
+        "receipt_failed": receipt_failed,
+        "receipt_failed_cases": ", ".join(
+            str(case) for case in list(receipt_cases)[:3]),
     }
+
+
+def receipt_failure_note(row):
+    """S01: the visible note when a created project's undo receipt could
+    not be written. The project itself is fine, but without the receipt it
+    cannot be undone — the annotator must know which cases are affected
+    and that the write is retried automatically."""
+    if not row.get("receipt_failed"):
+        return ""
+    cases = row.get("receipt_failed_cases") or ""
+    if cases:
+        return "{0} 例工程已生成但撤销记录写入失败（{1}），正在自动补写".format(
+            row["receipt_failed"], cases)
+    return "{0} 例工程已生成但撤销记录写入失败，正在自动补写".format(
+        row["receipt_failed"])
 
 
 def _scan_status_dir(rows, kind, base, status_name="status.json"):
@@ -350,6 +375,11 @@ class BatchStatusWindow:
             progress = ""
             if row["total"]:
                 progress = "{0} / {1}".format(row["completed"] + row["failed"], row["total"])
+            error_text = row["error"][:120]
+            note = receipt_failure_note(row)
+            if note:
+                error_text = "{0}{1}".format(
+                    error_text + " " if error_text else "", note)
             values = [
                 _format_time(row["updated_at_epoch"]),
                 self.KIND_LABELS.get(row["kind"], row["kind"]),
@@ -357,7 +387,7 @@ class BatchStatusWindow:
                 _display_status(row),
                 progress,
                 row["case_id"],
-                row["error"][:120],
+                error_text,
             ]
             for column, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(str(value))
@@ -365,8 +395,10 @@ class BatchStatusWindow:
                 if column == 3:
                     _style_status_item(self.QtGui, item, row["status"])
                 item.setToolTip(
-                    "{0}\n{1}".format(row["status_path"], row["error"])
-                    if row["error"]
+                    "{0}\n{1}".format(
+                        row["status_path"],
+                        " ".join(part for part in (row["error"], note) if part))
+                    if (row["error"] or note)
                     else row["status_path"]
                 )
                 self.table.setItem(row_index, column, item)

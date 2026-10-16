@@ -3808,8 +3808,10 @@ class TestCreateMcsBatch(unittest.TestCase):
 
     def test_receipt_failure_is_visible_in_status(self):
         """S01: a receipt-write failure must not be buried — the final task
-        status records receipt_failed, because a created .mcs without a
-        receipt looks like success but cannot be undone."""
+        status records receipt_failed and the affected cases, because a
+        created .mcs without a receipt looks like success but cannot be
+        undone. The receipt payload is snapshotted into the pending registry
+        so the write can be retried later (S01 re-review)."""
         import create_mcs_batch
 
         output_dir = os.path.join(self.tmp, "output")
@@ -3831,6 +3833,7 @@ class TestCreateMcsBatch(unittest.TestCase):
         old_create = create_mcs_batch.create_mcs_from_manifest
         old_runtime = create_mcs_batch._ACTIVE_RUNTIME_DIR
         old_write = create_mcs_batch.write_import_receipt
+        old_flush = create_mcs_batch.flush_pending_receipts
         try:
             def fake_create(_work_dir, staging_path):
                 with open(staging_path, "w") as handle:
@@ -3846,19 +3849,86 @@ class TestCreateMcsBatch(unittest.TestCase):
                 }
             def failing_write(*args, **kwargs):
                 raise OSError("synthetic receipt failure")
+            # The receipt directory "stays unwritable" across the scan
+            # retries, so the failure must remain visible in the final
+            # status instead of self-healing before exit.
             create_mcs_batch.create_mcs_from_manifest = fake_create
             create_mcs_batch.write_import_receipt = failing_write
+            create_mcs_batch.flush_pending_receipts = lambda _dir: []
             create_mcs_batch.main(output_dir, runtime_dir=runtime_dir)
         finally:
             create_mcs_batch.create_mcs_from_manifest = old_create
             create_mcs_batch.write_import_receipt = old_write
+            create_mcs_batch.flush_pending_receipts = old_flush
             create_mcs_batch._ACTIVE_RUNTIME_DIR = old_runtime
 
         with open(os.path.join(runtime_dir, create_mcs_batch.STATUS_FILE), "r", encoding="utf-8") as handle:
             status = json.load(handle)
         self.assertEqual(1, status.get("receipt_failed"))
+        self.assertEqual(["case_s01b"], status.get("receipt_failed_cases"))
         # The .mcs itself still counts as created.
         self.assertEqual(1, status.get("creation_completed"))
+        # The payload survived in the pending registry for a later retry.
+        pending = json.load(open(
+            os.path.join(runtime_dir, create_mcs_batch.PENDING_RECEIPTS_FILE),
+            "r", encoding="utf-8"))
+        self.assertIn("case_s01b", pending)
+        self.assertTrue(pending["case_s01b"]["receipt_path"].endswith(
+            "case_s01b.import_receipt.json"))
+        self.assertEqual(
+            "mimics_import_receipt.v2",
+            pending["case_s01b"]["payload"]["schema_version"])
+
+    def test_pending_receipt_flush_heals_across_restart(self):
+        """S01 re-review acceptance: after a receipt write failed, a later
+        flush writes the receipt from the SNAPSHOTTED payload — the .mcs
+        fingerprint stays anchored to import time even if the user edited
+        and saved the project meanwhile, the project is never re-created,
+        and the registry clears so the failure stops being reported."""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        mcs_path = os.path.join(output_dir, "case_s01c.mcs")
+        os.makedirs(output_dir)
+        with open(mcs_path, "w") as handle:
+            handle.write("import-time-bytes")
+
+        payload = create_mcs_batch._import_receipt_payload(
+            "case_s01c", mcs_path, ["Liver"], {"source_fingerprint": "sf"},
+            mask_objects=[create_mcs_batch._MaskIdentity("Liver", "g1", 4, "")],
+        )
+        import_time_fingerprint = payload["mcs_fingerprint"]
+        pending = {
+            "case_s01c": {
+                "receipt_path": create_mcs_batch._receipt_path_for(
+                    mcs_path, "case_s01c"),
+                "payload": payload,
+                "failed_at_epoch": 1.0,
+            }
+        }
+        create_mcs_batch._write_pending_receipts(runtime_dir, pending)
+
+        # The user opened the project, corrected a mask and saved: the .mcs
+        # on disk no longer matches import time.
+        with open(mcs_path, "w") as handle:
+            handle.write("user-edited-bytes")
+        self.assertNotEqual(
+            import_time_fingerprint,
+            create_mcs_batch._file_fingerprint(mcs_path))
+
+        healed = create_mcs_batch.flush_pending_receipts(runtime_dir)
+        self.assertEqual(["case_s01c"], healed)
+        receipt = json.load(open(
+            create_mcs_batch._receipt_path_for(mcs_path, "case_s01c"),
+            "r", encoding="utf-8"))
+        # The rewritten receipt still proves the import-time project content
+        # — it must not "refresh" its facts against the user's edit.
+        self.assertEqual(import_time_fingerprint, receipt["mcs_fingerprint"])
+        self.assertEqual("sf", receipt["source_fingerprint"])
+        # Registry cleared; a second flush is a no-op (idempotent).
+        self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
+        self.assertEqual([], create_mcs_batch.flush_pending_receipts(runtime_dir))
 
     def test_publish_failure_leaves_no_consumable_receipt(self):
         """F30 failure path: when the publish (staging rename) fails, the
@@ -7987,6 +8057,40 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(10, run_row["total"])
         # Stop markers are not records.
         self.assertNotIn(str(ui_tasks / "current_task01_stop.json"), by_path)
+
+    def test_batch_status_viewer_surfaces_receipt_failures(self):
+        """S01 re-review: a created project whose undo receipt could not be
+        written must be visible in the batch panel — named cases and a
+        retry note, not a zero-failure row."""
+        import tools.batch_status_viewer as viewer
+
+        root = Path(self.tmp) / "proj_s01v"
+        queue = root / ".mimics_runtime" / "import_queues" / "mcs_out_s01"
+        queue.mkdir(parents=True)
+        (queue / "_mcs_batch_status.json").write_text(json.dumps({
+            "status": "closed", "completed": 3, "failed": 0, "total": 3,
+            "receipt_failed": 1,
+            "receipt_failed_cases": ["case_s01b", "case_s01c"],
+            "updated_at_epoch": 1700000005.0,
+        }), encoding="utf-8")
+
+        with mock.patch.object(
+            viewer,
+            "import_runtime_base",
+            lambda project_root: Path(project_root) / ".mimics_runtime",
+        ):
+            rows = viewer.collect_batch_rows(str(root))
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertEqual(1, row["receipt_failed"])
+        self.assertEqual("case_s01b, case_s01c", row["receipt_failed_cases"])
+        note = viewer.receipt_failure_note(row)
+        self.assertIn("1 例工程已生成但撤销记录写入失败", note)
+        self.assertIn("case_s01b", note)
+        self.assertIn("自动补写", note)
+        # No receipt failure -> no note (rows stay clean).
+        clean = dict(row, receipt_failed=0)
+        self.assertEqual("", viewer.receipt_failure_note(clean))
 
     def test_batch_status_viewer_per_kind_limit_and_missing_dirs(self):
         import tools.batch_status_viewer as viewer

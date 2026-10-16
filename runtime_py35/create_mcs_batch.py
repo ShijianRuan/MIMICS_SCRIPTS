@@ -32,6 +32,7 @@ QUEUE_DONE_FILE = "_mcs_queue_done.json"
 QUEUE_STOP_FILE = "_mcs_queue_stop.json"
 STATUS_FILE = "_mcs_batch_status.json"
 CURRENT_CASE_FILE = "_mcs_current_case.json"
+PENDING_RECEIPTS_FILE = "pending_receipts.json"
 LOCK_FILE = "_mcs_batch.lock"
 LOG_FILE = os.path.join("logs", "_create_mcs_batch.log")
 LOG_ROTATE_BYTES = 5 * 1024 * 1024
@@ -277,35 +278,25 @@ def prune_import_receipts(output_dir, retention_days=IMPORT_RECEIPT_RETENTION_DA
         pass
 
 
-def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data,
-                         mask_objects=None):
-    """Record exactly what one import created, for one-click undo.
-
-    The receipt lives next to the .mcs (not in the runtime dir) because it
-    must survive queue cleanup: undo should work weeks later. Undo deletes
-    the listed masks from the project; the .mcs file itself is only rolled
-    back (deleted) when its content fingerprint still matches this import.
-
-    v2 (F18/F19): when the live mask objects are passed in, each entry
-    also records the object's guid. Undo resolves masks by guid first, so
-    a same-name mask on another image is never deleted, and a renamed
-    import mask is still found; the guid is also what lets undo detect an
-    in-memory session that holds work beyond the import before it agrees
-    to delete the .mcs file.
-
-    R17: each v2 entry also carries the import-time content snapshot
-    (pixel_count + sha256) captured while the masks were still live. Undo
-    compares it against the current mask content before deleting, so an
-    equal-volume hand edit (move a boundary voxel) is detected even though
-    guid/name/count all still match. The schema stays v2: older undo
-    builds ignore the extra keys, and the snapshot is treated as absent
-    (ownership-only proof) when missing.
-    """
-    prune_import_receipts(output_dir)
-    receipt_path = os.path.join(
+def _receipt_path_for(mcs_path, case_id):
+    return os.path.join(
         os.path.dirname(os.path.abspath(mcs_path)),
         "." + safe_case_filename(case_id) + ".import_receipt.json",
     )
+
+
+def _import_receipt_payload(case_id, mcs_path, mask_names, manifest_data,
+                            mask_objects=None):
+    """Build the receipt payload (the write itself lives in
+    write_import_receipt).
+
+    S01: split out so a receipt write that fails can snapshot the SAME
+    payload — import-time .mcs fingerprint included — into the pending
+    registry. A later retry must not recompute the fingerprint against a
+    possibly user-edited .mcs: undo's rollback proof is anchored to what
+    the project was at import time, and rewriting a receipt must never
+    overwrite manual corrections with stale facts.
+    """
     payload = {
         "schema_version": "mimics_import_receipt.v1",
         "case_id": str(case_id or "case"),
@@ -333,6 +324,86 @@ def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_dat
             }
             for mask, name in zip(mask_objects, mask_names)
         ]
+    return payload
+
+
+def _read_pending_receipts(output_dir):
+    """S01: receipt payloads whose write failed, keyed by case id.
+
+    The registry lives in the runtime dir (it survives work-dir cleanup)
+    and each scan retries the writes, so a transient permission/share
+    failure self-heals across restarts without re-creating projects.
+    """
+    data = runtime_common.read_json(
+        runtime_path(output_dir, PENDING_RECEIPTS_FILE), {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_pending_receipts(output_dir, pending):
+    path = runtime_path(output_dir, PENDING_RECEIPTS_FILE)
+    if pending:
+        write_json_atomic(path, pending)
+    else:
+        _remove_file(path)
+
+
+def flush_pending_receipts(output_dir):
+    """Retry the pending receipt writes; return the case ids that succeeded.
+
+    Idempotent: an entry whose receipt already exists on disk is dropped
+    (undo has its evidence). Failures stay queued for the next scan.
+    """
+    pending = _read_pending_receipts(output_dir)
+    written = []
+    for case_id in sorted(pending):
+        entry = pending.get(case_id) or {}
+        payload = entry.get("payload") or {}
+        receipt_path = str(entry.get("receipt_path") or "")
+        if not payload or not receipt_path:
+            del pending[case_id]
+            continue
+        try:
+            if not os.path.isfile(receipt_path):
+                write_json_atomic(receipt_path, payload)
+            del pending[case_id]
+            written.append(str(case_id))
+            log_message(
+                output_dir,
+                "补写导入回执成功：{0}".format(receipt_path))
+        except Exception:
+            pass  # still unwritable — retried on the next scan
+    _write_pending_receipts(output_dir, pending)
+    return written
+
+
+def write_import_receipt(output_dir, case_id, mcs_path, mask_names, manifest_data,
+                         mask_objects=None):
+    """Record exactly what one import created, for one-click undo.
+
+    The receipt lives next to the .mcs (not in the runtime dir) because it
+    must survive queue cleanup: undo should work weeks later. Undo deletes
+    the listed masks from the project; the .mcs file itself is only rolled
+    back (deleted) when its content fingerprint still matches this import.
+
+    v2 (F18/F19): when the live mask objects are passed in, each entry
+    also records the object's guid. Undo resolves masks by guid first, so
+    a same-name mask on another image is never deleted, and a renamed
+    import mask is still found; the guid is also what lets undo detect an
+    in-memory session that holds work beyond the import before it agrees
+    to delete the .mcs file.
+
+    R17: each v2 entry also carries the import-time content snapshot
+    (pixel_count + sha256) captured while the masks were still live. Undo
+    compares it against the current mask content before deleting, so an
+    equal-volume hand edit (move a boundary voxel) is detected even though
+    guid/name/count all still match. The schema stays v2: older undo
+    builds ignore the extra keys, and the snapshot is treated as absent
+    (ownership-only proof) when missing.
+    """
+    prune_import_receipts(output_dir)
+    receipt_path = _receipt_path_for(mcs_path, case_id)
+    payload = _import_receipt_payload(
+        case_id, mcs_path, mask_names, manifest_data, mask_objects)
     write_json_atomic(receipt_path, payload)
     return receipt_path
 
@@ -1263,6 +1334,9 @@ def main(output_dir=None, runtime_dir=None):
     # S01: receipt-write failures must stay visible in the task status — a
     # created .mcs without a receipt looks like success but cannot be undone.
     receipt_failed = int(previous_status.get("receipt_failed", 0) or 0) if resume_counts else 0
+    receipt_failed_cases = [
+        str(value) for value in (previous_status.get("receipt_failed_cases") or [])
+    ] if resume_counts else []
     cancelled = False
 
     try:
@@ -1275,6 +1349,24 @@ def main(output_dir=None, runtime_dir=None):
         )
 
         while True:
+            # S01: receipt writes that failed earlier (permissions, transient
+            # share trouble) are retried every scan until they succeed; a
+            # healed write brings the visible failure counters back down.
+            healed_cases = flush_pending_receipts(output_dir)
+            if healed_cases:
+                receipt_failed = max(0, receipt_failed - len(healed_cases))
+                receipt_failed_cases = [
+                    case for case in receipt_failed_cases
+                    if case not in healed_cases
+                ]
+                update_status(
+                    output_dir,
+                    "running",
+                    completed=total_completed,
+                    failed=total_failed,
+                    receipt_failed=receipt_failed,
+                    receipt_failed_cases=receipt_failed_cases,
+                )
             # Find local work referenced by lightweight queue descriptors.
             # The large derived DICOM/buffer data intentionally stays on the
             # workstation, not on a potentially unreliable SMB output share.
@@ -1532,6 +1624,41 @@ def main(output_dir=None, runtime_dir=None):
                             )
                         except Exception as receipt_exc:
                             receipt_failed += 1
+                            if case_id not in receipt_failed_cases:
+                                receipt_failed_cases.append(case_id)
+                            # S01: snapshot the payload (import-time .mcs
+                            # fingerprint included) into the pending registry
+                            # so the write can be retried on later scans —
+                            # across restarts, without re-creating the project
+                            # and without recomputing facts against a
+                            # possibly user-edited .mcs.
+                            try:
+                                pending = _read_pending_receipts(output_dir)
+                                pending[case_id] = {
+                                    "receipt_path": _receipt_path_for(
+                                        mcs_path,
+                                        receipt_data.get("case_id") or case_id,
+                                    ),
+                                    "payload": _import_receipt_payload(
+                                        receipt_data.get("case_id") or case_id,
+                                        mcs_path,
+                                        receipt_data.get("mask_names") or [],
+                                        receipt_data.get("manifest_data") or {},
+                                        mask_objects=[
+                                            _MaskIdentity(
+                                                item.get("name", ""),
+                                                item.get("guid", ""),
+                                                int(item.get("pixel_count", 0) or 0),
+                                                str(item.get("sha256", "") or ""),
+                                            )
+                                            for item in receipt_data.get("mask_objects") or []
+                                        ],
+                                    ),
+                                    "failed_at_epoch": time.time(),
+                                }
+                                _write_pending_receipts(output_dir, pending)
+                            except Exception:
+                                pass  # registry write failed too; the log below is the only trace
                             log_message(
                                 output_dir,
                                 "Created {0}, but import receipt could not be written: {1}".format(
@@ -1653,6 +1780,7 @@ def main(output_dir=None, runtime_dir=None):
             completed=total_completed,
             failed=total_failed,
             receipt_failed=receipt_failed,
+            receipt_failed_cases=receipt_failed_cases,
         )
         return 0
     finally:
