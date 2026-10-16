@@ -13657,6 +13657,39 @@ class TestImportReceiptAndUndo(unittest.TestCase):
         self.assertIn("删除失败", summary_texts)
         self.assertNotIn("撤销完成", summary_texts)
 
+    def test_undo_v1_receipt_refused_before_confirm_and_project_open(self):
+        """R81 复审: a v1 receipt must be refused BEFORE the confirm box
+        promises "掩膜将从工程中删除" and before _open_project touches the
+        Mimics session. The old order showed the misleading confirm first."""
+        import import_undo_mimics
+        from create_mcs_batch import write_import_receipt
+
+        out_dir = os.path.join(self.tmp, "v1_order")
+        os.makedirs(out_dir)
+        mcs_path = os.path.join(out_dir, "s0001.mcs")
+        with open(mcs_path, "wb") as handle:
+            handle.write(b"project-bytes")
+        write_import_receipt(out_dir, "s0001", mcs_path, ["liver"], {})
+        saved = self._install_undo_env(mcs_path, ["liver"])
+
+        questions = []
+        question_patch = mock.patch.object(
+            import_undo_mimics.mimics.dialogs, "question_box",
+            lambda *a, **kw: questions.append(a) or "撤销",
+        )
+        question_patch.start()
+        self.addCleanup(question_patch.stop)
+
+        with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                               lambda: [out_dir]):
+            code = import_undo_mimics.undo_last_import(confirm=True)
+        self.assertEqual(8, code)
+        # The confirm box ("masks will be deleted") is never shown for v1,
+        # and the project is never opened - refusal has no side effects.
+        self.assertEqual([], questions)
+        self.assertEqual([], saved["open_target"])
+        self.assertEqual([], saved["deleted"])
+
     def test_undo_v1_receipt_refused_without_deleting(self):
         """R17: a v1 receipt (names only) has no strong ownership proof and
         no content snapshot - undo refuses it outright instead of running

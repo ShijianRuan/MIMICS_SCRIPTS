@@ -554,6 +554,15 @@ def stylesheet(extra=""):
         color: #667085;
         font-size: 9pt;
     }
+    /* A read-only QPlainTextEdit used as a hint/detail area (e.g. the task
+       model chooser's full-id summary) must not look like an input field. */
+    QPlainTextEdit#hint {
+        color: #667085;
+        font-size: 9pt;
+        background: transparent;
+        border: none;
+        padding: 0px;
+    }
     QLabel#preview {
         color: #0f766e;
         font-size: 9pt;

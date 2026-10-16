@@ -265,56 +265,6 @@ def _resolve_owned_masks(receipt):
     return matches, ambiguous
 
 
-def _delete_masks(mask_names):
-    """Kept for reference/tests: the v1 name-based delete path.
-
-    R17 closed this path to undo: a v1 receipt records names only, which
-    is not strong ownership proof (a hand-made same-name mask on another
-    image, or a hand-edited imported mask, is indistinguishable from the
-    original). undo_last_import now refuses v1 receipts before reaching
-    here; the function remains so existing unit tests of the name-
-    ambiguity guard keep documenting why name-based deletion is unsafe.
-    """
-
-    live = list(mimics.data.masks)
-    ambiguous = []
-    for name in mask_names:
-        holders = [
-            m for m in live
-            if str(getattr(m, "name", "") or "") == name
-        ]
-        if len(holders) > 1:
-            ambiguous.append(name)
-    if ambiguous:
-        return None, ambiguous
-
-    live = list(mimics.data.masks)
-    ambiguous = []
-    for name in mask_names:
-        holders = [
-            m for m in live
-            if str(getattr(m, "name", "") or "") == name
-        ]
-        if len(holders) > 1:
-            ambiguous.append(name)
-    if ambiguous:
-        return None, ambiguous
-
-    def operation():
-        deleted = []
-        for mask in live:
-            if str(getattr(mask, "name", "") or "") in mask_names:
-                name = str(mask.name)
-                mimics.data.masks.delete(mask)
-                deleted.append(name)
-        return deleted
-
-    deleted = runtime_common.execute_mimics_transaction(
-        mimics, operation, "Mimics-Script Undo Import"
-    )
-    return deleted, []
-
-
 def _mask_content_digest(mask):
     """SHA-256 of a live mask's voxel content, or "" when unreadable.
 
@@ -499,6 +449,34 @@ def undo_last_import(confirm=True):
         )
         return 1
 
+    is_v2 = bool(receipt.get("created_masks_v2")) and \
+        receipt.get("schema_version") == RECEIPT_SCHEMA_VERSION
+    mask_names = set(str(n) for n in (receipt.get("created_masks") or []))
+    if not is_v2 and mask_names:
+        # R17: a v1 receipt records names only - no guid, no token, no
+        # content snapshot. That is not strong ownership proof: a hand-
+        # made same-name mask (possibly on another image) or a hand-
+        # edited imported mask is indistinguishable from the original.
+        # Undo refuses it outright and the receipt is kept; the user
+        # deletes the masks by hand. The old name-based delete (F19's
+        # ambiguity guard caught only the multi-holder case) deleted
+        # single-name matches blindly. Checked BEFORE the confirm box
+        # (which promises masks will be deleted) and before the project
+        # is opened, so a v1 receipt is refused without side effects.
+        mimics.dialogs.message_box(
+            "导入记录来自旧版本，只记录了掩膜名，无法证明这些掩膜"
+            "仍然属于那次导入（也没有内容快照可以排除人工修正）。\n\n"
+            "为避免误删，撤销不会自动删除任何掩膜。\n\n"
+            "请手动删除这些掩膜：{0}\n"
+            "如需回滚 .mcs 文件，请手动使用导入前的备份。\n"
+            "导入记录已保留。".format(
+                ", ".join(sorted(mask_names)[:10])
+            ),
+            title="撤销上次导入",
+            ui_blocking=False,
+        )
+        return 8
+
     if confirm:
         answer = mimics.dialogs.question_box(
             "撤销上次导入吗？\n\n"
@@ -534,31 +512,6 @@ def undo_last_import(confirm=True):
     if disk_matches:
         session_diverged, divergence_reason = _session_diverged(receipt)
 
-    is_v2 = bool(receipt.get("created_masks_v2")) and \
-        receipt.get("schema_version") == RECEIPT_SCHEMA_VERSION
-    mask_names = set(str(n) for n in (receipt.get("created_masks") or []))
-    if not is_v2 and mask_names:
-        # R17: a v1 receipt records names only - no guid, no token, no
-        # content snapshot. That is not strong ownership proof: a hand-
-        # made same-name mask (possibly on another image) or a hand-
-        # edited imported mask is indistinguishable from the original.
-        # Undo refuses it outright and the receipt is kept; the user
-        # deletes the masks by hand. The old name-based delete (F19's
-        # ambiguity guard caught only the multi-holder case) deleted
-        # single-name matches blindly.
-        mimics.dialogs.message_box(
-            "导入记录来自旧版本，只记录了掩膜名，无法证明这些掩膜"
-            "仍然属于那次导入（也没有内容快照可以排除人工修正）。\n\n"
-            "为避免误删，撤销不会自动删除任何掩膜。\n\n"
-            "请手动删除这些掩膜：{0}\n"
-            "如需回滚 .mcs 文件，请手动使用导入前的备份。\n"
-            "导入记录已保留。".format(
-                ", ".join(sorted(mask_names)[:10])
-            ),
-            title="撤销上次导入",
-            ui_blocking=False,
-        )
-        return 8
     deleted = []
     ambiguous = []
     edited = []
