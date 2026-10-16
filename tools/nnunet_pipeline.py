@@ -905,14 +905,22 @@ def _split_folds(
                     continue
                 if size + len(unit) > target and size > len(frozen):
                     break
+                if len(case_ids) - size - len(unit) < 1:
+                    # T02: never starve the training side. Pulling the last
+                    # free group into validation leaves nothing to train on.
+                    break
                 validation.update(unit)
                 size += len(unit)
                 offset += 1
-            if len(validation) <= len(frozen) and units:
+            if not validation and units:
                 # Target smaller than the smallest free group: keep one
-                # group in val rather than an empty validation set.
+                # group in val rather than an empty validation set — never
+                # at the cost of the training side. (T02: this fallback used
+                # to fire whenever the loop added nothing, which silently
+                # appended a free group on top of an already-sufficient
+                # frozen set and emptied train on two-patient datasets.)
                 for unit in units:
-                    if unit[0] not in validation:
+                    if len(case_ids) - len(unit) >= 1:
                         validation.update(unit)
                         break
             folds.append(
@@ -945,13 +953,15 @@ def _split_folds(
             case_ids[(start + offset) % len(case_ids)]
             for offset in range(count)
         ]
-        # S05: frozen is the authoritative validation contract; the rotated
-        # window only fills toward the target size and must never starve
-        # training. Unioning the window into frozen unconditionally made
-        # fold 0 train on nothing when a small dataset's window happened to
-        # cover every non-frozen case.
+        # S05/T02: frozen is the authoritative validation contract; the
+        # rotated window only fills UP TO the target count — it must never
+        # append cases on top of an already-sufficient frozen set (that
+        # silently grew fold 0's validation beyond what was requested), and
+        # it must never starve training.
         validation = set(frozen)
         for case in window:
+            if len(validation) >= count:
+                break
             if len(case_ids) - len(validation) <= 1:
                 break
             validation.add(case)
@@ -1043,6 +1053,18 @@ def _materialize_nnunet_raw(
     folds = _split_folds(
         rows, request, frozen_validation=frozen_val or None
     )
+    # T02 fail-closed: a fold without training cases cannot train anything.
+    # Refuse to materialize (and publish) the dataset instead of writing
+    # empty training splits to splits_final.json.
+    empty_train_folds = [
+        str(index) for index, fold in enumerate(folds) if not fold["train"]
+    ]
+    if empty_train_folds:
+        raise RuntimeError(
+            "第 {0} 折的训练集为空：冻结验证集与患者分组已覆盖全部病例，"
+            "无法生成可训练的划分。请减少冻结验证病例、调低验证数量，"
+            "或补充更多病例后重试。".format("、".join(empty_train_folds))
+        )
     # Collision-free keys so two lossy-slugged cases cannot merge inside
     # imagesTr/labelsTr or the splits (F22).
     case_key_by_id = unique_case_keys(

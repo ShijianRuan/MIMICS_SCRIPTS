@@ -891,6 +891,46 @@ class DiscoveryTests(unittest.TestCase):
             self.assertNotIn("case00", fold["train"])
             self.assertEqual(["case01"], fold["train"])
 
+    def test_split_folds_grouped_two_patients_frozen_keeps_train(self):
+        # T02: two patients, case00 frozen in val. The "keep one free group
+        # in val" fallback used to fire even though the frozen set already
+        # met the target, appending the other patient and emptying train on
+        # every fold.
+        rows = self._split_rows(2, patient_groups={0: "A", 1: "B"})
+        folds = pipeline._split_folds(
+            rows, self._request(val_cases=1),
+            frozen_validation=["case00"])
+        for fold in folds:
+            self.assertEqual(["case00"], fold["val"])
+            self.assertEqual(["case01"], fold["train"])
+
+    def test_split_folds_frozen_does_not_grow_beyond_requested_count(self):
+        # T02: four cases, case00 frozen, val_cases=1. The rotated fill
+        # window used to append cases on top of the already-sufficient
+        # frozen set, silently growing some folds to two validation cases.
+        rows = self._split_rows(4)
+        folds = pipeline._split_folds(
+            rows, self._request(val_cases=1),
+            frozen_validation=["case00"])
+        for fold in folds:
+            self.assertEqual(["case00"], fold["val"])
+            self.assertEqual(3, len(fold["train"]))
+
+    def test_split_folds_grouped_cannot_starve_train_via_window(self):
+        # T02: with coarse patient groups the rotation must stop before
+        # pulling the last training group into validation.
+        rows = self._split_rows(4, patient_groups={0: "A", 1: "A",
+                                                   2: "B", 3: "B"})
+        folds = pipeline._split_folds(
+            rows, self._request(val_cases=3),
+            frozen_validation=["case00"])
+        for fold in folds:
+            self.assertTrue(fold["train"], "empty train: {}".format(fold))
+            self.assertTrue(fold["val"])
+            # The frozen patient never lands in training.
+            self.assertNotIn("case00", fold["train"])
+            self.assertNotIn("case01", fold["train"])
+
     def test_split_folds_frozen_case_missing_from_rows_is_ignored(self):
         # A frozen case that no longer exists must not break the split.
         rows = self._split_rows(10)
@@ -1008,6 +1048,104 @@ class DiscoveryTests(unittest.TestCase):
                 old_val_ids & new_train_ids,
                 "previously-validated case moved into training: {}".format(
                     sorted(old_val_ids & new_train_ids)))
+
+    def test_materialize_grouped_two_patients_rebuild_keeps_train(self):
+        """T02 end-to-end: two patients, one scan each; the first build
+        validates case0. The rebuild must keep case0 in val / case1 in train
+        on every fold — the old grouped-path fallback appended the second
+        patient into val and wrote train=[] into splits_final.json."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def build():
+                rows = []
+                for index in range(2):
+                    image = root / "prepared" / str(index) / "image.nii.gz"
+                    label = root / "prepared" / str(index) / "label.nii.gz"
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    image.write_bytes(("image{}".format(index)).encode())
+                    label.write_bytes(("label{}".format(index)).encode())
+                    rows.append({
+                        "case_id": "case{}".format(index),
+                        "image": image,
+                        "label": label,
+                        "fingerprint": str(index),
+                        "patient_group": "patient{}".format(index),
+                    })
+                request = common.normalize_request({
+                    "operation": "train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": root / "workspace",
+                    "labels": [{"name": "liver", "id": 1}],
+                    "validation_fraction": 0.2,
+                    "split_seed": 42,
+                    "val_cases": 1,
+                })
+                dataset, _fingerprint = pipeline._materialize_nnunet_raw(
+                    rows, request, root / "raw", root / "preprocessed")
+                return common.read_json(
+                    root / "preprocessed" / dataset.name /
+                    "splits_final.json")
+
+            first = build()
+            self.assertEqual(1, len(first[0]["val"]))
+            second = build()
+            for fold in second:
+                self.assertEqual(1, len(fold["val"]))
+                self.assertEqual(1, len(fold["train"]),
+                                 "train starved by frozen rebuild: {}"
+                                 .format(fold))
+
+    def test_materialize_refuses_frozen_group_covering_everything(self):
+        """T02 fail-closed: when the frozen validation set plus patient-group
+        expansion covers every case, the writer must refuse instead of
+        publishing splits with an empty training side."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rows = []
+            for index in range(2):
+                image = root / "prepared" / str(index) / "image.nii.gz"
+                label = root / "prepared" / str(index) / "label.nii.gz"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(("image{}".format(index)).encode())
+                label.write_bytes(("label{}".format(index)).encode())
+                rows.append({
+                    "case_id": "case{}".format(index),
+                    "image": image,
+                    "label": label,
+                    "fingerprint": str(index),
+                    "patient_group": "patientA",  # both scans: one patient
+                })
+            request = common.normalize_request({
+                "operation": "train",
+                "task_name": "Liver",
+                "task_id": "liver",
+                "workspace": root / "workspace",
+                "labels": [{"name": "liver", "id": 1}],
+                "validation_fraction": 0.2,
+                "split_seed": 42,
+            })
+            dataset, _fingerprint = pipeline._materialize_nnunet_raw(
+                rows, request, root / "raw", root / "preprocessed")
+            # Simulate an earlier split that validated case0 (one scan of
+            # the only patient): freezing it freezes the whole patient and
+            # leaves nothing to train on — the rebuild must refuse.
+            split_path = (
+                root / "preprocessed" / dataset.name / "splits_final.json")
+            manifest = common.read_json(
+                root / "raw" / dataset.name / "mimics_dataset_manifest.json")
+            key_by_id = {
+                entry["case_id"]: entry["nnunet_case_id"]
+                for entry in manifest["cases"]
+            }
+            split = common.read_json(split_path)
+            split[0]["val"] = [key_by_id["case0"]]
+            split[0]["train"] = [key_by_id["case1"]]
+            common.write_json_atomic(split_path, split)
+            with self.assertRaisesRegex(RuntimeError, "训练集为空"):
+                pipeline._materialize_nnunet_raw(
+                    rows, request, root / "raw", root / "preprocessed")
 
     def test_materialize_records_patient_groups_in_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
