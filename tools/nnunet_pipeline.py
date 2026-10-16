@@ -340,6 +340,26 @@ def _label_name_key(value: str) -> str:
     return text.strip("_")
 
 
+def _strip_case_prefix(stem: str, case_id: str) -> str | None:
+    """The label part of a flat-layout filename stem, or None (T03).
+
+    Flat layouts name label files ``<case>_<label>.nii.gz``. The prefix is
+    stripped from the RAW stem — not from the separator-folded key — so the
+    remaining label part keeps its own separators and the Unicode-semantic
+    exact pass can still tell ``caseA_Liver-Left`` from ``caseA_Liver_Left``
+    (two distinct labels that fold to the same key).
+    """
+    text = str(stem or "")
+    case = str(case_id or "")
+    if not text or not case:
+        return None
+    for separator in ("_", "-", ".", " ", "__"):
+        prefix = "{}{}".format(case, separator)
+        if text[: len(prefix)].casefold() == prefix.casefold():
+            return text[len(prefix):]
+    return None
+
+
 def _find_label_files(
     label_root: Path,
     case_id: str,
@@ -370,15 +390,29 @@ def _find_label_files(
         for path in sorted(label_root.iterdir()):
             if not _is_medical_file(path):
                 continue
-            stem = _label_name_key(medical_stem(path))
+            stem = medical_stem(path)
+            key = os.path.normcase(str(path.resolve()))
+            # T03: strip the confirmed case prefix from the RAW stem, then
+            # apply the same two-pass (exact-then-loose) matching as the
+            # subdirectory layout. The old flat loop folded the whole stem,
+            # so two exactly-named files (caseA_Liver-Left / caseA_Liver_
+            # Left) collided into one key and usable data was rejected as
+            # ambiguous. Filenames whose prefix only matches after lossy
+            # folding keep the old loose behavior.
+            label_part = _strip_case_prefix(stem, case_id)
+            if label_part is not None:
+                if _semantic_label_key(label_part) in exact_wanted:
+                    exact_matches[key] = path.resolve()
+                elif _label_name_key(label_part) in wanted:
+                    loose_matches[key] = path.resolve()
+                continue
+            stem_key = _label_name_key(stem)
             for alias in wanted:
-                if stem in {
+                if stem_key in {
                     "{}_{}".format(case_key, alias),
                     "{}__{}".format(case_key, alias),
                 }:
-                    loose_matches[os.path.normcase(str(path.resolve()))] = (
-                        path.resolve()
-                    )
+                    loose_matches[key] = path.resolve()
     matches = exact_matches if exact_matches else loose_matches
     paths = sorted(matches.values(), key=lambda path: os.path.normcase(str(path)))
     if source_mode == "alternatives" and len(paths) > 1:

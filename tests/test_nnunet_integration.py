@@ -460,11 +460,46 @@ class ContractTests(unittest.TestCase):
                 ["Liver_Left.nii.gz"], [p.name for p in underscore])
             # No exact hit: the separator-folded fallback still works
             # (export side may write 'Liver Left.nii.gz' for alias
-            # 'Liver-Left').
-            (seg / "Liver Left.nii.gz").write_bytes(b"spaced")
+            # 'Liver-Right').
+            (seg / "Liver Right.nii.gz").write_bytes(b"spaced")
             only_folded = pipeline._find_label_files(
                 Path(tmp), "caseA", ["Liver-Right"])
-            self.assertEqual([], [p.name for p in only_folded])
+            self.assertEqual(
+                ["Liver Right.nii.gz"], [p.name for p in only_folded])
+
+    def test_find_label_files_flat_layout_matches_exact_after_prefix(self):
+        """T03: the flat layout (<case>_<label>.nii.gz) must apply the same
+        Unicode-semantic exact matching as the subdirectory layout after
+        stripping the case prefix. The old flat loop folded the whole stem,
+        so two exactly-named files (caseA_Liver-Left / caseA_Liver_Left)
+        collided into one key and both labels were rejected as ambiguous —
+        usable data refused over a storage-layout difference."""
+        import tempfile
+
+        from tools import nnunet_pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            flat = Path(tmp) / "labels"
+            flat.mkdir(parents=True)
+            (flat / "caseA_Liver-Left.nii.gz").write_bytes(b"left")
+            (flat / "caseA_Liver_Left.nii.gz").write_bytes(b"underscore")
+            (flat / "caseA_Spleen.nii.gz").write_bytes(b"spleen")
+
+            left = pipeline._find_label_files(flat, "caseA", ["Liver-Left"])
+            self.assertEqual(
+                ["caseA_Liver-Left.nii.gz"], [p.name for p in left])
+            underscore = pipeline._find_label_files(
+                flat, "caseA", ["Liver_Left"])
+            self.assertEqual(
+                ["caseA_Liver_Left.nii.gz"], [p.name for p in underscore])
+            # A different case's files are never claimed.
+            other = pipeline._find_label_files(flat, "caseB", ["Spleen"])
+            self.assertEqual([], [p.name for p in other])
+            # Loose fallback still covers folded filename variants.
+            (flat / "caseA_Kidney Right.nii.gz").write_bytes(b"k")
+            kidney = pipeline._find_label_files(flat, "caseA", ["Kidney-Right"])
+            self.assertEqual(
+                ["caseA_Kidney Right.nii.gz"], [p.name for p in kidney])
 
     def test_prepare_refuses_one_file_claimed_by_two_labels(self):
         """S07: two output labels matching the same source file is a naming
