@@ -727,6 +727,12 @@ class ModelCenter:
         status_layout.addLayout(status_head)
         self.progress_detail = QtWidgets.QLabel("请在“训练设置”页开始训练。")
         self.progress_detail.setObjectName("hint")
+        # S11: the completion/retained-model copy is long; an unwrapped
+        # QLabel's minimum content width participates in the layout and
+        # stretches the status card (and its buttons) past the viewport,
+        # forcing horizontal scrolling. Same treatment as the other detail
+        # labels on this page.
+        self.progress_detail.setWordWrap(True)
         status_layout.addWidget(self.progress_detail)
         # R13/UI21: one-click navigation from the completion card to the
         # version it just produced — the model list lives on another tab and

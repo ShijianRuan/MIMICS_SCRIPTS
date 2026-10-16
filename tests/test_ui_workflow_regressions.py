@@ -486,6 +486,50 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertIn('未找到该模型版本', " ".join(str(a) for a in infos[0]))
         self.assertTrue(w.show_failed.isChecked(), "the filter must still be lifted")
 
+    def test_completion_long_copy_wraps_within_viewport(self):
+        # S11: the retained-model completion copy is long; the unwrapped
+        # detail label's minimum content width stretched the status card
+        # (and the「查看这个版本」button/progress bar) past the viewport at
+        # 853x440, forcing horizontal scrolling. The label must wrap and the
+        # card must stay inside the window.
+        import nninteractive_task_model_center as ui
+        with mock.patch.object(ui, 'find_environment_python', return_value=sys.executable):
+            w = self.keep(ui.ModelCenter(QtWidgets.QDialog(), {'workspace': str(self.root / 'int')}, QT))
+        status = dict(status='completed', phase='completed',
+                      selection_outcome='current_model_retained',
+                      quality={'delta_auc': -0.01},
+                      model={'model_id': 'model_wrap'}, task_id='task',
+                      updated_at_epoch=2)
+        w.current_job_dir = w.workspace / 'jobs' / 'job_wrap'
+        w.current_job_dir.mkdir(parents=True)
+        (w.current_job_dir / 'status.json').write_text(
+            json.dumps(status), encoding='utf-8')
+        with mock.patch.object(ui, 'find_task', return_value={}), \
+             mock.patch.object(ui, 'selected_model', return_value=None), \
+             mock.patch.object(ui, 'model_rows', return_value=[]), \
+             mock.patch.object(ui, 'model_is_usable', return_value=True):
+            w.tabs.setCurrentWidget(w.progress_tab)
+            w.window.resize(853, 440)
+            w.window.show()
+            w.refresh_status()
+            APP.processEvents()
+        self.assertTrue(w.progress_detail.wordWrap())
+        # Wrapped to several lines (taller than the one-line hint label
+        # next to it on the same card), not one huge line.
+        self.assertGreater(
+            w.progress_detail.height(), w.elapsed_label.height())
+        # The status card and its button stay inside the viewport — no
+        # forced horizontal scrolling.
+        self.assertLessEqual(
+            w.progress_detail.frameGeometry().right(), w.window.width())
+        self.assertLessEqual(
+            w.view_completed_model_button.frameGeometry().right(),
+            w.window.width())
+        for scroll in w.window.findChildren(QtWidgets.QScrollArea):
+            self.assertEqual(
+                0, scroll.horizontalScrollBar().maximum(),
+                "long completion copy must not force horizontal scrolling")
+
     def _drop_check(self, kind, chosen):
         import import_drop_window as ui
         source = self.root / 'synthetic-source'
