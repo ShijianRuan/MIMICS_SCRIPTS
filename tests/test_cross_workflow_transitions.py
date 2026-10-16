@@ -320,8 +320,12 @@ class CrossWorkflowTransitionTests(unittest.TestCase):
         self.assertEqual(len(self.case_ids), len(ranking))
         scores = [row["integrated"] for row in ranking]
         self.assertEqual(scores, sorted(scores, reverse=True))
-        uncertainty_dir = al_job_dir / "uncertainty"
-        self.assertTrue((uncertainty_dir / "ranking.csv").is_file())
+        # S10: uncertainty artifacts live in a fresh per-run directory
+        # recorded in status; a retry must never rank stale files.
+        uncertainty_dir = Path(al_status["uncertainty_dir"])
+        ranking_csv = Path(al_status["ranking_csv"])
+        self.assertEqual(uncertainty_dir / "ranking.csv", ranking_csv)
+        self.assertTrue(ranking_csv.is_file())
         bands = al_status["uncertainty_bands"] or {}
         self.assertEqual(len(self.case_ids), bands["written"]["moderate"])
         # per-case source geometry recorded (the overlay contract input)

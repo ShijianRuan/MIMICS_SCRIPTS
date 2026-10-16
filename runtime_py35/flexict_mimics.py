@@ -1421,7 +1421,13 @@ def _al_case_source_geometry(job_dir, case_id):
 
 def _al_mask_paths(job_dir, case_id, what):
     """The NIfTI(s) an overlay request maps to."""
-    uncertainty_dir = os.path.join(job_dir, "uncertainty")
+    # S10: each uncertainty run writes a fresh uncertainty_run_<ts> directory,
+    # recorded in the job status. Jobs created before S10 keep the legacy
+    # fixed directory, so the status key is preferred with a fallback.
+    status = _read_json(os.path.join(job_dir, "status.json"), {}) or {}
+    uncertainty_dir = str(
+        status.get("uncertainty_dir") or "") or os.path.join(
+            job_dir, "uncertainty")
     if what == "consensus":
         path = os.path.join(uncertainty_dir, "{0}_consensus.nii.gz".format(case_id))
         if os.path.isfile(path):

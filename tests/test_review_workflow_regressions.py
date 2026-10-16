@@ -32,11 +32,18 @@ class TestDocumentedUndo(unittest.TestCase):
         self.project.write_bytes(b'human project')
         self.receipt = Path(self.tmp.name)/'receipt.json'
         self.receipt.write_text('{}')
-        self.mask = types.SimpleNamespace(name='liver',guid='owned')
+        # S04: the delete path only runs for a mask the receipt can PROVE
+        # unedited, so the live mask exposes the same voxel content recorded
+        # in its sha256 snapshot.
+        import hashlib
+        self.content = b'unedited-voxels'
+        self.mask = types.SimpleNamespace(
+            name='liver', guid='owned', get_voxel_buffer=lambda: self.content)
         self.masks = MaskContainer([self.mask])
         self.payload = {'schema_version':undo.RECEIPT_SCHEMA_VERSION,
                         'mcs_path':str(self.project),'created_masks':['liver'],
-                        'created_masks_v2':[{'name':'liver','guid':'owned'}]}
+                        'created_masks_v2':[{'name':'liver','guid':'owned',
+                                             'sha256':'sha256:'+hashlib.sha256(self.content).hexdigest()}]}
     def environment(self):
         stack = __import__('contextlib').ExitStack()
         stack.enter_context(mock.patch.object(undo,'find_latest_receipt',return_value=(str(self.receipt),self.payload)))
