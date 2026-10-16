@@ -174,7 +174,7 @@ def expand_mask_paths(values):
 def _normalized_mask_names(names):
     """Match rule the import worker applies (single_case_import_worker
     _filter_masks): case-insensitive, surrounding whitespace ignored."""
-    return set(str(n).strip().lower() for n in (names or []) if str(n).strip())
+    return set(str(n).strip().casefold() for n in (names or []) if str(n).strip())
 
 
 def cases_missing_selected_masks(case_mask_names, picked):

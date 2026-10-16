@@ -12067,6 +12067,20 @@ class TestImportDropWindow(unittest.TestCase):
         # Degenerate inputs: nothing picked / nothing known -> no warning.
         self.assertEqual(([], {}), dw.cases_partial_mask_report(case_mask_names, []))
         self.assertEqual(([], {}), dw.cases_partial_mask_report({}, ["liver"]))
+        # R81 复审: case-insensitive matching must use casefold on BOTH
+        # sides — lower() and casefold() disagree on e.g. "ß"/"ẞ", which
+        # would make the pre-check and the worker's _filter_masks disagree.
+        sharp_names = {"s0001": ["straße"]}
+        missing, partial = dw.cases_partial_mask_report(
+            sharp_names, ["STRASSE", "  Straße  "])
+        self.assertEqual([], missing, "casefold must match sharp-s variants")
+        self.assertEqual({}, partial)
+        from single_case_import_worker import _filter_masks
+        kept = _filter_masks(
+            [{"name": "straße", "path": "x.nii"}, {"name": "spleen", "path": "y.nii"}],
+            "STRASSE")
+        self.assertEqual(["straße"], [m["name"] for m in kept],
+                         "worker must apply the same casefold rule")
         self.assertEqual(([], {}), dw.cases_partial_mask_report(None, ["liver"]))
 
     def test_partial_mask_report_matches_worker_filter_rule(self):

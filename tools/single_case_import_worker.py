@@ -100,10 +100,10 @@ def _filter_masks(masks: list[dict], selection: str) -> list[dict]:
         return list(masks)
     if text.lower() in ("none", "no", "off"):
         return []
-    wanted = {item.strip().lower() for item in text.split(",") if item.strip()}
+    wanted = {item.strip().casefold() for item in text.split(",") if item.strip()}
     return [
         item for item in masks
-        if str(item.get("name") or "").strip().lower() in wanted
+        if str(item.get("name") or "").strip().casefold() in wanted
     ]
 
 
