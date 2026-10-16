@@ -1,0 +1,103 @@
+{
+  "source_commit": "336e99d6bbe1b01a192a9a450a4af29adf0f3ee4",
+  "suites": [
+    {
+      "suite": "ui",
+      "executed": 23,
+      "passed": 21,
+      "failures": 2,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "ui.log"
+    },
+    {
+      "suite": "gui",
+      "executed": 84,
+      "passed": 83,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 1,
+      "log": "gui.log"
+    },
+    {
+      "suite": "nnunet",
+      "executed": 126,
+      "passed": 126,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "nnunet.log"
+    },
+    {
+      "suite": "flexict",
+      "executed": 147,
+      "passed": 145,
+      "failures": 1,
+      "errors": 1,
+      "skipped_methods": 0,
+      "log": "flexict.log"
+    },
+    {
+      "suite": "remote",
+      "executed": 138,
+      "passed": 138,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "remote.log"
+    },
+    {
+      "suite": "runtime",
+      "executed": 114,
+      "passed": 114,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "runtime.log"
+    },
+    {
+      "suite": "cross",
+      "executed": 2,
+      "passed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "cross.log"
+    },
+    {
+      "suite": "geometry",
+      "executed": 6,
+      "passed": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "geometry.log"
+    },
+    {
+      "suite": "review",
+      "executed": 11,
+      "passed": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "review.log"
+    },
+    {
+      "suite": "runtime-changed",
+      "executed": 63,
+      "passed": 63,
+      "failures": 0,
+      "errors": 0,
+      "skipped_methods": 0,
+      "log": "runtime-changed.log"
+    }
+  ],
+  "totals": {
+    "executed": 714,
+    "passed": 709,
+    "failures": 3,
+    "errors": 1,
+    "skipped_methods": 1
+  },
+  "scope": "10 selected affected suites/class selections; executions may overlap; native/model boundaries include stubs"
+}

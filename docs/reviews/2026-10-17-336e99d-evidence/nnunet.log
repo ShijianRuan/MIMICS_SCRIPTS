@@ -1,0 +1,157 @@
+test_epoch_setting_resolves_to_configurable_equivalent (__main__.Action3TrainerContractTests.test_epoch_setting_resolves_to_configurable_equivalent) ... ok
+test_2d_manual_spacing_is_rejected (__main__.ContractTests.test_2d_manual_spacing_is_rejected) ... ok
+test_2d_patch_has_two_dimensions (__main__.ContractTests.test_2d_patch_has_two_dimensions) ... ok
+test_alias_cannot_map_to_two_output_labels (__main__.ContractTests.test_alias_cannot_map_to_two_output_labels) ... ok
+test_chinese_alias_conflict_is_rejected_in_chinese (__main__.ContractTests.test_chinese_alias_conflict_is_rejected_in_chinese) ... ok
+test_chinese_label_names_stay_distinct (__main__.ContractTests.test_chinese_label_names_stay_distinct) ... ok
+test_chinese_task_name_keeps_freeform_name_and_stable_id (__main__.ContractTests.test_chinese_task_name_keeps_freeform_name_and_stable_id)
+UI19: 中文目标名不再被拒绝。task_name 原样保留（写入 ... ok
+test_continue_and_pretrained_are_mutually_exclusive (__main__.ContractTests.test_continue_and_pretrained_are_mutually_exclusive) ... ok
+test_dataset_id_suggestion_skips_existing_model (__main__.ContractTests.test_dataset_id_suggestion_skips_existing_model) ... ok
+test_directory_signature_no_cross_process_cache (__main__.ContractTests.test_directory_signature_no_cross_process_cache)
+R14: the persistent signature cache is gone; signing the same ... ok
+test_directory_signature_reflects_in_place_child_mutation (__main__.ContractTests.test_directory_signature_reflects_in_place_child_mutation)
+R14: a repaired/re-synced DICOM slice written in place does not ... ok
+test_directory_signature_tracks_each_file_timestamp (__main__.ContractTests.test_directory_signature_tracks_each_file_timestamp) ... ok
+test_duplicate_label_id_fails (__main__.ContractTests.test_duplicate_label_id_fails) ... ok
+test_existing_model_map_loads_multiclass_and_grouped_tasks (__main__.ContractTests.test_existing_model_map_loads_multiclass_and_grouped_tasks) ... ok
+test_find_label_files_matches_chinese_organ_by_unicode_name (__main__.ContractTests.test_find_label_files_matches_chinese_organ_by_unicode_name) ... ok
+test_find_label_files_prefers_exact_over_separator_folded (__main__.ContractTests.test_find_label_files_prefers_exact_over_separator_folded)
+S07: 'Liver-Left' and 'Liver_Left' are DISTINCT labels under the ... ok
+test_grouped_label_preserves_union_source_mode (__main__.ContractTests.test_grouped_label_preserves_union_source_mode) ... ok
+test_label_ids_must_be_consecutive (__main__.ContractTests.test_label_ids_must_be_consecutive) ... ok
+test_label_name_key_keeps_chinese_organ_files_distinct (__main__.ContractTests.test_label_name_key_keeps_chinese_organ_files_distinct) ... ok
+test_local_gpu_ids_match_gpu_count (__main__.ContractTests.test_local_gpu_ids_match_gpu_count) ... ok
+test_missing_labels_are_required_by_default (__main__.ContractTests.test_missing_labels_are_required_by_default) ... ok
+test_normalize_multiclass_request (__main__.ContractTests.test_normalize_multiclass_request) ... ok
+test_numeric_fold_requires_validation_data (__main__.ContractTests.test_numeric_fold_requires_validation_data) ... ok
+test_official_trainer_does_not_claim_custom_epochs (__main__.ContractTests.test_official_trainer_does_not_claim_custom_epochs) ... ok
+test_prepare_refuses_one_file_claimed_by_two_labels (__main__.ContractTests.test_prepare_refuses_one_file_claimed_by_two_labels)
+S07: two output labels matching the same source file is a naming ... ok
+test_reserved_background_label_name_rejected (__main__.ContractTests.test_reserved_background_label_name_rejected)
+R16 失败路径：保留名 background 不得覆盖 nnU-Net 的零背景。 ... ok
+test_same_label_duplicate_alias_is_deduplicated_not_rejected (__main__.ContractTests.test_same_label_duplicate_alias_is_deduplicated_not_rejected) ... ok
+test_selected_mask_ranks_but_does_not_filter_multiclass_models (__main__.ContractTests.test_selected_mask_ranks_but_does_not_filter_multiclass_models) ... ok
+test_task_identifier_collision_and_idempotence (__main__.ContractTests.test_task_identifier_collision_and_idempotence)
+R01 失败路径：任务标识的二次归一化不得丢掉区分摘要。 ... ok
+test_ambiguous_alias_match_fails_closed (__main__.DiscoveryTests.test_ambiguous_alias_match_fails_closed) ... ok
+test_batch_predict_entry_routes_to_batch_window (__main__.DiscoveryTests.test_batch_predict_entry_routes_to_batch_window)
+D20: the Batch Predict shell routes through nnunet_mimics to the ... ok
+test_dataset_id_conflict_is_rejected_before_nnunet_resolution (__main__.DiscoveryTests.test_dataset_id_conflict_is_rejected_before_nnunet_resolution) ... ok
+test_dataset_json_keeps_zero_background (__main__.DiscoveryTests.test_dataset_json_keeps_zero_background)
+R16 失败路径：真实生成的 dataset.json 中 background 必须是 0。 ... ok
+test_label_lookup_is_case_insensitive_and_suffix_aware (__main__.DiscoveryTests.test_label_lookup_is_case_insensitive_and_suffix_aware) ... ok
+test_link_or_copy_replaces_destination_without_truncating_links (__main__.DiscoveryTests.test_link_or_copy_replaces_destination_without_truncating_links) ... ok
+test_materialize_freezes_non_ascii_validation_by_id (__main__.DiscoveryTests.test_materialize_freezes_non_ascii_validation_by_id)
+F16: splits store nnunet case keys, not original case ids. When ... ok
+test_materialize_preserves_previous_validation_cases (__main__.DiscoveryTests.test_materialize_preserves_previous_validation_cases) ... ok
+test_materialize_records_patient_groups_in_manifest (__main__.DiscoveryTests.test_materialize_records_patient_groups_in_manifest) ... ok
+test_raw_dataset_and_split_are_deterministic (__main__.DiscoveryTests.test_raw_dataset_and_split_are_deterministic) ... ok
+test_source_grid_collision_never_rewrites_source_files (__main__.DiscoveryTests.test_source_grid_collision_never_rewrites_source_files)
+F22 (P0): two Chinese-named cases must not merge into one bucket ... ok
+test_split_folds_frozen_case_missing_from_rows_is_ignored (__main__.DiscoveryTests.test_split_folds_frozen_case_missing_from_rows_is_ignored) ... ok
+test_split_folds_frozen_group_freezes_whole_patient (__main__.DiscoveryTests.test_split_folds_frozen_group_freezes_whole_patient) ... ok
+test_split_folds_frozen_never_empties_train_side (__main__.DiscoveryTests.test_split_folds_frozen_never_empties_train_side) ... ok
+test_split_folds_frozen_validation_stays_in_val (__main__.DiscoveryTests.test_split_folds_frozen_validation_stays_in_val) ... ok
+test_split_folds_honors_case_count_semantics (__main__.DiscoveryTests.test_split_folds_honors_case_count_semantics) ... ok
+test_split_folds_never_straddles_patient_group (__main__.DiscoveryTests.test_split_folds_never_straddles_patient_group) ... ok
+test_split_folds_without_groups_keeps_case_independence (__main__.DiscoveryTests.test_split_folds_without_groups_keeps_case_independence) ... ok
+test_unique_case_keys_disambiguate_lossy_collisions (__main__.DiscoveryTests.test_unique_case_keys_disambiguate_lossy_collisions) ... ok
+test_unique_case_keys_preserve_slug_without_collision (__main__.DiscoveryTests.test_unique_case_keys_preserve_slug_without_collision) ... ok
+test_completed_log_compaction_is_bounded (__main__.JobLifecycleTests.test_completed_log_compaction_is_bounded) ... ok
+test_copied_model_is_discovered_without_old_registry (__main__.JobLifecycleTests.test_copied_model_is_discovered_without_old_registry) ... ok
+test_dead_local_controller_becomes_failed (__main__.JobLifecycleTests.test_dead_local_controller_becomes_failed) ... ok
+test_dead_registry_rows_are_flagged_not_dropped (__main__.JobLifecycleTests.test_dead_registry_rows_are_flagged_not_dropped) ... ok
+test_dead_remote_controller_before_launch_becomes_failed (__main__.JobLifecycleTests.test_dead_remote_controller_before_launch_becomes_failed) ... ok
+test_dead_remote_controller_remains_stoppable (__main__.JobLifecycleTests.test_dead_remote_controller_remains_stoppable) ... ok
+test_gpu_lock_is_transferred_to_worker_pid (__main__.JobLifecycleTests.test_gpu_lock_is_transferred_to_worker_pid) ... ok
+test_gpu_lock_transfer_failure_terminates_worker (__main__.JobLifecycleTests.test_gpu_lock_transfer_failure_terminates_worker) ... ok
+test_inference_output_is_bound_before_launch (__main__.JobLifecycleTests.test_inference_output_is_bound_before_launch) ... ok
+test_model_usability_rejects_incomplete_checkpoint (__main__.JobLifecycleTests.test_model_usability_rejects_incomplete_checkpoint) ... ok
+test_prediction_backend_accepts_fold_all (__main__.JobLifecycleTests.test_prediction_backend_accepts_fold_all) ... ok
+test_prepared_rows_patient_group_contract (__main__.JobLifecycleTests.test_prepared_rows_patient_group_contract)
+R08 container-side rebuild: row field wins, top-level mapping ... ok
+test_remote_nnunet_curve_is_downloaded_atomically (__main__.JobLifecycleTests.test_remote_nnunet_curve_is_downloaded_atomically) ... ok
+test_remote_nnunet_log_sync_uses_pipeline_log (__main__.JobLifecycleTests.test_remote_nnunet_log_sync_uses_pipeline_log) ... ok
+test_remote_request_binds_dataset_cache_token (__main__.JobLifecycleTests.test_remote_request_binds_dataset_cache_token) ... ok
+test_remote_training_prepare_returns_complete_request (__main__.JobLifecycleTests.test_remote_training_prepare_returns_complete_request) ... ok
+test_remote_training_prepare_serializes_patient_groups (__main__.JobLifecycleTests.test_remote_training_prepare_serializes_patient_groups)
+R08: every staged case must carry its patient_group so the ... ok
+test_stage_worker_never_starts_without_controller_gate (__main__.JobLifecycleTests.test_stage_worker_never_starts_without_controller_gate) ... ok
+test_stage_worker_watchdog_exits_on_dead_parent (__main__.JobLifecycleTests.test_stage_worker_watchdog_exits_on_dead_parent)
+B21: a controller that dies mid-stage must not leave the worker ... ok
+test_stage_worker_watchdog_kills_hung_stage (__main__.JobLifecycleTests.test_stage_worker_watchdog_kills_hung_stage)
+B21: a stage that blocks forever (the R41/R42 orphan-hang form) ... ok
+test_stop_does_not_kill_worker_when_controller_is_alive (__main__.JobLifecycleTests.test_stop_does_not_kill_worker_when_controller_is_alive) ... ok
+test_stop_terminates_verified_orphan_worker (__main__.JobLifecycleTests.test_stop_terminates_verified_orphan_worker) ... ok
+test_stop_writes_control_before_remote_cancel (__main__.JobLifecycleTests.test_stop_writes_control_before_remote_cancel) ... ok
+test_watchdog_trigger_checks_parent_and_deadline (__main__.JobLifecycleTests.test_watchdog_trigger_checks_parent_and_deadline) ... ok
+test_worker_environment_caps_blas_threads_every_stage (__main__.JobLifecycleTests.test_worker_environment_caps_blas_threads_every_stage)
+Every stage worker must cap BLAS threads to one. ... ok
+test_worker_environment_disables_torch_compile_for_train (__main__.JobLifecycleTests.test_worker_environment_disables_torch_compile_for_train)
+The train stage must default nnUNet_compile off. ... ok
+test_changed_matching_mask_creates_copy (__main__.MimicsRuntimeTests.test_changed_matching_mask_creates_copy) ... ok
+test_edit_undone_back_to_original_still_updates (__main__.MimicsRuntimeTests.test_edit_undone_back_to_original_still_updates) ... ok
+test_empty_prediction_is_not_offered_for_overwrite (__main__.MimicsRuntimeTests.test_empty_prediction_is_not_offered_for_overwrite) ... ok
+test_equal_volume_edit_creates_copy_not_overwrite (__main__.MimicsRuntimeTests.test_equal_volume_edit_creates_copy_not_overwrite) ... ok
+test_grouped_prediction_never_overwrites_a_constituent_mask (__main__.MimicsRuntimeTests.test_grouped_prediction_never_overwrites_a_constituent_mask) ... ok
+test_mask_application_resume_reuses_planned_copy_after_crash (__main__.MimicsRuntimeTests.test_mask_application_resume_reuses_planned_copy_after_crash) ... ok
+test_new_matching_mask_is_not_overwritten_without_launch_snapshot (__main__.MimicsRuntimeTests.test_new_matching_mask_is_not_overwritten_without_launch_snapshot) ... ok
+test_remote_unreachable_is_not_rewritten_by_stopped_process_check (__main__.MimicsRuntimeTests.test_remote_unreachable_is_not_rewritten_by_stopped_process_check) ... ok
+test_single_class_bridge_row_uses_manifest_label (__main__.MimicsRuntimeTests.test_single_class_bridge_row_uses_manifest_label) ... ok
+test_single_present_class_keeps_multiclass_label_id (__main__.MimicsRuntimeTests.test_single_present_class_keeps_multiclass_label_id) ... ok
+test_stopping_monitor_terminates_owned_bridge (__main__.MimicsRuntimeTests.test_stopping_monitor_terminates_owned_bridge) ... ok
+test_unchanged_mask_still_updates (__main__.MimicsRuntimeTests.test_unchanged_mask_still_updates) ... ok
+test_bridge_preserves_only_present_multiclass_value (__main__.SpatialContractTests.test_bridge_preserves_only_present_multiclass_value) ... ok
+test_case_cache_image_is_independent_of_user_source (__main__.SpatialContractTests.test_case_cache_image_is_independent_of_user_source) ... ok
+test_case_cache_revalidates_cached_image_label_grid (__main__.SpatialContractTests.test_case_cache_revalidates_cached_image_label_grid) ... ok
+test_changed_label_content_misses_case_cache (__main__.SpatialContractTests.test_changed_label_content_misses_case_cache)
+The G10 content-keyed cache must still invalidate when a label ... ok
+test_discrete_orientation_change_preserves_label_voxel (__main__.SpatialContractTests.test_discrete_orientation_change_preserves_label_voxel) ... ok
+test_grouped_source_masks_are_unioned_into_one_output_class (__main__.SpatialContractTests.test_grouped_source_masks_are_unioned_into_one_output_class) ... ok
+test_inference_rejects_source_changed_since_mimics_import (__main__.SpatialContractTests.test_inference_rejects_source_changed_since_mimics_import) ... ok
+test_inference_rejects_wrong_output_affine (__main__.SpatialContractTests.test_inference_rejects_wrong_output_affine) ... ok
+test_inference_success_keeps_previous_result_recoverable (__main__.SpatialContractTests.test_inference_success_keeps_previous_result_recoverable)
+S02: a VALID new prediction over an existing reviewed result must ... ok
+test_inference_wrong_grid_preserves_previous_published_result (__main__.SpatialContractTests.test_inference_wrong_grid_preserves_previous_published_result)
+R10: a wrong-grid worker output must never touch the published ... ok
+test_model_compatibility_allows_different_patient_grid (__main__.SpatialContractTests.test_model_compatibility_allows_different_patient_grid) ... ok
+test_model_compatibility_rejects_modality_mismatch (__main__.SpatialContractTests.test_model_compatibility_rejects_modality_mismatch) ... ok
+test_multiclass_overlap_fails_by_default (__main__.SpatialContractTests.test_multiclass_overlap_fails_by_default) ... ok
+test_publish_prediction_output_refuses_corrupt_candidate (__main__.SpatialContractTests.test_publish_prediction_output_refuses_corrupt_candidate)
+R10: corrupt bytes can never reach the published output path. ... ok
+test_publish_prediction_output_returns_kept_replaced_copy (__main__.SpatialContractTests.test_publish_prediction_output_returns_kept_replaced_copy)
+S02: the publish boundary returns the kept-aside old copy so ... ok
+test_publish_rejects_four_dimensional_and_fractional (__main__.SpatialContractTests.test_publish_rejects_four_dimensional_and_fractional)
+S03: a 4D volume or a fractional probability map is not an ... ok
+test_publish_rejects_header_only_truncated_voxels (__main__.SpatialContractTests.test_publish_rejects_header_only_truncated_voxels)
+S03: a gzip file with a valid NIfTI header but no voxel payload ... ok
+test_reexported_identical_labels_hit_case_cache (__main__.SpatialContractTests.test_reexported_identical_labels_hit_case_cache)
+G10: a retrain after an AL iteration re-exports labels from .mcs ... ok
+test_remote_inference_cache_namespace_contains_dataset_id (__main__.SpatialContractTests.test_remote_inference_cache_namespace_contains_dataset_id) ... ok
+test_remote_inference_rejects_changed_source_before_transfer (__main__.SpatialContractTests.test_remote_inference_rejects_changed_source_before_transfer) ... ok
+test_training_data_profile_rejects_all_zero_label (__main__.SpatialContractTests.test_training_data_profile_rejects_all_zero_label) ... ok
+test_training_data_profile_rejects_invalid_spacing (__main__.SpatialContractTests.test_training_data_profile_rejects_invalid_spacing) ... ok
+test_training_data_profile_rejects_single_slice_case (__main__.SpatialContractTests.test_training_data_profile_rejects_single_slice_case) ... ok
+test_training_data_profile_reports_label_foreground (__main__.SpatialContractTests.test_training_data_profile_reports_label_foreground) ... ok
+test_live_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok
+test_models_and_cache_untouched (__main__.TestSweepExpiredJobs.test_models_and_cache_untouched)
+Registered models and caches must never be swept. ... ok
+test_old_terminal_jobs_are_pruned_keeping_status (__main__.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok
+test_reattaching_remote_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_reattaching_remote_jobs_never_pruned) ... ok
+test_recent_jobs_kept (__main__.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok
+test_zero_retention_disables (__main__.TestSweepExpiredJobs.test_zero_retention_disables) ... ok
+test_cache_task_tree_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_cache_task_tree_of_running_job_is_kept) ... ok
+test_dataset_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_of_running_job_is_kept) ... ok
+test_dataset_referenced_by_registered_model_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_referenced_by_registered_model_is_kept) ... ok
+test_expired_cache_case_removed_and_empty_task_dir_dropped (__main__.TestSweepRuntimeAndCache.test_expired_cache_case_removed_and_empty_task_dir_dropped) ... ok
+test_expired_unreferenced_dataset_removed_in_all_runtime_dirs (__main__.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed_in_all_runtime_dirs) ... ok
+test_models_dir_never_touched (__main__.TestSweepRuntimeAndCache.test_models_dir_never_touched) ... ok
+test_recent_dataset_is_kept (__main__.TestSweepRuntimeAndCache.test_recent_dataset_is_kept) ... ok
+test_registry_row_without_dataset_name_is_rebuilt (__main__.TestSweepRuntimeAndCache.test_registry_row_without_dataset_name_is_rebuilt) ... ok
+test_zero_retention_disables_both_sweeps (__main__.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok
+
+----------------------------------------------------------------------
+Ran 126 tests in 10.655s
+
+OK

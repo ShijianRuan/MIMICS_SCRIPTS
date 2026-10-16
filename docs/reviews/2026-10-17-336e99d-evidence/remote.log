@@ -1,0 +1,8 @@
+........................................<repo>/tools/ui_theme.py:64: DeprecationWarning: Enum value 'Qt::ApplicationAttribute.AA_UseHighDpiPixmaps' is marked as deprecated, please check the documentation for more information.
+  QtCore.QCoreApplication.setAttribute(attribute, True)
+qt.qpa.fonts: Populating font family aliases took 61 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost.
+..................................................................................................
+----------------------------------------------------------------------
+Ran 138 tests in 32.574s
+
+OK

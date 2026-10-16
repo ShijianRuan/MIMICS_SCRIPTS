@@ -1,0 +1,119 @@
+{
+  "long_model_chooser": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      1573,
+      339
+    ],
+    "summary": "baseline\n版本：same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_same_prefix_model_version_A · 未验证\n点提示 · 训练 2 例 + 验证 1 例 · 无自动验证对比",
+    "model_id_width": 1154,
+    "summary_width": 805,
+    "selectable": true
+  },
+  "retained_completion_navigation": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      769,
+      334
+    ],
+    "detail": "训练完成，但验证比对显示新版本未超过当前标注模型，当前模型保持不变。新版本可用但默认隐藏：点击下方「查看这个版本」定位它，或到「模型版本」页勾选「显示失败与未改进的版本」。",
+    "default_model_rows": 0,
+    "show_failed": false
+  },
+  "completion_layout": {
+    "word_wrap": true,
+    "text_width": 1032,
+    "label_width": 749,
+    "visible_width": 749,
+    "horizontal_scrolls": [
+      {
+        "maximum": 0,
+        "viewport_width": 783
+      }
+    ]
+  },
+  "completed_model_navigation_after_click": {
+    "models_tab": true,
+    "rows": 1,
+    "show_failed": true,
+    "selected_row": 0
+  },
+  "chinese_label_submission": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      342,
+      419
+    ],
+    "status": "标签会先映射回原始图像网格，再进行 nnU-Net 预处理。",
+    "request_labels": [
+      {
+        "name": "肝脏",
+        "id": 1,
+        "aliases": [
+          "肝脏"
+        ],
+        "source_mode": "alternatives"
+      },
+      {
+        "name": "脾脏",
+        "id": 2,
+        "aliases": [
+          "脾脏"
+        ],
+        "source_mode": "alternatives"
+      }
+    ],
+    "submission_not_launched": true
+  },
+  "remote_profile_identity": {
+    "actual": [
+      853,
+      440
+    ],
+    "minimum_hint": [
+      539,
+      332
+    ],
+    "toggle": "高级运行设置（2 项非默认）",
+    "summary": [
+      "镜像 private/synthetic:2",
+      "工作目录 other-storage"
+    ]
+  },
+  "actual_batch_liver_warning": {
+    "questions": [
+      [
+        "部分病例缺少所选 Mask",
+        "以下 2 例不含任何所选 Mask，将仅导入图像：\nCaseB、CaseC\n\n如非预期，请取消并检查这些病例的 segmentations/ 文件夹，或改选其他 Mask。"
+      ]
+    ],
+    "CaseB_named_in_warning": true
+  },
+  "actual_batch_two_mask_submit": {
+    "questions": [
+      [
+        "部分病例缺少所选 Mask",
+        "以下 1 例不含任何所选 Mask，将仅导入图像：\nCaseB\n\n以下病例缺少部分所选 Mask，缺失的标签不会导入：\nCaseA（缺 spleen）；CaseC（缺 liver）\n\n如非预期，请取消并检查这些病例的 segmentations/ 文件夹，或改选其他 Mask。"
+      ]
+    ],
+    "launches": [
+      {
+        "kind": "batch",
+        "source_path": "<synthetic-ui>/batch",
+        "output_path": "<synthetic-ui>/mask_exports",
+        "mask_selection": "Liver,Spleen",
+        "mask_paths": [],
+        "paths": []
+      }
+    ]
+  }
+}

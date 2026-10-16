@@ -1,0 +1,22 @@
+{
+  "python": "3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]",
+  "executable": "<audit-python>",
+  "platform": "darwin",
+  "source_commit": "336e99d6bbe1b01a192a9a450a4af29adf0f3ee4",
+  "packages": {
+    "numpy": "2.3.5",
+    "nibabel": "5.4.2",
+    "pydicom": "3.0.2",
+    "SimpleITK": "2.5.6",
+    "scipy": "1.18.1",
+    "PySide6_Essentials": "6.12.0",
+    "shiboken6": "6.12.0",
+    "pytest": "9.1.1"
+  },
+  "not_available": [
+    "torch",
+    "model weights",
+    "Windows",
+    "Mimics"
+  ]
+}

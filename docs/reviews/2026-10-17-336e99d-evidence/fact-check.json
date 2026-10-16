@@ -1,0 +1,112 @@
+{
+  "source_commit": "336e99d6bbe1b01a192a9a450a4af29adf0f3ee4",
+  "method": "Separate post-generation verification against actual observations, test logs, screenshots and Git source content; no native medical validation claim.",
+  "checks": [
+    {
+      "claim": "Normal receipt producer→queue handoff writes actual snapshot data",
+      "verified": true,
+      "evidence": "observations.json:receipt_success; native project creation boundary stub"
+    },
+    {
+      "claim": "Receipt failure remains invisible to normal task-row data and cleanup removed work",
+      "verified": true,
+      "evidence": "observations.json:receipt_failure; write boundary raises OSError"
+    },
+    {
+      "claim": "Valid publication preserves exact old backup bytes",
+      "verified": true,
+      "evidence": "observations.json:publish_valid"
+    },
+    {
+      "claim": "Truncated/4D/fractional outputs are rejected before replacing target",
+      "verified": true,
+      "evidence": "observations.json:publish_*"
+    },
+    {
+      "claim": "Without indexed_gzip, 96-slice validation amplifies decompression ~49.62x",
+      "verified": true,
+      "evidence": "observations.json:gzip_validation_cost; actual gzip reader bytes"
+    },
+    {
+      "claim": "Missing-proof and edited masks are retained, proven-unchanged mask can be deleted",
+      "verified": true,
+      "evidence": "observations.json:undo_*; native deletion is a list boundary stub"
+    },
+    {
+      "claim": "FlexiCT frozen original cases no longer grow validation",
+      "verified": true,
+      "evidence": "observations.json:flexict_frozen_*"
+    },
+    {
+      "claim": "nnU-Net still grows frozen validation and final writer publishes empty grouped training folds",
+      "verified": true,
+      "evidence": "observations.json:nnunet_*; actual dataset/splits writer"
+    },
+    {
+      "claim": "DICOM original counterexamples reject; regular and linear shear remain supported",
+      "verified": true,
+      "evidence": "observations.json:dicom_geometry; synthetic pydicom headers through public geometry functions"
+    },
+    {
+      "claim": "Partly missing spacing and entirely missing position still accept fabricated geometry",
+      "verified": true,
+      "evidence": "observations.json:dicom_geometry"
+    },
+    {
+      "claim": "Subfolder exact labels resolve uniquely while equivalent flat labels reject as ambiguous",
+      "verified": true,
+      "evidence": "observations.json:label_*"
+    },
+    {
+      "claim": "Async lock-held callback returns promptly and persists after unlock",
+      "verified": true,
+      "evidence": "observations.json:async_state_responsive; native Windows Qt lock test is skipped"
+    },
+    {
+      "claim": "Controlled thread schedule reverses last-click intent in actual persisted state",
+      "verified": true,
+      "evidence": "observations.json:async_state_click_order; actual JSON and OS file lock"
+    },
+    {
+      "claim": "AL same-second retry reuses directory and ranks excluded case",
+      "verified": true,
+      "evidence": "observations.json:al_same_second_retry; controlled directory clock, actual AL chain"
+    },
+    {
+      "claim": "Fresh AL directory still ranks current-run partial write failure",
+      "verified": true,
+      "evidence": "observations.json:al_fresh_partial_write_failure; only consensus write fails"
+    },
+    {
+      "claim": "Joint wrong input grid is rejected by full AL chain",
+      "verified": true,
+      "evidence": "observations.json:al_wrong_grid_rejected"
+    },
+    {
+      "claim": "Fixed small-screen real Qt scene wraps without horizontal clipping and version navigation works",
+      "verified": true,
+      "evidence": "ui-observations.json and 7 manually inspected actual Qt PNGs"
+    },
+    {
+      "claim": "Primary tests totals retain all failures/errors/skips",
+      "verified": true,
+      "evidence": "10 raw primary logs; no diagnostic substitutions counted"
+    },
+    {
+      "claim": "Independent status assessments preserve scoped fixes and pending cards",
+      "verified": true,
+      "evidence": "2026-10-17-336e99d-revalidation.json"
+    },
+    {
+      "claim": "New audit range is exactly 12 commits and 20 changed files",
+      "verified": true,
+      "evidence": "Git topology and fixed source snapshot"
+    },
+    {
+      "claim": "Links, executable evidence, source identity and artifact hashes are valid",
+      "verified": true,
+      "evidence": "explicit link/AST/JSON/line checks plus manifest hashes"
+    }
+  ],
+  "result": "pass"
+}
