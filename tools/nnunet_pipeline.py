@@ -869,6 +869,24 @@ def prepare_source_grid_cases(
     return rows
 
 
+def _validation_target_count(
+    case_count: int, frozen_count: int, request: dict[str, Any]
+) -> int:
+    """T02 re-review: an explicit val_cases count is authoritative; "auto"
+    mode (val_cases=0) sizes validation from the CURRENT dataset total only
+    when no frozen evaluation set exists. With a frozen set, auto mode pins
+    the membership — a growing dataset must not silently enlarge the set
+    that model comparisons were promised on. Only an explicit val_cases
+    count (or an explicit re-split) may add members.
+    """
+    explicit = int(request.get("val_cases") or 0)
+    if explicit > 0:
+        return max(frozen_count, explicit)
+    if frozen_count:
+        return frozen_count
+    return max(1, int(round(case_count * float(request["validation_fraction"]))))
+
+
 def _split_folds(
     rows: list[dict[str, Any]],
     request: dict[str, Any],
@@ -918,12 +936,7 @@ def _split_folds(
                 }
                 for _ in range(5)
             ]
-        target = max(
-            len(frozen),
-            max(1, int(request.get("val_cases") or 0))
-            if int(request.get("val_cases") or 0) > 0
-            else max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
-        )
+        target = _validation_target_count(len(case_ids), len(frozen), request)
         folds: list[dict[str, list[str]]] = []
         for fold_index in range(5):
             # Rotate over whole units (never splitting a patient group) and
@@ -976,12 +989,7 @@ def _split_folds(
             }
             for _ in range(5)
         ]
-    count = max(
-        len(frozen),
-        max(1, int(request.get("val_cases") or 0))
-        if int(request.get("val_cases") or 0) > 0
-        else max(1, int(round(len(case_ids) * float(request["validation_fraction"])))),
-    )
+    count = _validation_target_count(len(case_ids), len(frozen), request)
     count = min(count, len(case_ids) - 1)
     folds = []
     for fold_index in range(5):

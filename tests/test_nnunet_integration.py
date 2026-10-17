@@ -951,6 +951,48 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(["case00"], fold["val"])
             self.assertEqual(3, len(fold["train"]))
 
+    def test_split_folds_auto_fraction_does_not_grow_frozen_validation(self):
+        # T02 re-review: with a frozen evaluation set and "auto" validation
+        # sizing (val_cases=0), growing the dataset from 4 to 8 cases used
+        # to recompute the target from the NEW total and silently add fresh
+        # members to the frozen validation set — model comparisons drifted
+        # without anyone re-splitting. Auto mode now pins the frozen
+        # membership; only an explicit val_cases count may enlarge it, and
+        # patient-group closure may still add a new phase of an already
+        # validated patient.
+        def val_of(count, patient_groups=None, frozen=None, val_cases=0):
+            rows = self._split_rows(count, patient_groups=patient_groups)
+            return pipeline._split_folds(
+                rows,
+                self._request(validation_fraction=0.25, val_cases=val_cases),
+                frozen_validation=frozen,
+            )
+
+        # Ungrouped: case00 was validated at 4 cases; the dataset grows to
+        # 8 — the fold-0 validation membership must not change.
+        small = val_of(4, frozen=["case00"])
+        self.assertEqual(["case00"], small[0]["val"])
+        grown = val_of(8, frozen=["case00"])
+        for fold in grown:
+            self.assertEqual(["case00"], fold["val"],
+                             "auto mode grew the frozen validation set: {}"
+                             .format(fold["val"]))
+            self.assertEqual(7, len(fold["train"]))
+
+        # Grouped multi-phase patients: a NEW phase of an already-validated
+        # patient joins val (group closure), but a new patient never does in
+        # auto mode.
+        groups = {0: "A", 1: "B", 2: "C", 3: "D", 7: "A"}
+        grown_groups = val_of(8, patient_groups=groups, frozen=["case00"])
+        for fold in grown_groups:
+            self.assertEqual({"case00", "case07"}, set(fold["val"]))
+
+        # An explicit val_cases count is still authoritative: it may enlarge
+        # the frozen set (the user asked for that count).
+        explicit = val_of(8, frozen=["case00"], val_cases=2)
+        self.assertEqual(2, len(explicit[0]["val"]))
+        self.assertIn("case00", explicit[0]["val"])
+
     def test_split_folds_grouped_cannot_starve_train_via_window(self):
         # T02: with coarse patient groups the rotation must stop before
         # pulling the last training group into validation.
