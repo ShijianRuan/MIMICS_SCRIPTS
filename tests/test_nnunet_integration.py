@@ -2281,6 +2281,47 @@ class SpatialContractTests(unittest.TestCase):
                 [p.name for p in output.parent.glob("*.staged")], []
             )
 
+    def test_validate_prediction_gzip_reads_are_linear(self):
+        """T01：无 indexed_gzip 的工作站上，逐层校验不得反复从头解压同一
+        前缀。336e99d 实测每层重开句柄 + seek 回卷：96 层文件累计解压
+        49.62 倍体素量、2450 次底层读。回归指标：解压总量近似文件大小、
+        读取次数近似层数（单句柄顺序读）。"""
+        import gzip
+        import nibabel as nib
+        import numpy as np
+
+        reader_cls = getattr(gzip, "_GzipReader", None)
+        if reader_cls is None:
+            self.skipTest("gzip internals changed; probe unavailable")
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "pred.nii.gz"
+            # 随机体素保证 gzip 流不可压缩，解压量即体素量。
+            vol = np.random.default_rng(0).integers(
+                0, 4, (64, 64, 96)).astype(np.uint8)
+            nib.save(nib.Nifti1Image(vol, np.eye(4)), str(path))
+            stats = {"bytes": 0, "reads": 0}
+            orig_read = reader_cls.read
+
+            def counting_read(self, size=-1):
+                data = orig_read(self, size)
+                stats["bytes"] += len(data)
+                stats["reads"] += 1
+                return data
+
+            reader_cls.read = counting_read
+            try:
+                pipeline.validate_prediction_nifti(path)
+            finally:
+                reader_cls.read = orig_read
+            self.assertLessEqual(
+                stats["bytes"], int(vol.nbytes * 1.2) + 4096,
+                "解压总量应近似体素大小（实测 {0} vs {1}）".format(
+                    stats["bytes"], vol.nbytes))
+            self.assertLessEqual(
+                stats["reads"], vol.shape[2] + 10,
+                "读取次数应近似层数（实测 {0}）".format(stats["reads"]))
+
     def test_remote_inference_rejects_changed_source_before_transfer(self):
         import nibabel as nib
         import numpy as np

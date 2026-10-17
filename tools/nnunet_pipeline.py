@@ -1883,42 +1883,58 @@ def validate_prediction_nifti(prediction_path: str | Path) -> None:
     import numpy as np
 
     try:
-        image = nib.load(str(prediction_path))
+        # T01: keep_file_open keeps ONE gzip handle across the slab loop.
+        # The default reopens per slab read and GzipFile.seek then
+        # decompresses the whole prefix again — 49.62x the volume bytes
+        # and 2450 reads for a 96-layer file (measured at 336e99d). One
+        # handle reads the slabs strictly forward: ~1x, ~n reads.
+        image = nib.load(str(prediction_path), keep_file_open=True)
     except Exception as exc:
         raise RuntimeError(
             "The prediction file is not a readable NIfTI image ({}): {}".format(
                 exc, prediction_path
             )
         )
-    if len(image.shape) != 3:
-        raise RuntimeError(
-            "预测文件不是 3D 分割结果（形状 {}）：{}".format(
-                list(image.shape), prediction_path
-            )
-        )
-    for index in range(image.shape[2]):
-        try:
-            slab = np.asanyarray(image.dataobj[..., index])
-        except Exception as exc:
+    try:
+        if len(image.shape) != 3:
             raise RuntimeError(
-                "预测文件的体素数据不完整或已损坏（读取第 {} 层失败：{}）。"
-                "请重新推理或重新下载。".format(index, exc)
+                "预测文件不是 3D 分割结果（形状 {}）：{}".format(
+                    list(image.shape), prediction_path
+                )
             )
-        if not np.isfinite(slab).all():
-            raise RuntimeError(
-                "预测文件包含 NaN/Inf 值，不是有效的分割结果。请重新推理。"
-            )
-        if slab.dtype.kind not in "iub" and not np.array_equal(
-            slab, np.round(slab)
-        ):
-            raise RuntimeError(
-                "预测文件是小数概率值而非整数标签，不是有效的分割结果。"
-                "请检查模型输出设置后重新推理。"
-            )
-        if (slab < 0).any():
-            raise RuntimeError(
-                "预测文件包含负标签值，不是有效的分割结果。请重新推理。"
-            )
+        for index in range(image.shape[2]):
+            try:
+                slab = np.asanyarray(image.dataobj[..., index])
+            except Exception as exc:
+                raise RuntimeError(
+                    "预测文件的体素数据不完整或已损坏（读取第 {} 层失败：{}）。"
+                    "请重新推理或重新下载。".format(index, exc)
+                )
+            if not np.isfinite(slab).all():
+                raise RuntimeError(
+                    "预测文件包含 NaN/Inf 值，不是有效的分割结果。请重新推理。"
+                )
+            if slab.dtype.kind not in "iub" and not np.array_equal(
+                slab, np.round(slab)
+            ):
+                raise RuntimeError(
+                    "预测文件是小数概率值而非整数标签，不是有效的分割结果。"
+                    "请检查模型输出设置后重新推理。"
+                )
+            if (slab < 0).any():
+                raise RuntimeError(
+                    "预测文件包含负标签值，不是有效的分割结果。请重新推理。"
+                )
+    finally:
+        # keep_file_open leaks no handle here: close the opener even on
+        # the failure path, where the raised RuntimeError's traceback
+        # would otherwise keep the proxy (and its Windows file lock)
+        # alive and block the caller's cleanup of the candidate file.
+        # The opener is created lazily on the first voxel read, so it may
+        # be absent when the shape check fails before any read.
+        opener = getattr(image.dataobj, "_opener", None)
+        if opener is not None:
+            opener.close()
 
 
 def publish_prediction_output(
