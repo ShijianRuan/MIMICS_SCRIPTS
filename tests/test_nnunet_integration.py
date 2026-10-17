@@ -501,6 +501,35 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(
                 ["caseA_Kidney Right.nii.gz"], [p.name for p in kidney])
 
+            # T03 re-review: the DOUBLE-underscore layout. The short "_"
+            # separator used to win, so "caseA__Liver-Left" stripped only
+            # "caseA_", the leftover "_Liver-Left" failed the exact pass,
+            # and both exactly-named files collided as ambiguous in lossy
+            # matching. Longest separator must win. (Separate directory so
+            # the single-underscore files above don't add real ambiguity.)
+            flat_dd = Path(tmp) / "labels_dd"
+            flat_dd.mkdir(parents=True)
+            (flat_dd / "caseA__Liver-Left.nii.gz").write_bytes(b"left")
+            (flat_dd / "caseA__Liver_Left.nii.gz").write_bytes(b"underscore")
+            dd_left = pipeline._find_label_files(
+                flat_dd, "caseA", ["Liver-Left"])
+            self.assertEqual(
+                ["caseA__Liver-Left.nii.gz"], [p.name for p in dd_left])
+            dd_underscore = pipeline._find_label_files(
+                flat_dd, "caseA", ["Liver_Left"])
+            self.assertEqual(
+                ["caseA__Liver_Left.nii.gz"], [p.name for p in dd_underscore])
+
+            # Dash and dot prefixes resolve the same way.
+            (flat_dd / "caseA-Spleen-Head.nii.gz").write_bytes(b"sh")
+            (flat_dd / "caseA.Spleen_Head.nii.gz").write_bytes(b"sh2")
+            dash = pipeline._find_label_files(flat_dd, "caseA", ["Spleen-Head"])
+            self.assertEqual(
+                ["caseA-Spleen-Head.nii.gz"], [p.name for p in dash])
+            dot = pipeline._find_label_files(flat_dd, "caseA", ["Spleen_Head"])
+            self.assertEqual(
+                ["caseA.Spleen_Head.nii.gz"], [p.name for p in dot])
+
     def test_prepare_refuses_one_file_claimed_by_two_labels(self):
         """S07: two output labels matching the same source file is a naming
         ambiguity, not voxel overlap — overlap_policy (replace) must not

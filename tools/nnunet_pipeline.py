@@ -356,7 +356,11 @@ def _strip_case_prefix(stem: str, case_id: str) -> str | None:
     case = str(case_id or "")
     if not text or not case:
         return None
-    for separator in ("_", "-", ".", " ", "__"):
+    # T03 re-review: longest separator first. With "_" tried before "__",
+    # "caseA__Liver-Left" matched the SHORT prefix, the leftover label part
+    # started with "_" (failing the exact pass), and both exactly-named
+    # files fell into lossy matching where they collided again.
+    for separator in ("__", "_", "-", ".", " "):
         prefix = "{}{}".format(case, separator)
         if text[: len(prefix)].casefold() == prefix.casefold():
             return text[len(prefix):]
