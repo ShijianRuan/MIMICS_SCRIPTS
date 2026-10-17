@@ -2249,6 +2249,144 @@ class SpatialContractTests(unittest.TestCase):
                 int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 0
             )
 
+    def test_publish_refuses_target_appeared_during_run(self):
+        """S02 轮3：任务启动时目标不存在（记录 absent），运行期间另一任务或
+        人工产生了新结果——发布不得把它静默替换掉：目标留在原地、候选停泊
+        在旁、以冲突失败收场。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            self.assertEqual(
+                common.capture_output_fingerprint(output), common.FINGERPRINT_ABSENT
+            )
+            # A newer result appears while the task "runs".
+            nib.save(
+                nib.Nifti1Image(np.full((2, 2, 2), 3, dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            with self.assertRaises(pipeline.PredictionOutputConflict) as ctx:
+                pipeline.publish_prediction_output(
+                    candidate,
+                    output,
+                    None,
+                    expected_previous_fingerprint=common.FINGERPRINT_ABSENT,
+                )
+            # The newer result stays in place, untouched.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 24
+            )
+            kept = ctx.exception.candidate_path
+            self.assertTrue(kept.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(kept)).dataobj).sum()), 8
+            )
+            self.assertEqual(
+                sorted(p.name for p in output.parent.glob("*.staged*")), []
+            )
+
+    def test_publish_absent_target_publishes_when_still_absent(self):
+        """S02 轮3：启动时不存在、发布时仍不存在——正常首次发布，absent 记录
+        不拦截合法的常规路径。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            out_path, replaced = pipeline.publish_prediction_output(
+                candidate,
+                output,
+                None,
+                expected_previous_fingerprint=common.FINGERPRINT_ABSENT,
+            )
+            self.assertEqual(out_path, output)
+            self.assertIsNone(replaced)
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
+
+    def test_publish_refuses_target_deleted_during_run(self):
+        """S02 轮3：启动时存在（有指纹）、发布前被删除——无法证明没有人在
+        等待它，保守起见不做静默首发布，候选停泊在旁以冲突失败收场。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            started_fingerprint = common.capture_output_fingerprint(output)
+            self.assertNotEqual(started_fingerprint, common.FINGERPRINT_ABSENT)
+            # The recorded target disappears while the task "runs".
+            output.unlink()
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            with self.assertRaises(pipeline.PredictionOutputConflict) as ctx:
+                pipeline.publish_prediction_output(
+                    candidate,
+                    output,
+                    None,
+                    expected_previous_fingerprint=started_fingerprint,
+                )
+            # The target stays absent — nothing was silently created over a
+            # deletion the task could not explain.
+            self.assertFalse(output.exists())
+            kept = ctx.exception.candidate_path
+            self.assertTrue(kept.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(kept)).dataobj).sum()), 8
+            )
+
+    def test_publish_unreadable_start_refuses(self):
+        """S02 轮3：启动时目标存在但不可读（无法取证）——发布时不得当作
+        "无前内容可保护"直接覆盖，保守冲突。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            with mock.patch.object(common, "file_fingerprint", return_value=None):
+                unreadable = common.capture_output_fingerprint(output)
+            self.assertEqual(unreadable, common.FINGERPRINT_UNREADABLE)
+            with self.assertRaises(pipeline.PredictionOutputConflict):
+                pipeline.publish_prediction_output(
+                    candidate,
+                    output,
+                    None,
+                    expected_previous_fingerprint=unreadable,
+                )
+            # The unreadable target is untouched (still the original file).
+            self.assertTrue(output.is_file())
+
     def test_publish_rejects_header_only_truncated_voxels(self):
         """S03: a gzip file with a valid NIfTI header but no voxel payload
         must fail at the publish boundary — nib.load's header read is lazy,

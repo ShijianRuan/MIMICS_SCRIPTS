@@ -119,8 +119,8 @@ def file_fingerprint(path: str | Path) -> str | None:
     """S02: content fingerprint of a prediction output file.
 
     sha256 over the raw bytes — linear in file size, no gzip decode. None
-    when the file is missing or unreadable: the publish conflict check
-    treats that as "no previous content to protect" instead of guessing.
+    when the file is missing or unreadable: callers that need to tell those
+    apart use capture_output_fingerprint instead.
     """
     digest = hashlib.sha256()
     try:
@@ -130,6 +130,57 @@ def file_fingerprint(path: str | Path) -> str | None:
     except OSError:
         return None
     return digest.hexdigest()
+
+
+# S02: start-of-task identity markers for a publish target. A plain None in
+# expected_previous_fingerprint means "caller did not request protection"
+# (legacy calls); these sentinels are explicit recorded states and survive
+# the JSON round-trip through job status files.
+FINGERPRINT_ABSENT = "__absent__"
+FINGERPRINT_UNREADABLE = "__unreadable__"
+
+
+def capture_output_fingerprint(path: str | Path) -> str:
+    """S02: record the publish target's identity as the task starts.
+
+    Distinguishes "target missing" (FINGERPRINT_ABSENT) and "exists but
+    unreadable" (FINGERPRINT_UNREADABLE) from a real content fingerprint,
+    so publish can enforce "still missing" / "still the same" later instead
+    of silently disabling the conflict check when the target was absent.
+    """
+    path = Path(path)
+    if not path.exists():
+        return FINGERPRINT_ABSENT
+    fingerprint = file_fingerprint(path)
+    return FINGERPRINT_UNREADABLE if fingerprint is None else fingerprint
+
+
+def publish_target_conflict(
+    path: str | Path, expected_previous_fingerprint: str | None
+) -> bool:
+    """S02: would publishing to ``path`` overwrite content that changed?
+
+    ``expected_previous_fingerprint`` is what capture_output_fingerprint
+    recorded when the task started. None means the caller did not request
+    protection. Anything the task cannot prove unchanged (appeared, deleted,
+    modified, unreadable) counts as a conflict — conservative, because a
+    silent replace is how a newer human-reviewed result gets lost.
+    """
+    if expected_previous_fingerprint is None:
+        return False
+    path = Path(path)
+    if not path.exists():
+        # Recorded as present (fingerprint or unreadable) but gone at
+        # publish time — it changed during the run.
+        return expected_previous_fingerprint != FINGERPRINT_ABSENT
+    if expected_previous_fingerprint == FINGERPRINT_ABSENT:
+        # The target appeared while the task ran; never silently replace it.
+        return True
+    if expected_previous_fingerprint == FINGERPRINT_UNREADABLE:
+        # Exists now, but its start-of-task content could not be read —
+        # we cannot prove it is unchanged, so refuse to replace it.
+        return True
+    return file_fingerprint(path) != expected_previous_fingerprint
 
 
 def read_json(path: str | Path, default: Any = None) -> Any:

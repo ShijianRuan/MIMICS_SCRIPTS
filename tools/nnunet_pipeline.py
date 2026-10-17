@@ -37,11 +37,13 @@ from nnunet_common import (  # noqa: E402
     TRAINER_ROOT,
     append_log,
     compact_completed_log,
+    capture_output_fingerprint,
     file_fingerprint,
     load_models,
     medical_stem,
     normalize_request,
     path_signature,
+    publish_target_conflict,
     _semantic_label_key,
     read_json,
     register_model,
@@ -1966,10 +1968,11 @@ def publish_prediction_output(
     can never silently destroy a previously reviewed prediction.
 
     S02: when ``expected_previous_fingerprint`` is given (what the target
-    contained when the task started), a target that changed while the task
-    ran — another publish or a manual edit — is never silently replaced:
-    the validated candidate is parked next to it and
-    ``PredictionOutputConflict`` is raised.
+    contained when the task started, via capture_output_fingerprint), a
+    target that changed while the task ran — another publish, a manual
+    edit, the file appearing, or the recorded file being deleted — is
+    never silently replaced: the validated candidate is parked next to it
+    and ``PredictionOutputConflict`` is raised.
 
     Returns ``(output_path, replaced_path)``. ``replaced_path`` is None when
     there was no previous output; otherwise it is the kept-aside copy of the
@@ -2025,28 +2028,25 @@ def publish_prediction_output(
         # Validate the copy we are about to publish, not just the source:
         # a partial copy (disk full mid-write) must fail here, not in Mimics.
         validate_prediction_nifti(staging)
+        if publish_target_conflict(output_path, expected_previous_fingerprint):
+            # S02: the target changed while the task ran — modified,
+            # appeared, deleted, or unreadable at start. Keep BOTH: the
+            # newer target stays in place (or stays absent), the validated
+            # candidate parks next to it — never a silent replace.
+            kept = output_path.with_name(
+                "{}.candidate-{}{}".format(
+                    output_path.stem, uuid.uuid4().hex[:8],
+                    "".join(output_path.suffixes),
+                )
+            )
+            os.replace(str(staging), str(kept))
+            raise PredictionOutputConflict(
+                "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），"
+                "为避免覆盖较新的结果，本次预测未替换它。"
+                "本次预测已保留在：{}".format(kept),
+                kept,
+            )
         if output_path.exists():
-            if (
-                expected_previous_fingerprint is not None
-                and file_fingerprint(output_path) != expected_previous_fingerprint
-            ):
-                # S02: the target changed while the task ran (another
-                # publish or a manual edit). Keep BOTH: the newer target
-                # stays in place, the validated candidate parks next to it —
-                # never a silent replace of the newer result.
-                kept = output_path.with_name(
-                    "{}.candidate-{}{}".format(
-                        output_path.stem, uuid.uuid4().hex[:8],
-                        "".join(output_path.suffixes),
-                    )
-                )
-                os.replace(str(staging), str(kept))
-                raise PredictionOutputConflict(
-                    "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），"
-                    "为避免覆盖较新的结果，本次预测未替换它。"
-                    "本次预测已保留在：{}".format(kept),
-                    kept,
-                )
             # Stamp BEFORE the suffixes so the kept-aside copy keeps a
             # recognizable .nii.gz name (nibabel and Mimics can open it
             # directly on the recovery path).
@@ -2499,8 +2499,10 @@ def run_inference(job_dir: Path) -> int:
     output_path = Path(str(request.get("output_path") or job_dir / "prediction.nii.gz")).resolve()
     # S02: fingerprint the publish target as the task starts, so a long
     # run cannot silently replace a result that changed meanwhile (another
-    # publish or a manual edit).
-    previous_output_fingerprint = file_fingerprint(output_path)
+    # publish or a manual edit). capture_output_fingerprint records "absent"
+    # explicitly — a target that appears later is a conflict, not a green
+    # light to publish over it.
+    previous_output_fingerprint = capture_output_fingerprint(output_path)
     roots = _runtime_roots(request)
     update_status(
         status_path,

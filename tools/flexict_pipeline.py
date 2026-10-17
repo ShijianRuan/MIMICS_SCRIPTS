@@ -54,6 +54,7 @@ from flexict_common import (  # noqa: E402
 from nnunet_common import (  # noqa: E402
     append_log,
     compact_completed_log,
+    capture_output_fingerprint,
     file_fingerprint,
     read_json,
     replace_with_retry,
@@ -1312,8 +1313,10 @@ def run_inference(job_dir: Path) -> int:
         str(request.get("output_path") or job_dir / "prediction.nii.gz")).resolve()
     # S02: fingerprint the publish target as the task starts, so a long
     # run cannot silently replace a result that changed meanwhile (another
-    # publish or a manual edit).
-    previous_output_fingerprint = file_fingerprint(output_path)
+    # publish or a manual edit). capture_output_fingerprint records "absent"
+    # explicitly — a target that appears later is a conflict, not a green
+    # light to publish over it.
+    previous_output_fingerprint = capture_output_fingerprint(output_path)
     roots = _runtime_roots(request)
     update_status(
         status_path,

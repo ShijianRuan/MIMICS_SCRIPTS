@@ -1444,7 +1444,7 @@ def _prepare_nnunet_infer(
     spec: dict[str, Any], bundle: Path
 ) -> dict[str, Any]:
     from tools.nnunet_common import (
-        file_fingerprint,
+        capture_output_fingerprint,
         normalize_request,
         path_signature,
         read_json as read_nnunet_json,
@@ -1466,9 +1466,11 @@ def _prepare_nnunet_infer(
     # S02: fingerprint the publish target as the remote task starts. The
     # long remote run must not silently replace a result that changed
     # meanwhile; the finalize publish compares against this record.
+    # capture_output_fingerprint records "absent" explicitly — a target
+    # that appears during the remote run is a conflict, not a green light.
     _status_update(
         Path(spec["status_path"]).resolve(),
-        expected_previous_output_fingerprint=file_fingerprint(
+        expected_previous_output_fingerprint=capture_output_fingerprint(
             Path(str(request.get("output_path") or "")).expanduser().resolve()
         ),
     )
@@ -1730,7 +1732,7 @@ def _prepare_flexict_infer(
 ) -> dict[str, Any]:
     from tools.flexict_pipeline import normalize_flexict_request
     from tools.nnunet_common import (
-        file_fingerprint,
+        capture_output_fingerprint,
         path_signature,
         read_json as read_flexict_json,
         safe_identifier as flexict_safe_identifier,
@@ -1748,9 +1750,11 @@ def _prepare_flexict_infer(
     # S02: fingerprint the publish target as the remote task starts. The
     # long remote run must not silently replace a result that changed
     # meanwhile; the finalize publish compares against this record.
+    # capture_output_fingerprint records "absent" explicitly — a target
+    # that appears during the remote run is a conflict, not a green light.
     _status_update(
         Path(spec["status_path"]).resolve(),
-        expected_previous_output_fingerprint=file_fingerprint(
+        expected_previous_output_fingerprint=capture_output_fingerprint(
             Path(str(request.get("output_path") or "")).expanduser().resolve()
         ),
     )

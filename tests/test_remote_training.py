@@ -4878,6 +4878,48 @@ class RemotePredictionPublishTests(unittest.TestCase):
                 int(np.asarray(nib.load(str(kept)).dataobj).sum()), 64
             )
 
+    def test_apply_refuses_target_appeared_since_prepare(self):
+        """S02 轮3：prepare 时目标不存在（absent 记录落盘），远程运行期间
+        目标被另一任务或人工产生——finalize 的发布不得静默替换它。"""
+        import nibabel as nib
+        import numpy as np
+        import tools.nnunet_pipeline as nnunet_pipeline_module
+        from tools.nnunet_common import FINGERPRINT_ABSENT
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            bundle = self._download_dir(
+                root,
+                self._nifti_bytes(
+                    np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                ),
+            )
+            spec = self._spec(root, output)
+            # The prepare phase records the target as absent when the remote
+            # task starts (nothing exists at the output path yet).
+            remote_compute.write_json_atomic(
+                Path(spec["status_path"]),
+                {"expected_previous_output_fingerprint": FINGERPRINT_ABSENT},
+            )
+            # A newer result appears while the remote task runs.
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((4, 4, 4), 3, dtype=np.uint8), np.eye(4)
+                ),
+                str(output),
+            )
+            with self.assertRaises(
+                nnunet_pipeline_module.PredictionOutputConflict
+            ):
+                controller._apply_remote_prediction_output(
+                    spec, "nnunet_infer", bundle, {}
+                )
+            # The appeared result stays in place, untouched.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 192
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
