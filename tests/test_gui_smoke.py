@@ -2228,6 +2228,207 @@ class TestFlexictStopBehaviour(unittest.TestCase):
             window.window.close()
 
 
+class TestRestorePreviousOffGuiThread(unittest.TestCase):
+    """U02: restoring an old output runs checksums + a file swap; on a slow
+    workspace that must not freeze the viewer. The swap runs on a worker,
+    the result dialog (success or failure) is polled back on the GUI thread,
+    and a second click while one restore is in flight is rejected."""
+
+    def _wait_until(self, condition, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not condition():
+            _AppFixture.app().processEvents()
+            time.sleep(0.02)
+        return condition()
+
+    def _test_success_runs_off_gui_thread(self, module_name):
+        _AppFixture.app()
+        import importlib
+
+        module = importlib.import_module(module_name)
+        window = module.StatusWindow({"workspace": ""}, QT)
+        window.refresher.stop()
+        window.refresher = mock.Mock()
+        io_threads = []
+        started = threading.Event()
+
+        def slow_restore(status_path):
+            io_threads.append(threading.current_thread())
+            started.set()
+            time.sleep(0.2)  # slow storage: checksums over a big file
+
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "information"
+            ) as info, mock.patch(
+                module_name + ".restore_replaced_output", slow_restore
+            ):
+                window._restore_previous({"status_path": "X:/j/status.json"})
+                self.assertTrue(
+                    started.wait(5.0), "restore never started on the worker"
+                )
+                self.assertTrue(
+                    window._restore_busy, "busy flag not set while in flight"
+                )
+                # While the worker is blocked in IO the GUI thread keeps
+                # servicing events — the timer-driven poll completes it.
+                self.assertTrue(
+                    self._wait_until(lambda: not window._restore_busy),
+                    "GUI thread stayed blocked for the whole restore",
+                )
+                info.assert_called_once()
+                self.assertIn("已恢复旧结果", info.call_args[0][1])
+                window.refresher.request.assert_called_once()
+            self.assertEqual(
+                len(io_threads), 1, "restore must run exactly once"
+            )
+            self.assertNotIn(
+                threading.current_thread(), io_threads,
+                "restore IO must run off the GUI thread",
+            )
+        finally:
+            window.window.close()
+
+    def test_nnunet_success_runs_off_gui_thread(self):
+        self._test_success_runs_off_gui_thread("nnunet_status_viewer")
+
+    def test_flexict_success_runs_off_gui_thread(self):
+        self._test_success_runs_off_gui_thread("flexict_status_viewer")
+
+    def _test_second_click_while_busy_is_rejected(self, module_name):
+        _AppFixture.app()
+        import importlib
+
+        module = importlib.import_module(module_name)
+        window = module.StatusWindow({"workspace": ""}, QT)
+        window.refresher.stop()
+        window.refresher = mock.Mock()
+        release = threading.Event()
+        started = threading.Event()
+
+        swap_calls = []
+
+        def blocked_restore(status_path):
+            swap_calls.append(status_path)
+            started.set()
+            release.wait(5.0)
+
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "information"
+            ) as info, mock.patch(
+                module_name + ".restore_replaced_output", blocked_restore
+            ):
+                window._restore_previous({"status_path": "X:/j/status.json"})
+                self.assertTrue(started.wait(5.0))
+                # Second click while the first swap is still in flight.
+                window._restore_previous({"status_path": "X:/j/status.json"})
+                self.assertEqual(
+                    len(info.call_args_list), 1,
+                    "second click must be rejected with a busy notice",
+                )
+                self.assertIn("仍在进行中", info.call_args_list[0].args[2])
+                release.set()
+                self.assertTrue(
+                    self._wait_until(lambda: not window._restore_busy)
+                )
+            # Exactly one swap ran: the file exchange must not repeat.
+            self.assertEqual(swap_calls, ["X:/j/status.json"])
+            window.refresher.request.assert_called_once()
+        finally:
+            release.set()
+            window.window.close()
+
+    def test_nnunet_second_click_while_busy_is_rejected(self):
+        self._test_second_click_while_busy_is_rejected("nnunet_status_viewer")
+
+    def test_flexict_second_click_while_busy_is_rejected(self):
+        self._test_second_click_while_busy_is_rejected("flexict_status_viewer")
+
+    def _test_failure_reported_on_gui_thread(self, module_name):
+        _AppFixture.app()
+        import importlib
+
+        module = importlib.import_module(module_name)
+        window = module.StatusWindow({"workspace": ""}, QT)
+        window.refresher.stop()
+        window.refresher = mock.Mock()
+
+        def failing_restore(status_path):
+            raise RuntimeError("swap failed on read-only storage")
+
+        try:
+            with mock.patch.object(
+                window.QtWidgets.QMessageBox, "critical"
+            ) as crit, mock.patch.object(
+                window.QtWidgets.QMessageBox, "information"
+            ) as info, mock.patch(
+                module_name + ".restore_replaced_output", failing_restore
+            ):
+                window._restore_previous({"status_path": "X:/j/status.json"})
+                self.assertTrue(
+                    self._wait_until(lambda: not window._restore_busy),
+                    "failed restore never drained back to the GUI thread",
+                )
+                crit.assert_called_once()
+                self.assertIn("swap failed", crit.call_args[0][2])
+                info.assert_not_called()
+                window.refresher.request.assert_called_once()
+        finally:
+            window.window.close()
+
+    def test_nnunet_failure_reported_on_gui_thread(self):
+        self._test_failure_reported_on_gui_thread("nnunet_status_viewer")
+
+    def test_flexict_failure_reported_on_gui_thread(self):
+        self._test_failure_reported_on_gui_thread("flexict_status_viewer")
+
+    def test_close_event_stops_restore_poll(self):
+        """Closing the window mid-restore must not leave the poll timer
+        firing on a torn-down window."""
+        _AppFixture.app()
+        for module_name in ("nnunet_status_viewer", "flexict_status_viewer"):
+            with self.subTest(module=module_name):
+                import importlib
+
+                module = importlib.import_module(module_name)
+                window = module.StatusWindow({"workspace": ""}, QT)
+                release = threading.Event()
+                started = threading.Event()
+
+                def blocked_restore(status_path):
+                    started.set()
+                    release.wait(5.0)
+
+                try:
+                    with mock.patch(
+                        module_name + ".restore_replaced_output",
+                        blocked_restore,
+                    ):
+                        window._restore_previous(
+                            {"status_path": "X:/j/status.json"}
+                        )
+                        self.assertTrue(started.wait(5.0))
+                        window._close_event(mock.Mock())
+                        self.assertFalse(window._restore_timer.isActive())
+                        release.set()
+                        # The worker finishes, but with the poll timer
+                        # stopped its receipt must not touch the window.
+                        self.assertTrue(
+                            self._wait_until(
+                                lambda: not window._restore_results.empty()
+                            ),
+                            "worker never finished",
+                        )
+                        self.assertTrue(
+                            window._restore_busy,
+                            "closed window must not re-enter GUI code",
+                        )
+                finally:
+                    release.set()
+                    window.window.close()
+
+
 class TestActiveLearningWindow(unittest.TestCase):
     """F03/T03 + F14/T14: the AL review window with real data rows.
 

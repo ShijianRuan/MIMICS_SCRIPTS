@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -226,6 +228,14 @@ class StatusWindow:
             on_error=lambda: self.live_label.setText("● 上次刷新失败"),
         )
         self.refresher.refresh_now()
+        # U02: restoring an old output runs voxel checks + checksums + a
+        # file swap; on a slow workspace that stalls the GUI thread. The
+        # swap runs on a worker, the result is polled back on the GUI thread.
+        self._restore_results = queue.Queue()
+        self._restore_busy = False
+        self._restore_timer = self.QtCore.QTimer(self.window)
+        self._restore_timer.setInterval(100)
+        self._restore_timer.timeout.connect(self._poll_restore_result)
         # A closed window must stop collecting: the hidden heartbeat kept
         # polling forever, and timers firing while the window is torn down
         # corrupt the heap.
@@ -233,6 +243,7 @@ class StatusWindow:
 
     def _close_event(self, event):
         self.refresher.stop()
+        self._restore_timer.stop()
 
     def _collect(self):
         """Snapshot everything the UI needs (runs on a worker thread)."""
@@ -524,16 +535,40 @@ class StatusWindow:
             self._restore_previous(status)
 
     def _restore_previous(self, status):
-        try:
-            restore_replaced_output(status["status_path"])
-        except Exception as exc:
-            self.QtWidgets.QMessageBox.critical(
-                self.window, "恢复失败", str(exc)
+        if self._restore_busy:
+            self.QtWidgets.QMessageBox.information(
+                self.window, "正在恢复", "上一个恢复操作仍在进行中，请稍候。"
             )
             return
-        self.QtWidgets.QMessageBox.information(
-            self.window, "已恢复旧结果", "旧结果已恢复为当前结果。"
-        )
+        self._restore_busy = True
+
+        def worker():
+            try:
+                restore_replaced_output(status["status_path"])
+                self._restore_results.put(None)
+            except Exception as exc:
+                self._restore_results.put(str(exc))
+
+        thread = threading.Thread(target=worker)
+        thread.daemon = True
+        thread.start()
+        self._restore_timer.start()
+
+    def _poll_restore_result(self):
+        try:
+            error = self._restore_results.get_nowait()
+        except queue.Empty:
+            return
+        self._restore_timer.stop()
+        self._restore_busy = False
+        if error is None:
+            self.QtWidgets.QMessageBox.information(
+                self.window, "已恢复旧结果", "旧结果已恢复为当前结果。"
+            )
+        else:
+            self.QtWidgets.QMessageBox.critical(
+                self.window, "恢复失败", error
+            )
         # Post-action refresh goes through the background refresher (铁律 1).
         self.refresher.request()
 
