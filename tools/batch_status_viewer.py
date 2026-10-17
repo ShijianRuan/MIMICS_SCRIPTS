@@ -123,16 +123,22 @@ def _row(kind, label, payload, status_path, job_dir=""):
 def receipt_failure_note(row):
     """S01: the visible note when a created project's undo receipt could
     not be written. The project itself is fine, but without the receipt it
-    cannot be undone — the annotator must know which cases are affected
-    and that the write is retried automatically."""
+    cannot be undone — the annotator must know which cases are affected.
+    S01 round 3: the wording matches reality — the automatic retry only
+    runs while the background task is alive; a closed task that still
+    shows the failure must not claim "正在自动补写"."""
     if not row.get("receipt_failed"):
         return ""
     cases = row.get("receipt_failed_cases") or ""
+    if str(row.get("status") or "") in ("closed", "cancelled"):
+        tail = "任务已结束，重新运行导入任务后会自动补写"
+    else:
+        tail = "正在自动补写"
     if cases:
-        return "{0} 例工程已生成但撤销记录写入失败（{1}），正在自动补写".format(
-            row["receipt_failed"], cases)
-    return "{0} 例工程已生成但撤销记录写入失败，正在自动补写".format(
-        row["receipt_failed"])
+        return "{0} 例工程已生成但撤销记录写入失败（{1}），{2}".format(
+            row["receipt_failed"], cases, tail)
+    return "{0} 例工程已生成但撤销记录写入失败，{1}".format(
+        row["receipt_failed"], tail)
 
 
 def _scan_status_dir(rows, kind, base, status_name="status.json"):

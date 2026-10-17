@@ -3930,6 +3930,166 @@ class TestCreateMcsBatch(unittest.TestCase):
         self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
         self.assertEqual([], create_mcs_batch.flush_pending_receipts(runtime_dir))
 
+    def test_pending_receipt_flush_replaces_older_receipt(self):
+        """S01 轮3验收：同病例重新导入后，上一轮回执仍留在工程旁。补写不得
+        把旧回执当作本次导入的证据（旧 GUID/旧指纹指向已不存在的工程对象）
+        ——必须以本次导入的快照载荷原子替换它。"""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        mcs_path = os.path.join(output_dir, "case_s01d.mcs")
+        os.makedirs(output_dir)
+        with open(mcs_path, "w") as handle:
+            handle.write("new-import-bytes")
+
+        receipt_path = create_mcs_batch._receipt_path_for(mcs_path, "case_s01d")
+        # Yesterday's import left its receipt behind (old masks, old source).
+        old_payload = create_mcs_batch._import_receipt_payload(
+            "case_s01d", mcs_path, ["Liver-Old"], {"source_fingerprint": "old"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver-Old", "g-old", 4, "")],
+        )
+        old_payload["created_at_epoch"] = 1000.0
+        create_mcs_batch.write_json_atomic(receipt_path, old_payload)
+
+        # Today's re-import snapshot is queued after its write failed.
+        new_payload = create_mcs_batch._import_receipt_payload(
+            "case_s01d", mcs_path, ["Liver"], {"source_fingerprint": "new"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver", "g-new", 4, "")],
+        )
+        new_payload["created_at_epoch"] = 2000.0
+        create_mcs_batch._write_pending_receipts(runtime_dir, {
+            "case_s01d": {
+                "receipt_path": receipt_path,
+                "payload": new_payload,
+                "failed_at_epoch": 2001.0,
+            }
+        })
+
+        healed = create_mcs_batch.flush_pending_receipts(runtime_dir)
+        self.assertEqual(["case_s01d"], healed)
+        receipt = json.load(open(receipt_path, "r", encoding="utf-8"))
+        self.assertEqual("new", receipt["source_fingerprint"])
+        self.assertEqual(2000.0, receipt["created_at_epoch"])
+        self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
+
+    def test_pending_receipt_flush_identical_receipt_heals_without_rewrite(self):
+        """S01 轮3验收：磁盘回执与待写载荷属于同一次导入（事务摘要一致）——
+        直接视为已补写，且不改写文件内容。"""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        mcs_path = os.path.join(output_dir, "case_s01e.mcs")
+        os.makedirs(output_dir)
+        with open(mcs_path, "w") as handle:
+            handle.write("import-time-bytes")
+
+        payload = create_mcs_batch._import_receipt_payload(
+            "case_s01e", mcs_path, ["Liver"], {"source_fingerprint": "sf"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver", "g1", 4, "")],
+        )
+        receipt_path = create_mcs_batch._receipt_path_for(mcs_path, "case_s01e")
+        # The receipt actually landed on disk (e.g. the failure report was a
+        # false alarm); the same payload is still queued.
+        create_mcs_batch.write_json_atomic(receipt_path, payload)
+        with open(receipt_path, "rb") as handle:
+            before = handle.read()
+        create_mcs_batch._write_pending_receipts(runtime_dir, {
+            "case_s01e": {
+                "receipt_path": receipt_path,
+                "payload": payload,
+                "failed_at_epoch": 1.0,
+            }
+        })
+
+        healed = create_mcs_batch.flush_pending_receipts(runtime_dir)
+        self.assertEqual(["case_s01e"], healed)
+        with open(receipt_path, "rb") as handle:
+            self.assertEqual(before, handle.read())
+        self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
+
+    def test_pending_receipt_flush_corrupt_receipt_replaced(self):
+        """S01 轮3验收：回执文件损坏（不可解析 JSON）——不能被当作有效证据，
+        补写时以快照载荷原子替换。"""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        mcs_path = os.path.join(output_dir, "case_s01f.mcs")
+        os.makedirs(output_dir)
+        with open(mcs_path, "w") as handle:
+            handle.write("import-time-bytes")
+
+        receipt_path = create_mcs_batch._receipt_path_for(mcs_path, "case_s01f")
+        with open(receipt_path, "w") as handle:
+            handle.write("{not json at all")
+
+        payload = create_mcs_batch._import_receipt_payload(
+            "case_s01f", mcs_path, ["Liver"], {"source_fingerprint": "sf"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver", "g1", 4, "")],
+        )
+        create_mcs_batch._write_pending_receipts(runtime_dir, {
+            "case_s01f": {
+                "receipt_path": receipt_path,
+                "payload": payload,
+                "failed_at_epoch": 1.0,
+            }
+        })
+
+        healed = create_mcs_batch.flush_pending_receipts(runtime_dir)
+        self.assertEqual(["case_s01f"], healed)
+        receipt = json.load(open(receipt_path, "r", encoding="utf-8"))
+        self.assertEqual("sf", receipt["source_fingerprint"])
+        self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
+
+    def test_pending_receipt_flush_stale_pending_keeps_newer_receipt(self):
+        """S01 轮3验收：磁盘回执比待写记录新（待办是过期残留）——保留磁盘
+        版本不改写，且该病例计为已补写（撤销证据已在盘上）。"""
+        import create_mcs_batch
+
+        output_dir = os.path.join(self.tmp, "output")
+        runtime_dir = os.path.join(self.tmp, "local_queue")
+        mcs_path = os.path.join(output_dir, "case_s01g.mcs")
+        os.makedirs(output_dir)
+        with open(mcs_path, "w") as handle:
+            handle.write("new-import-bytes")
+
+        # The newer import wrote its receipt successfully...
+        newer_payload = create_mcs_batch._import_receipt_payload(
+            "case_s01g", mcs_path, ["Liver"], {"source_fingerprint": "new"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver", "g-new", 4, "")],
+        )
+        newer_payload["created_at_epoch"] = 2000.0
+        receipt_path = create_mcs_batch._receipt_path_for(mcs_path, "case_s01g")
+        create_mcs_batch.write_json_atomic(receipt_path, newer_payload)
+        # ...but an older queued entry from a previous attempt lingers.
+        older_payload = create_mcs_batch._import_receipt_payload(
+            "case_s01g", mcs_path, ["Liver-Old"], {"source_fingerprint": "old"},
+            mask_objects=[
+                create_mcs_batch._MaskIdentity("Liver-Old", "g-old", 4, "")],
+        )
+        older_payload["created_at_epoch"] = 1000.0
+        create_mcs_batch._write_pending_receipts(runtime_dir, {
+            "case_s01g": {
+                "receipt_path": receipt_path,
+                "payload": older_payload,
+                "failed_at_epoch": 1001.0,
+            }
+        })
+
+        healed = create_mcs_batch.flush_pending_receipts(runtime_dir)
+        self.assertEqual(["case_s01g"], healed)
+        receipt = json.load(open(receipt_path, "r", encoding="utf-8"))
+        self.assertEqual("new", receipt["source_fingerprint"])
+        self.assertEqual(2000.0, receipt["created_at_epoch"])
+        self.assertEqual({}, create_mcs_batch._read_pending_receipts(runtime_dir))
+
     def test_publish_failure_leaves_no_consumable_receipt(self):
         """F30 failure path: when the publish (staging rename) fails, the
         receipt must NOT be written — a receipt whose target never arrived
@@ -8088,6 +8248,11 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("1 例工程已生成但撤销记录写入失败", note)
         self.assertIn("case_s01b", note)
         self.assertIn("自动补写", note)
+        # S01 re-review round 3: the note must not claim an automatic retry
+        # is in flight after the task has ended.
+        self.assertIn("任务已结束", note)
+        running = dict(row, status="running")
+        self.assertIn("正在自动补写", viewer.receipt_failure_note(running))
         # No receipt failure -> no note (rows stay clean).
         clean = dict(row, receipt_failed=0)
         self.assertEqual("", viewer.receipt_failure_note(clean))

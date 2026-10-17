@@ -347,11 +347,44 @@ def _write_pending_receipts(output_dir, pending):
         _remove_file(path)
 
 
+def _receipt_payload_digest(payload):
+    """S01 round 3: stable digest identifying ONE import transaction.
+
+    Two receipts with the same digest describe the same import (same case,
+    project path, import-time fingerprint, masks, provenance). Used to tell
+    "this import's receipt is already on disk" apart from "an older import
+    of the same case left its receipt behind".
+    """
+    if not isinstance(payload, dict):
+        return ""
+    try:
+        import hashlib
+
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _receipt_epoch(payload):
+    try:
+        return float(payload.get("created_at_epoch") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def flush_pending_receipts(output_dir):
     """Retry the pending receipt writes; return the case ids that succeeded.
 
-    Idempotent: an entry whose receipt already exists on disk is dropped
-    (undo has its evidence). Failures stay queued for the next scan.
+    S01 round 3: a receipt file merely EXISTING no longer counts as healed.
+    It is only this import's evidence when its transaction digest matches
+    the queued payload — an older import's receipt (or a corrupt file) at
+    the same path must not be mistaken for the missing undo record. When
+    the on-disk receipt belongs to an older import it is replaced with the
+    queued payload (the authoritative record for the project now at that
+    path); a queued payload OLDER than the on-disk receipt is stale and
+    dropped. Every heal is verified by reading the receipt back before it
+    is reported. Failures stay queued for the next scan.
     """
     pending = _read_pending_receipts(output_dir)
     written = []
@@ -363,13 +396,40 @@ def flush_pending_receipts(output_dir):
             del pending[case_id]
             continue
         try:
-            if not os.path.isfile(receipt_path):
-                write_json_atomic(receipt_path, payload)
-            del pending[case_id]
-            written.append(str(case_id))
-            log_message(
-                output_dir,
-                "补写导入回执成功：{0}".format(receipt_path))
+            payload_digest = _receipt_payload_digest(payload)
+            existing = None
+            if os.path.isfile(receipt_path):
+                existing = runtime_common.read_json(receipt_path, None)
+            if isinstance(existing, dict):
+                if payload_digest and _receipt_payload_digest(existing) == payload_digest:
+                    # Same transaction already on disk — healed earlier.
+                    del pending[case_id]
+                    written.append(str(case_id))
+                    continue
+                if _receipt_epoch(existing) > _receipt_epoch(payload):
+                    # The receipt on disk is NEWER than the queued payload:
+                    # the queue entry is stale, the disk record stands. The
+                    # case HAS its undo evidence, so it counts as healed.
+                    log_message(
+                        output_dir,
+                        "补写完成（磁盘回执比待写记录新，保留磁盘版本）：{0}".format(
+                            receipt_path))
+                    del pending[case_id]
+                    written.append(str(case_id))
+                    continue
+                # Older import's receipt (or a corrupt/unreadable file):
+                # replace it with this import's queued record.
+            write_json_atomic(receipt_path, payload)
+            verified = runtime_common.read_json(receipt_path, None)
+            if payload_digest and isinstance(verified, dict) and (
+                _receipt_payload_digest(verified) == payload_digest
+            ):
+                del pending[case_id]
+                written.append(str(case_id))
+                log_message(
+                    output_dir,
+                    "补写导入回执成功：{0}".format(receipt_path))
+            # Verification mismatch keeps the entry queued for the next scan.
         except Exception:
             pass  # still unwritable — retried on the next scan
     _write_pending_receipts(output_dir, pending)
