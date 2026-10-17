@@ -5989,3 +5989,65 @@ uncertainty_log 为 status payload 字段扩展，复用既有合并写通道）
 ### 外部资源使用
 
 本轮未使用远程服务器与真实数据集（纯本机修复），无清理义务。
+
+## 修复轮 2 · 336e99d 复审销项轮（2026-10-17）
+
+> 用户指令：修复 `docs/reviews/2026-10-17-336e99d-revalidation.md`（轮 2
+> 复审）的 8 张开放卡，作为第二轮修复（轮 2/3）。8 卡全部关闭：
+> P1×5（S06/S10/S01/S02/T02）、P2×3（T03/T04/T01）。
+
+### 修复清单（8 commit，按提交顺序）
+
+| 卡 | 优先级 | commit | 一句话 |
+|---|---|---|---|
+| S06 | P1 | `791b5b1` | 部分缺像素间距不再绕过校验，全部缺位置拒绝造网格 |
+| T02 | P1 | `b1498b3` | 冻结拆分不扩验证集、不写空训练折 |
+| S10 | P1 | `5a90d35` | 不确定度目录 UUID 消歧，排名/辅助带只消费本轮成功清单 |
+| S01 | P1 | `f60c231` | 回执失败在状态窗口可见，载荷入册跨重启自动补写 |
+| T03 | P2 | `a4a8d29` | 平铺标签格式先剥病例前缀再做语义精确匹配 |
+| T04 | P2 | `19c3368` | 标注状态写入改单一顺序工作线程，最后意图必胜 |
+| T01 | P2 | `48a9d29` | 发布前校验 gzip 预测改单句柄线性读取，49.6 倍解压降为 1 倍 |
+| S02 | P1 | `e336b03` | 预测发布指纹核对 + 冲突保留候选 + 旧结果找回/恢复入口 |
+
+每卡详情、失败路径测试与 smoke 工件号见
+`docs/reviews/2026-10-17-336e99d-revalidation.json` 各卡 fix_note。
+
+### S02 设计要点（本轮最大改动）
+
+任务起点捕获旧输出指纹 → 发布前核对：目标变化则把本次预测移入
+`.candidate-<hex8>` 副本并抛 `PredictionOutputConflict`（不静默覆盖较新
+结果）。本地 nnunet/flexict、远程 prepare/finalize、恢复旧结果三处走同一
+`file_fingerprint` 保护；远程 `replaced_previous_output` 指针在
+`_apply_remote_prediction_output` 内直接持久化（补上此前从未落盘的缺口）。
+两个状态查看器新增「旧结果…」入口：查看替换说明与旧版本时间、打开旧
+文件位置、一键交换恢复（恢复前验证旧文件、双向指纹拒绝被改动侧、失败
+回滚）。
+
+### 门禁
+
+- 每卡独立 smoke 8/8（工件 20261017T054201 / 055746 / 064726 / 071906 /
+  072935 / 115824 / 124022 / 141508）。
+- 轮末 fast 门禁一次通过 30/30（工件 20261017T143045_fast.json）。
+- 定向验证：nnunet+GUI 226 passed、flexict 148 passed（S02 收尾全量组）。
+
+### 技术坑记录（本轮发现）
+
+- `.candidate-<hex>` 后缀戳必须用 `"".join(path.suffixes)` 拼回完整
+  后缀链（`.nii.gz` 两段），单用 `.suffix` 会破坏 nibabel 识别——与轮 1
+  的 `.replaced-` 戳同一条坑。
+- `update_status(key=None)` 是清除语义；远程 status 合并从 local 全量
+  读起，prepare 期写入的字段才能存活到 finalize。
+- viewer 测试模式：`jobs.setCurrentRow(n)` 触发 `_show_selected_job`，
+  nnunet 侧需 mock `_selected_task`，flexict 侧不需。
+
+### 净代码变化
+
++1685/−155 净 +1530（产品 +806/−143 净 +663 / 测试 +879/−12 净 +867，
+16 文件）。新增维护面：新函数 2（`restore_replaced_output`、
+`reveal_in_file_manager`）+ 新异常类 1（`PredictionOutputConflict`）+
+status 新字段 3 + 「旧结果…」按钮 ×2 viewer；0 新文件/配置项/依赖。
+21 个新失败路径测试。
+
+### 外部资源使用
+
+本轮未使用远程服务器与真实数据集（纯本机修复），无清理义务。

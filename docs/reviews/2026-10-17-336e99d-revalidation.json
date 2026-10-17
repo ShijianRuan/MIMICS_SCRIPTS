@@ -81,7 +81,7 @@
       "id": "S01",
       "priority": "P1",
       "title": "回执类型错误已修，但回执失败仍被界面归为零失败且缺少补写恢复入口",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S01",
         "R03",
@@ -120,13 +120,14 @@
         "重启后补写成功，不重新创建工程、不覆盖人工修正；再次失败可继续重试。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "write_import_receipt 拆出 _import_receipt_payload：回执写失败时把同一份载荷（含导入时刻 .mcs 指纹）快照进 pending_receipts.json，跨工作目录清理存活；每次扫描循环先 flush 待补写——写成功出册计数回落、已存在回执幂等出册、失败保持入册等下一轮，跨重启自愈且不重算指纹（用户事后编辑不被补写刷新）。状态新增 receipt_failed_cases（resume 沿袭），viewer 行携带并在错误列显示「N 例工程已生成但撤销记录写入失败…正在自动补写」。测试：test_pending_receipt_flush_heals_across_restart（补写锚定导入时指纹、幂等出册）、test_batch_status_viewer_surfaces_receipt_failures（界面可见、无失败零噪音）。验证：commit f60c231、smoke 8/8（工件 20261017T071906_smoke.json）。"
     },
     {
       "id": "S02",
       "priority": "P1",
       "title": "旧预测已保留，但覆盖授权与用户可理解的找回路径尚未接通",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S02",
         "R10",
@@ -165,13 +166,14 @@
         "两个任务及人工修改交错时，不静默替换较新的结果，恢复操作不损坏当前版本。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "任务启动时对发布目标取内容指纹（file_fingerprint，sha256 线性读原始字节）：本地 nnunet/FlexiCT run_inference 启动捕获、远程 prepare 阶段写入 status.json；发布时指纹不符（目标被另一发布或人工修改）即拒替——较新目标留原地、校验过的候选停泊为 *.candidate-<uuid>、任务以 PredictionOutputConflict 失败收场（不静默），指纹一致则正常替换。修复远程 replaced_previous_output 从未持久化到 status.json 的缺口（_apply_remote_prediction_output 直接 _status_update 写回 replaced 指针与发布指纹，fresh-run 与 reattach 两条路径均覆盖）。nnU-Net/FlexiCT 两个状态页新增「旧结果…」入口：替换说明与旧版本时间显示在结果详情，对话框可打开旧文件位置或一键恢复；restore_replaced_output 走同一验证边界 + 发布指纹冲突保护 + 交换语义（永不销毁任何版本，再恢复即撤回）。测试：test_publish_refuses_target_changed_during_run、test_publish_matching_fingerprint_replaces、test_restore_replaced_output_swaps_and_keeps_current、test_restore_replaced_output_refuses_modified_current、test_restore_replaced_output_rejects_damaged_previous、test_apply_persists_recovery_pointers、test_apply_refuses_target_changed_since_prepare、test_nnunet_viewer_previous_output_entry、test_flexict_viewer_previous_output_entry。验证：commit e336b03、smoke 8/8（工件 20261017T141508_smoke.json）、fast 30/30（工件 20261017T143045_fast.json）。"
     },
     {
       "id": "S06",
       "priority": "P1",
       "title": "部分缺 PixelSpacing 会跳过整个间距校验，全部缺位置仍默认造网格",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S06",
         "R09",
@@ -205,13 +207,14 @@
         "规则斜位/线性倾斜通过；目标机核对源层面、Mimics Image 和导出结果的物理位置。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "间距校验改为先逐片收集字段完整性再验证：部分缺 PixelSpacing 直接拒绝（报缺失数与示例文件），全部缺失才保留 legacy [1,1] 兜底；整序列无 ImagePositionPatient 时拒绝构造 affine（默认值不是可信坐标），affine 构造中凭空造原点的不可达 else 分支一并删除。测试：test_dicom_helpers_refuse_incomplete_or_drifting_geometry（部分缺间距首/中/末、全部缺位置进套件；规则倾斜、倒序、混合间距既有正反例不变）。验证：commit 791b5b1、smoke 8/8（工件 20261017T054201_smoke.json）。"
     },
     {
       "id": "S10",
       "priority": "P1",
       "title": "按秒目录仍会碰撞，且新目录中的失败病例残片也会被重新排名",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S10",
         "R15",
@@ -252,13 +255,14 @@
         "排名集合严格等于本轮成功清单，成功数+排除数与请求数一致；全部失败时 UI 禁用操作。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "不确定度目录名追加 8 位 uuid 消歧，同秒重试不再复用目录、上一轮历史完整保留；失败病例残片（不确定度图已写、共识图写失败等）隔离到 failed/ 子目录（保留诊断、目录扫描不可达）；排名与辅助带只消费本轮成功清单——辅助带不再遍历全部 case_ids，新增契约检查「排名集合必须严格等于本轮成功清单，不一致即拒绝交付排名」。同秒重试测试改为 strftime 冻结的确定性断言。测试：test_al_quarantines_failed_case_fragments（真实 analyze/bands 链路：残片隔离、不排名、不生成辅助带）及改造后的同秒两轮测试。验证：commit 5a90d35、smoke 8/8（工件 20261017T064726_smoke.json）。"
     },
     {
       "id": "T01",
       "priority": "P2",
       "title": "新增逐层读取对普通 gzip 反复从头解压，校验开销随层数放大",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S03"
       ],
@@ -292,13 +296,14 @@
         "以解压字节/读次数作回归指标；另在目标机衡量大体积发布耗时，不能把本合成文件秒数外推为真实病例耗时。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "nib.load 改 keep_file_open=True：单句柄跨层顺序读，不再每层重开 + GzipFile.seek 回卷重复解压前缀——96 层文件实测解压量从 49.62 倍体素量降为 1.04 倍、底层读取从 2450 次降为 51 次；finally 显式关闭 opener，异常路径上 RuntimeError traceback 不再拖着代理与 Windows 文件锁锁死候选文件。测试：test_validate_prediction_gzip_reads_are_linear（instrument gzip._GzipReader.read，断言解压字节 <= 1.2 倍体素量、读取次数 <= 层数+10，防止退回 O(n^2)）。验证：commit 48a9d29、smoke 8/8（工件 20261017T124022_smoke）。"
     },
     {
       "id": "T02",
       "priority": "P1",
       "title": "nnU-Net 冻结分支仍扩大验证集，患者分组路径还能写出空训练集",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S05",
         "R07",
@@ -336,13 +341,14 @@
         "新增病例、组大小不均、中文病例 key 和旧清单重建均保持同一契约。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "有组路径「至少补一个自由组」兜底改为仅在验证集为空时触发，且补组前检查训练侧至少保留 1 例（旋转循环补组同样加训练侧饥饿守卫）；无组路径旋转窗口填充到目标数量即停，不再在冻结集之上追加。_materialize_nnunet_raw 在发布数据集与写 splits_final.json 前检查任一折训练集为空即 RuntimeError（中文，指明冻结集/分组覆盖全部病例），不再把空训练折写盘。测试：test_split_folds_grouped_two_patients_frozen_keeps_train、test_split_folds_frozen_does_not_grow_beyond_requested_count、test_split_folds_grouped_cannot_starve_train_via_window、test_materialize_grouped_two_patients_rebuild_keeps_train、test_materialize_refuses_frozen_group_covering_everything。验证：commit b1498b3、smoke 8/8（工件 20261017T055746_smoke.json）。"
     },
     {
       "id": "T03",
       "priority": "P2",
       "title": "精确标签匹配只修了病例子目录，平铺标签格式仍把两个准确文件判成歧义",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S07",
         "R06"
@@ -375,13 +381,14 @@
         "大小写、Unicode、别名、多个分隔符和前缀相似病例都不会跨病例误取；错误提示为可执行的中文说明。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "平铺循环先用 _strip_case_prefix 从原始 stem 剥离确认的病例前缀（保留标签自身分隔符），再套用与子目录布局完全相同的两级匹配（语义精确优先、折叠宽松兜底）；前缀仅折叠后可命中的文件名保持旧宽松行为，跨病例不误取；跨标签独占检查不变。子目录布局的松散兜底用例从「不匹配」改为真正的正向兜底验证。测试：test_find_label_files_flat_layout_matches_exact_after_prefix（平铺两精确命名文件一一对应、异病例不误取、折叠变体兜底）。验证：commit a4a8d29、smoke 8/8（工件 20261017T072935_smoke.json）。"
     },
     {
       "id": "T04",
       "priority": "P2",
       "title": "每次点击各开线程，先后标记的最终状态可能倒置",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S08",
         "R04",
@@ -415,7 +422,8 @@
         "真实 Qt 持锁时仍可移动/切换窗口，成功提示只在持久化后显示；关闭窗口未落盘状态不被当成成功。"
       ],
       "evidence_level": "实际隔离复现，边界与限制见证据说明",
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "标记写入改为单一 FIFO 顺序工作线程：点击顺序=落盘顺序，最后一次点击必定是最后一次写入（最后意图必胜）；回执携带 (case, value, error)，不同病例/不同值的回执不串。新增退出有界排空 wait_for_state_writes：关窗时已点击的标记有界等待落盘，超时如实报告未保存数量并告警，不再被 daemon 线程静默丢弃。顺带修复既有测试隐患：msvcrt 锁模拟未 seek(0)，a+b 指针在文件尾，S08 持锁用例从未形成真实竞争。测试：test_click_order_last_intent_wins（先标注后跳过且第一笔被锁拖慢，终态=最后点击）、test_exit_drain_bounded_and_reports_unsaved（退出排空有界、如实报未保存数，解锁后落盘归零）。验证：commit 19c3368、smoke 8/8（工件 20261017T115824_smoke）。"
     }
   ],
   "counts": {
