@@ -25,7 +25,12 @@ from flexict_common import (  # noqa: E402
 )
 from flexict_pipeline import list_flexict_jobs  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
-from nnunet_jobs import abandon_job, stop_job  # noqa: E402
+from nnunet_jobs import (  # noqa: E402
+    abandon_job,
+    restore_replaced_output,
+    reveal_in_file_manager,
+    stop_job,
+)
 from ui_theme import (  # noqa: E402
     clamp_window_to_screen,
     configure_application,
@@ -188,6 +193,15 @@ class StatusWindow:
         self.retry_button = QtWidgets.QPushButton("以相同设置重试")
         self.retry_button.clicked.connect(self._retry)
         actions.addWidget(self.retry_button)
+        # S02: the recovery entry for a replaced previous result — the
+        # annotator must not have to read JSON or guess file names to get
+        # the old version back (same contract as the nnU-Net viewer).
+        self.previous_button = QtWidgets.QPushButton("旧结果…")
+        self.previous_button.clicked.connect(self._previous_output)
+        self.previous_button.setToolTip(
+            "打开或恢复本次预测替换掉的旧结果。"
+        )
+        actions.addWidget(self.previous_button)
         self.open_button = QtWidgets.QPushButton("打开作业文件夹")
         self.open_button.clicked.connect(self._open_folder)
         actions.addWidget(self.open_button)
@@ -229,6 +243,15 @@ class StatusWindow:
         # disk (the same contract as the nnU-Net viewer).
         for job in jobs:
             job["_log_tail"] = read_log_tail(job, self._log_tail_cache)
+            # S02: the replaced-version timestamp for the detail line. Stat
+            # here, on the worker thread — the GUI thread never touches the
+            # workspace disk (铁律 1).
+            replaced_path = str(job.get("replaced_previous_output") or "")
+            if replaced_path:
+                try:
+                    job["_replaced_mtime_epoch"] = os.path.getmtime(replaced_path)
+                except OSError:
+                    pass
         return {
             "jobs": jobs,
             "models": load_models(workspace),
@@ -350,6 +373,17 @@ class StatusWindow:
             }
         )
         self.retry_button.setEnabled(state in {"failed", "cancelled"})
+        # S02: surface what was replaced and how to get it back — the
+        # replaced pointer only means recovery while the annotator can see it.
+        replaced = str(status.get("replaced_previous_output") or "")
+        self.previous_button.setEnabled(bool(replaced))
+        if replaced:
+            replaced_time = _format_time(status.get("_replaced_mtime_epoch"))
+            self.detail_label.setText(
+                "{}\n本次预测替换了旧结果（{}）。旧结果已保留，可用「旧结果…」打开或恢复。".format(
+                    self.detail_label.text(), replaced_time
+                )
+            )
         scrollbar = self.log_view.verticalScrollBar()
         follow_tail = scrollbar.value() >= scrollbar.maximum() - 4
         # The tail itself is read on the collect worker thread (see
@@ -460,6 +494,48 @@ class StatusWindow:
             self.refresher.request()
         except Exception as exc:
             self.QtWidgets.QMessageBox.critical(self.window, "重试失败", str(exc))
+
+    def _previous_output(self):
+        index = self.jobs.currentRow()
+        if not 0 <= index < len(self._job_rows):
+            return
+        status = self._job_rows[index]
+        replaced = str(status.get("replaced_previous_output") or "")
+        if not replaced:
+            return
+        QtWidgets = self.QtWidgets
+        box = QtWidgets.QMessageBox(self.window)
+        box.setWindowTitle("旧结果")
+        box.setText(
+            "本次预测替换了一个旧结果：\n{}\n（旧版本时间：{}）\n\n"
+            "旧结果文件已保留。可以直接打开它所在位置查看，"
+            "或把它恢复为当前结果（当前版本会同样保留，不会丢失）。".format(
+                replaced, _format_time(status.get("_replaced_mtime_epoch"))
+            )
+        )
+        open_button = box.addButton("打开位置", QtWidgets.QMessageBox.ActionRole)
+        restore_button = box.addButton("恢复旧版本", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is open_button:
+            reveal_in_file_manager(replaced)
+        elif clicked is restore_button:
+            self._restore_previous(status)
+
+    def _restore_previous(self, status):
+        try:
+            restore_replaced_output(status["status_path"])
+        except Exception as exc:
+            self.QtWidgets.QMessageBox.critical(
+                self.window, "恢复失败", str(exc)
+            )
+            return
+        self.QtWidgets.QMessageBox.information(
+            self.window, "已恢复旧结果", "旧结果已恢复为当前结果。"
+        )
+        # Post-action refresh goes through the background refresher (铁律 1).
+        self.refresher.request()
 
     def _open_folder(self):
         index = self.jobs.currentRow()

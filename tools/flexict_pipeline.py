@@ -54,6 +54,7 @@ from flexict_common import (  # noqa: E402
 from nnunet_common import (  # noqa: E402
     append_log,
     compact_completed_log,
+    file_fingerprint,
     read_json,
     replace_with_retry,
     safe_identifier,
@@ -1309,6 +1310,10 @@ def run_inference(job_dir: Path) -> int:
     image_path = Path(str(request.get("image_path") or "")).expanduser().resolve()
     output_path = Path(
         str(request.get("output_path") or job_dir / "prediction.nii.gz")).resolve()
+    # S02: fingerprint the publish target as the task starts, so a long
+    # run cannot silently replace a result that changed meanwhile (another
+    # publish or a manual edit).
+    previous_output_fingerprint = file_fingerprint(output_path)
     roots = _runtime_roots(request)
     update_status(
         status_path,
@@ -1413,11 +1418,11 @@ def run_inference(job_dir: Path) -> int:
                 "source_shape": list(source.shape[:3]),
                 "source_voxel_to_ras_matrix": source.affine.tolist(),
             },
+            expected_previous_fingerprint=previous_output_fingerprint,
         )
-        publish_extras = (
-            {"replaced_previous_output": str(replaced_previous)}
-            if replaced_previous is not None else {}
-        )
+        publish_extras = {"published_output_fingerprint": file_fingerprint(output_path)}
+        if replaced_previous is not None:
+            publish_extras["replaced_previous_output"] = str(replaced_previous)
         update_status(
             status_path,
             status="completed",

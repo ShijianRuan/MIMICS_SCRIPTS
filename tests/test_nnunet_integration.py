@@ -2167,6 +2167,88 @@ class SpatialContractTests(unittest.TestCase):
                 int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
             )
 
+    def test_publish_refuses_target_changed_during_run(self):
+        """S02：目标结果在任务运行期间被另一发布或人工修改后，本次预测不得
+        静默覆盖较新的版本。较新目标留在原地，校验过的候选停泊在旁，任务以
+        冲突失败收场（不静默）。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            started_fingerprint = common.file_fingerprint(output)
+            # The target changes while the task "runs": a manual edit.
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((2, 2, 2), 7, dtype=np.uint8), np.eye(4)
+                ),
+                str(output),
+            )
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            with self.assertRaises(pipeline.PredictionOutputConflict) as ctx:
+                pipeline.publish_prediction_output(
+                    candidate,
+                    output,
+                    None,
+                    expected_previous_fingerprint=started_fingerprint,
+                )
+            # The newer (manually edited) version is untouched.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 56
+            )
+            # The validated candidate is parked, recoverable, intact.
+            kept = ctx.exception.candidate_path
+            self.assertTrue(kept.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(kept)).dataobj).sum()), 8
+            )
+            # No staging leftovers next to the output.
+            self.assertEqual(
+                sorted(p.name for p in output.parent.glob("*.staged*")), []
+            )
+
+    def test_publish_matching_fingerprint_replaces(self):
+        """S02：目标与任务启动时一致（指纹匹配）时正常替换——冲突保护不
+        拦截合法的常规发布，旧结果仍按 S02 保留。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            candidate = root / "candidate.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+                str(candidate),
+            )
+            out_path, replaced = pipeline.publish_prediction_output(
+                candidate,
+                output,
+                None,
+                expected_previous_fingerprint=common.file_fingerprint(output),
+            )
+            self.assertEqual(out_path, output)
+            self.assertIsNotNone(replaced)
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
+            self.assertEqual(
+                int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 0
+            )
+
     def test_publish_rejects_header_only_truncated_voxels(self):
         """S03: a gzip file with a valid NIfTI header but no voxel payload
         must fail at the publish boundary — nib.load's header read is lazy,
@@ -3407,6 +3489,107 @@ class JobLifecycleTests(unittest.TestCase):
                 top_level={"case_2": "patientB"})
         rows = prepare("case_3")
         self.assertEqual(rows[0]["patient_group"], "")
+
+    def _restore_job(self, root):
+        """S02 helper: a published job whose previous output was kept aside."""
+        import nibabel as nib
+        import numpy as np
+
+        output = root / "prediction.nii.gz"
+        nib.save(
+            nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.uint8), np.eye(4)),
+            str(output),
+        )
+        replaced = root / "prediction.replaced-abcdef12.nii.gz"
+        nib.save(
+            nib.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4)),
+            str(replaced),
+        )
+        status_path = root / "status.json"
+        common.write_json_atomic(
+            status_path,
+            {
+                "status": "completed",
+                "output_path": str(output),
+                "replaced_previous_output": str(replaced),
+                "published_output_fingerprint": common.file_fingerprint(output),
+            },
+        )
+        return status_path, output, replaced
+
+    def test_restore_replaced_output_swaps_and_keeps_current(self):
+        """S02：恢复旧结果是交换而非删除——旧内容回到结果路径，当前版本
+        保留在旁，再恢复一次即可撤回，状态指针随之更新。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status_path, output, replaced = self._restore_job(root)
+            result = jobs.restore_replaced_output(status_path)
+            # The old version is back at the output path.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 0
+            )
+            # The version that was current is kept aside, intact.
+            kept = Path(result["replaced_previous_output"])
+            self.assertNotEqual(kept, replaced)
+            self.assertTrue(kept.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(kept)).dataobj).sum()), 8
+            )
+            self.assertEqual(
+                result["published_output_fingerprint"],
+                common.file_fingerprint(output),
+            )
+            # Restoring again undoes the swap.
+            result = jobs.restore_replaced_output(status_path)
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
+
+    def test_restore_replaced_output_refuses_modified_current(self):
+        """S02：当前结果自发布后被改动（另一发布或人工修改）时拒绝恢复，
+        双向内容原样保留——恢复本身也走冲突保护。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status_path, output, replaced = self._restore_job(root)
+            # The current output is manually edited after the publish.
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((2, 2, 2), 5, dtype=np.uint8), np.eye(4)
+                ),
+                str(output),
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                jobs.restore_replaced_output(status_path)
+            self.assertIn("已变化", str(ctx.exception))
+            # Both versions are exactly as they were.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 40
+            )
+            self.assertEqual(
+                int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 0
+            )
+
+    def test_restore_replaced_output_rejects_damaged_previous(self):
+        """S02：旧结果文件损坏时恢复在验证边界失败，当前结果不动——
+        恢复路径与发布路径共用同一 validate-then-publish 边界。"""
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status_path, output, replaced = self._restore_job(root)
+            replaced.write_bytes(b"damaged bytes, not a nifti")
+            with self.assertRaises(RuntimeError):
+                jobs.restore_replaced_output(status_path)
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 8
+            )
 
 
 class FakeMask:

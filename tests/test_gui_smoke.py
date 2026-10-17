@@ -726,6 +726,72 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
         finally:
             window.window.close()
 
+    def test_nnunet_viewer_previous_output_entry(self):
+        """S02：替换过旧结果的任务在结果页直接给出「旧结果…」入口和替换
+        说明（含旧版本时间）；没有替换记录的任务按钮置灰。普通标注者无需
+        读 JSON 或猜文件名即可找回旧版本。"""
+        _AppFixture.app()
+        import nnunet_status_viewer as viewer
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            with mock.patch.object(
+                window, "_selected_task", return_value="liver"
+            ):
+                window.refresh({
+                    "jobs": [
+                        {"task_id": "liver", "task_name": "Liver",
+                         "status_path": "replaced.json", "status": "completed",
+                         "created_at_epoch": 2.0, "kind": "infer",
+                         "message": "done",
+                         "replaced_previous_output": "W:/old.nii.gz",
+                         "_replaced_mtime_epoch": 1760000000.0},
+                        {"task_id": "liver", "task_name": "Liver",
+                         "status_path": "plain.json", "status": "completed",
+                         "created_at_epoch": 1.0, "kind": "infer",
+                         "message": "done"},
+                    ],
+                    "models": [],
+                })
+                self.assertTrue(window.previous_button.isEnabled())
+                self.assertIn("替换了旧结果", window.detail_label.text())
+                window.jobs.setCurrentRow(1)
+                self.assertFalse(window.previous_button.isEnabled())
+                self.assertNotIn("替换了旧结果", window.detail_label.text())
+        finally:
+            window.window.close()
+
+    def test_flexict_viewer_previous_output_entry(self):
+        """S02：FlexiCT 状态页与 nnU-Net 状态页同一契约——替换过的任务
+        显示找回入口，未替换的任务置灰。"""
+        _AppFixture.app()
+        import flexict_status_viewer as viewer
+
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            window.refresh({
+                "jobs": [
+                    {"status_path": "replaced.json", "status": "completed",
+                     "created_at_epoch": 2.0, "kind": "infer",
+                     "message": "done",
+                     "replaced_previous_output": "W:/old.nii.gz",
+                     "_replaced_mtime_epoch": 1760000000.0},
+                    {"status_path": "plain.json", "status": "completed",
+                     "created_at_epoch": 1.0, "kind": "infer",
+                     "message": "done"},
+                ],
+                "models": [],
+                "pair": (None, None),
+                "recommended": None,
+            })
+            self.assertTrue(window.previous_button.isEnabled())
+            self.assertIn("替换了旧结果", window.detail_label.text())
+            window.jobs.setCurrentRow(1)
+            self.assertFalse(window.previous_button.isEnabled())
+            self.assertNotIn("替换了旧结果", window.detail_label.text())
+        finally:
+            window.window.close()
+
     def test_flexict_viewer_shows_training_curve(self):
         # G3: the FlexiCT status viewer had no training-curve tab while the
         # nnU-Net viewer did - the annotator watching a FlexiCT run (local

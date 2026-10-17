@@ -1444,6 +1444,7 @@ def _prepare_nnunet_infer(
     spec: dict[str, Any], bundle: Path
 ) -> dict[str, Any]:
     from tools.nnunet_common import (
+        file_fingerprint,
         normalize_request,
         path_signature,
         read_json as read_nnunet_json,
@@ -1462,6 +1463,15 @@ def _prepare_nnunet_infer(
     )
     if request["operation"] != "infer":
         raise RuntimeError("Remote nnU-Net inference received a training request.")
+    # S02: fingerprint the publish target as the remote task starts. The
+    # long remote run must not silently replace a result that changed
+    # meanwhile; the finalize publish compares against this record.
+    _status_update(
+        Path(spec["status_path"]).resolve(),
+        expected_previous_output_fingerprint=file_fingerprint(
+            Path(str(request.get("output_path") or "")).expanduser().resolve()
+        ),
+    )
     source_image = Path(str(request.get("image_path") or "")).expanduser().resolve()
     if not source_image.exists():
         raise RuntimeError("Prediction image does not exist: {}".format(source_image))
@@ -1720,6 +1730,7 @@ def _prepare_flexict_infer(
 ) -> dict[str, Any]:
     from tools.flexict_pipeline import normalize_flexict_request
     from tools.nnunet_common import (
+        file_fingerprint,
         path_signature,
         read_json as read_flexict_json,
         safe_identifier as flexict_safe_identifier,
@@ -1734,6 +1745,15 @@ def _prepare_flexict_infer(
     )
     if request["operation"] != "infer":
         raise RuntimeError("Remote FlexiCT inference received a training request.")
+    # S02: fingerprint the publish target as the remote task starts. The
+    # long remote run must not silently replace a result that changed
+    # meanwhile; the finalize publish compares against this record.
+    _status_update(
+        Path(spec["status_path"]).resolve(),
+        expected_previous_output_fingerprint=file_fingerprint(
+            Path(str(request.get("output_path") or "")).expanduser().resolve()
+        ),
+    )
     source_image = Path(str(request.get("image_path") or "")).expanduser().resolve()
     if not source_image.exists():
         raise RuntimeError("Prediction image does not exist: {}".format(source_image))
@@ -2850,6 +2870,7 @@ def _apply_remote_prediction_output(
     local_model_dir: Path,
     remote_status: dict[str, Any],
 ) -> None:
+    from tools.nnunet_common import file_fingerprint
     from tools.nnunet_common import read_json as read_nnunet_json
     from tools.nnunet_pipeline import publish_prediction_output
 
@@ -2865,14 +2886,31 @@ def _apply_remote_prediction_output(
     # R10: validate (readable NIfTI, source grid) BEFORE touching the target
     # and publish through a unique staging name; a corrupt download or a
     # wrong-grid result must never replace a previously reviewed file.
+    # S02: the target fingerprint recorded when the remote task started
+    # (prepare phase) guards against silently replacing a result that
+    # changed during the long remote run.
+    local_status = read_nnunet_json(Path(spec["status_path"]).resolve(), {}) or {}
     _, replaced_previous = publish_prediction_output(
         downloaded,
         output_path,
         local_request.get("source_geometry_expected"),
+        expected_previous_fingerprint=(
+            str(local_status.get("expected_previous_output_fingerprint") or "") or None
+        ),
     )
     remote_status["output_path"] = str(output_path)
     if replaced_previous is not None:
         remote_status["replaced_previous_output"] = str(replaced_previous)
+    # S02: persist the recovery pointers in the job status itself — the
+    # status viewers read them there, and remote_status mutations alone
+    # never reach disk.
+    _status_update(
+        Path(spec["status_path"]).resolve(),
+        replaced_previous_output=(
+            str(replaced_previous) if replaced_previous is not None else None
+        ),
+        published_output_fingerprint=file_fingerprint(output_path),
+    )
 
 
 def _remove_remote_prepared_namespace(

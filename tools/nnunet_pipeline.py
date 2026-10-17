@@ -37,6 +37,7 @@ from nnunet_common import (  # noqa: E402
     TRAINER_ROOT,
     append_log,
     compact_completed_log,
+    file_fingerprint,
     load_models,
     medical_stem,
     normalize_request,
@@ -1937,11 +1938,25 @@ def validate_prediction_nifti(prediction_path: str | Path) -> None:
             opener.close()
 
 
+class PredictionOutputConflict(RuntimeError):
+    """S02: the publish target changed while the task was running.
+
+    The newer target stays in place; the validated candidate is parked next
+    to it (``candidate_path``) so nothing is lost. The task reports failure
+    because its result was not delivered to the requested path.
+    """
+
+    def __init__(self, message: str, candidate_path: Path) -> None:
+        super().__init__(message)
+        self.candidate_path = candidate_path
+
+
 def publish_prediction_output(
     candidate: str | Path,
     output_path: str | Path,
     expected_geometry: dict[str, Any] | None,
-) -> Path:
+    expected_previous_fingerprint: str | None = None,
+) -> tuple[Path, Path | None]:
     """R10: validate-then-publish boundary for prediction outputs.
 
     The candidate is validated (readable NIfTI, source shape/affine) BEFORE
@@ -1949,6 +1964,12 @@ def publish_prediction_output(
     concurrent jobs never share one .remote-part) and, when the target
     already exists, moves the old file aside so a failed or wrong-grid result
     can never silently destroy a previously reviewed prediction.
+
+    S02: when ``expected_previous_fingerprint`` is given (what the target
+    contained when the task started), a target that changed while the task
+    ran — another publish or a manual edit — is never silently replaced:
+    the validated candidate is parked next to it and
+    ``PredictionOutputConflict`` is raised.
 
     Returns ``(output_path, replaced_path)``. ``replaced_path`` is None when
     there was no previous output; otherwise it is the kept-aside copy of the
@@ -2005,6 +2026,27 @@ def publish_prediction_output(
         # a partial copy (disk full mid-write) must fail here, not in Mimics.
         validate_prediction_nifti(staging)
         if output_path.exists():
+            if (
+                expected_previous_fingerprint is not None
+                and file_fingerprint(output_path) != expected_previous_fingerprint
+            ):
+                # S02: the target changed while the task ran (another
+                # publish or a manual edit). Keep BOTH: the newer target
+                # stays in place, the validated candidate parks next to it —
+                # never a silent replace of the newer result.
+                kept = output_path.with_name(
+                    "{}.candidate-{}{}".format(
+                        output_path.stem, uuid.uuid4().hex[:8],
+                        "".join(output_path.suffixes),
+                    )
+                )
+                os.replace(str(staging), str(kept))
+                raise PredictionOutputConflict(
+                    "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），"
+                    "为避免覆盖较新的结果，本次预测未替换它。"
+                    "本次预测已保留在：{}".format(kept),
+                    kept,
+                )
             # Stamp BEFORE the suffixes so the kept-aside copy keeps a
             # recognizable .nii.gz name (nibabel and Mimics can open it
             # directly on the recovery path).
@@ -2455,6 +2497,10 @@ def run_inference(job_dir: Path) -> int:
     ).expanduser().resolve()
     image_path = Path(str(request.get("image_path") or "")).expanduser().resolve()
     output_path = Path(str(request.get("output_path") or job_dir / "prediction.nii.gz")).resolve()
+    # S02: fingerprint the publish target as the task starts, so a long
+    # run cannot silently replace a result that changed meanwhile (another
+    # publish or a manual edit).
+    previous_output_fingerprint = file_fingerprint(output_path)
     roots = _runtime_roots(request)
     update_status(
         status_path,
@@ -2560,11 +2606,11 @@ def run_inference(job_dir: Path) -> int:
                 "source_shape": list(source.shape[:3]),
                 "source_voxel_to_ras_matrix": source.affine.tolist(),
             },
+            expected_previous_fingerprint=previous_output_fingerprint,
         )
-        publish_extras = (
-            {"replaced_previous_output": str(replaced_previous)}
-            if replaced_previous is not None else {}
-        )
+        publish_extras = {"published_output_fingerprint": file_fingerprint(output_path)}
+        if replaced_previous is not None:
+            publish_extras["replaced_previous_output"] = str(replaced_previous)
         update_status(
             status_path,
             status="completed",

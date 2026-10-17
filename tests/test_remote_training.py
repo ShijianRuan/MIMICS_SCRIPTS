@@ -4784,6 +4784,100 @@ class RemotePredictionPublishTests(unittest.TestCase):
             self.assertEqual(len(staging_names), 2)
             self.assertNotEqual(staging_names[0], staging_names[1])
 
+    def test_apply_persists_recovery_pointers(self):
+        """S02：远程下载发布后，被替换旧结果的指针和新内容指纹必须落到
+        status.json——此前 remote_status 的变异从未持久化，状态页永远看不
+        到找回入口。"""
+        import nibabel as nib
+        import numpy as np
+        from tools.nnunet_common import file_fingerprint
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            bundle = self._download_dir(
+                root,
+                self._nifti_bytes(
+                    np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                ),
+            )
+            spec = self._spec(root, output)
+            controller._apply_remote_prediction_output(
+                spec, "nnunet_infer", bundle, {}
+            )
+            status = remote_compute.read_json(
+                Path(spec["status_path"]), {}
+            ) or {}
+            replaced = Path(str(status.get("replaced_previous_output") or ""))
+            self.assertTrue(replaced.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(replaced)).dataobj).sum()), 0
+            )
+            self.assertEqual(
+                status.get("published_output_fingerprint"),
+                file_fingerprint(output),
+            )
+
+    def test_apply_refuses_target_changed_since_prepare(self):
+        """S02：远程任务运行期间目标被另一发布或人工修改时，finalize 的
+        发布必须拒绝覆盖较新的版本——候选停泊在旁，任务以冲突失败收场。"""
+        import nibabel as nib
+        import numpy as np
+        import tools.nnunet_pipeline as nnunet_pipeline_module
+        from tools.nnunet_common import file_fingerprint
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prediction.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                str(output),
+            )
+            bundle = self._download_dir(
+                root,
+                self._nifti_bytes(
+                    np.ones((4, 4, 4), dtype=np.uint8), np.eye(4)
+                ),
+            )
+            spec = self._spec(root, output)
+            # The prepare phase records the fingerprint of the target as the
+            # remote task starts.
+            remote_compute.write_json_atomic(
+                Path(spec["status_path"]),
+                {
+                    "expected_previous_output_fingerprint": (
+                        file_fingerprint(output)
+                    )
+                },
+            )
+            # The target is manually edited while the remote task runs.
+            nib.save(
+                nib.Nifti1Image(
+                    np.full((4, 4, 4), 7, dtype=np.uint8), np.eye(4)
+                ),
+                str(output),
+            )
+            with self.assertRaises(
+                nnunet_pipeline_module.PredictionOutputConflict
+            ) as ctx:
+                controller._apply_remote_prediction_output(
+                    spec, "nnunet_infer", bundle, {}
+                )
+            # The newer (manually edited) version stays in place; the
+            # candidate is parked, recoverable.
+            self.assertEqual(
+                int(np.asarray(nib.load(str(output)).dataobj).sum()), 448
+            )
+            kept = ctx.exception.candidate_path
+            self.assertTrue(kept.is_file())
+            self.assertEqual(
+                int(np.asarray(nib.load(str(kept)).dataobj).sum()), 64
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

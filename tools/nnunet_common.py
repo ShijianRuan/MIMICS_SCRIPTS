@@ -115,6 +115,23 @@ def replace_with_retry(source: str | Path, destination: str | Path) -> None:
     )
 
 
+def file_fingerprint(path: str | Path) -> str | None:
+    """S02: content fingerprint of a prediction output file.
+
+    sha256 over the raw bytes — linear in file size, no gzip decode. None
+    when the file is missing or unreadable: the publish conflict check
+    treats that as "no previous content to protect" instead of guessing.
+    """
+    digest = hashlib.sha256()
+    try:
+        with open(str(Path(path)), "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def read_json(path: str | Path, default: Any = None) -> Any:
     try:
         with Path(path).open("r", encoding="utf-8") as handle:

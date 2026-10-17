@@ -22,6 +22,7 @@ for candidate in (ROOT, ROOT / "tools"):
 from nnunet_common import (  # noqa: E402
     SCHEMA_VERSION,
     TERMINAL_STATES,
+    file_fingerprint,
     normalize_request,
     read_json,
     safe_identifier,
@@ -386,6 +387,82 @@ def reattach_job(status_path: str | Path) -> bool:
         remote_state_unknown=False,
     )
     return True
+
+
+def restore_replaced_output(status_path: str | Path) -> dict[str, Any]:
+    """S02: swap the kept-aside previous result back into the output path.
+
+    Conflict-protected like the publish boundary: the current output is only
+    swapped away while it is still byte-identical to what this job published
+    (``published_output_fingerprint``); a target that changed since (another
+    publish, a manual edit) is left untouched. The version being swapped
+    away is kept aside — never deleted — so restoring again undoes the swap.
+    """
+    from tools.nnunet_pipeline import validate_prediction_nifti
+
+    path = Path(status_path).expanduser().resolve()
+    status = read_json(path, {}) or {}
+    replaced_text = str(status.get("replaced_previous_output") or "")
+    output_text = str(status.get("output_path") or "")
+    if not replaced_text:
+        raise RuntimeError("该任务没有记录被替换的旧结果。")
+    if not output_text:
+        raise RuntimeError("该任务没有记录结果路径，无法恢复。")
+    replaced = Path(replaced_text).expanduser()
+    output = Path(output_text).expanduser()
+    if not replaced.is_file():
+        raise RuntimeError("旧结果文件已不存在：{}".format(replaced))
+    # The restored file becomes the published output, so it passes the same
+    # validate-then-publish boundary as a fresh prediction.
+    validate_prediction_nifti(replaced)
+    expected = str(status.get("published_output_fingerprint") or "")
+    if output.exists() and expected and file_fingerprint(output) != expected:
+        raise RuntimeError(
+            "当前结果自发布后已变化（可能被另一任务发布或人工修改），未恢复旧结果。"
+            "当前版本未改动；旧版本仍保留在：{}".format(replaced)
+        )
+    kept = None
+    if output.exists():
+        kept = output.with_name(
+            "{}.replaced-{}{}".format(
+                output.stem, uuid.uuid4().hex[:8], "".join(output.suffixes)
+            )
+        )
+        os.replace(str(output), str(kept))
+    try:
+        os.replace(str(replaced), str(output))
+    except OSError:
+        if kept is not None and not output.exists():
+            os.replace(str(kept), str(output))
+        raise
+    message = (
+        "旧结果已恢复；恢复前的版本已保留在：{}".format(kept)
+        if kept is not None
+        else "旧结果已恢复（此前结果路径为空）。"
+    )
+    return update_status(
+        path,
+        replaced_previous_output=(str(kept) if kept is not None else None),
+        published_output_fingerprint=file_fingerprint(output),
+        message=message,
+    )
+
+
+def reveal_in_file_manager(path: str | Path) -> None:
+    """Open the OS file manager with the file selected (S02 recovery entry).
+
+    Best effort: an OS failure must never raise into the dialog flow.
+    """
+    target = Path(path)
+    try:
+        if os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", str(target)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target.parent)])
+    except OSError:
+        pass
 
 
 def main() -> int:
