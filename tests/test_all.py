@@ -7054,6 +7054,94 @@ class TestEdgeCases(unittest.TestCase):
         write_series(no_pos, [None, None, None])
         expect_rejected(no_pos, "缺少层面位置")
 
+    def test_dicom_helpers_refuse_default_spacing_and_bad_orientation(self):
+        """S06 re-review round 3: a series with NO PixelSpacing at all used
+        to keep the legacy [1, 1] fallback (voxel counts right, every
+        physical measurement wrong), and a parseable but non-orthogonal /
+        non-unit IOP (e.g. [1,0,0,1,1,0]) produced a sheared or silently
+        re-normalized grid. Both must be refused before any grid is built;
+        regular oblique orientations and rounding-level deviations still
+        pass."""
+        import pydicom
+        from pydicom.dataset import FileDataset, FileMetaDataset
+        from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
+        from mimics_bridge import get_image_affine_from_dicom, get_image_shape_from_dicom
+
+        def write_series(folder, iop, spacing=None):
+            os.makedirs(folder)
+            uid = generate_uid()
+            for k in range(3):
+                file_meta = FileMetaDataset()
+                file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                file_meta.MediaStorageSOPClassUID = CTImageStorage
+                file_meta.MediaStorageSOPInstanceUID = generate_uid()
+                ds = FileDataset(
+                    os.path.join(folder, f"s{k:04d}.dcm"), {},
+                    file_meta=file_meta, preamble=b"\0" * 128,
+                )
+                ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+                ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+                ds.SeriesInstanceUID = uid
+                ds.Rows = ds.Columns = 4
+                if spacing is not None:
+                    ds.PixelSpacing = spacing
+                ds.SliceThickness = 10.0
+                ds.Modality = "CT"
+                ds.ImageOrientationPatient = iop
+                ds.ImagePositionPatient = [0.0, 0.0, float(k) * 10.0]
+                ds.save_as(ds.filename, enforce_file_format=True)
+
+        def expect_rejected(folder, message_part):
+            for helper in (get_image_affine_from_dicom,
+                           get_image_shape_from_dicom):
+                with self.assertRaises(ValueError) as caught:
+                    helper(folder)
+                self.assertIn(message_part, str(caught.exception))
+
+        # All slices missing PixelSpacing: the 1 mm default is not evidence.
+        no_spacing = os.path.join(self.tmp, "no_spacing")
+        write_series(no_spacing, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        expect_rejected(no_spacing, "缺少像素间距")
+
+        # Parseable but non-orthogonal IOP: both vectors unit-length, the
+        # two in-plane axes at 45° — a sheared grid, must not pass.
+        r = 0.5 ** 0.5
+        skewed = os.path.join(self.tmp, "skewed_iop")
+        write_series(skewed, [1.0, 0.0, 0.0, r, r, 0.0], [1.0, 1.0])
+        expect_rejected(skewed, "不正交")
+
+        # Non-unit direction vectors: silently normalizing them downstream
+        # is a fix-up, not evidence.
+        scaled = os.path.join(self.tmp, "scaled_iop")
+        write_series(scaled, [2.0, 0.0, 0.0, 0.0, 2.0, 0.0], [1.0, 1.0])
+        expect_rejected(scaled, "不是单位向量")
+
+        # Wrong length / non-finite orientation payload.
+        short = os.path.join(self.tmp, "short_iop")
+        write_series(short, [1.0, 0.0, 0.0, 0.0, 1.0], [1.0, 1.0])
+        expect_rejected(short, "6 个有限数值")
+
+        # Acceptance: regular OBLIQUE orientation (45° about z, still
+        # orthonormal) and rounding-level deviations keep passing.
+        r2 = 0.5 ** 0.5
+        oblique = os.path.join(self.tmp, "oblique")
+        write_series(
+            oblique, [r2, r2, 0.0, -r2, r2, 0.0], [0.5, 0.75])
+        self.assertEqual((4, 4, 3), get_image_shape_from_dicom(oblique))
+        affine = get_image_affine_from_dicom(oblique)
+        self.assertTrue(np.all(np.isfinite(affine)))
+        # In-plane axes carry the oblique direction scaled by the spacing
+        # (PixelSpacing is [row, col]; affine axis 0 uses spacing[1]).
+        self.assertAlmostEqual(0.75, float(np.linalg.norm(affine[:3, 0])), places=6)
+        self.assertAlmostEqual(0.5, float(np.linalg.norm(affine[:3, 1])), places=6)
+        rounding = os.path.join(self.tmp, "rounding_iop")
+        write_series(
+            rounding,
+            [1.0 + 1e-6, 0.0, 0.0, 0.0, 1.0, 1e-6],
+            [1.0, 1.0])
+        self.assertTrue(np.all(np.isfinite(
+            get_image_affine_from_dicom(rounding))))
+
     # -- resource lock edge cases --
     def test_lock_release_wrong_token(self):
         import runtime_common

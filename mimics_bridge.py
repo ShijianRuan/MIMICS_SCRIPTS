@@ -1699,11 +1699,10 @@ def _validate_dicom_slice_grid(headers: list) -> None:
     any series that is not a uniform stack along a single normal would be
     silently squashed onto a fabricated regular grid and that wrong grid
     would propagate into masks, AI input, and exports. Fail closed with the
-    specific problem named instead. Series entirely without PixelSpacing
-    keep the legacy [1, 1] in-plane fallback; position or orientation
-    evidence must be present on every slice, and a series with no position
-    at all has no trusted coordinates (a fabricated origin/step would
-    poison training grids, so it is refused too).
+    specific problem named instead. Spacing, position and orientation
+    evidence must be present on every slice — there is no trusted default
+    for any of them (a fabricated 1 mm in-plane grid, origin or step would
+    poison training grids, so missing evidence is refused too).
     """
     # S06: geometry evidence must be COMPLETE on every slice. A series where
     # some slices carry positions and others do not cannot be proven a
@@ -1750,11 +1749,14 @@ def _validate_dicom_slice_grid(headers: list) -> None:
         ds for ds in headers
         if getattr(ds, "PixelSpacing", None) is None
     ]
-    if missing_spacing and len(missing_spacing) < len(headers):
+    if missing_spacing:
+        # S06 re-review round 3: a series with NO spacing at all used to keep
+        # the legacy [1, 1] fallback — voxel counts looked right while every
+        # physical measurement was wrong. A default is not evidence.
         raise ValueError(
             "该 DICOM 序列有 {0} 个层面缺少像素间距（PixelSpacing，如 {1}），"
-            "间距不完整的序列无法证明为统一网格，已拒绝导入。"
-            "请回原图源重新导出。".format(
+            "缺间距的序列没有可信的物理尺寸（不会默认按 1mm 处理），已拒绝"
+            "导入。请回原图源重新导出。".format(
                 len(missing_spacing),
                 getattr(missing_spacing[0], "filename", "<unknown>"))
         )
@@ -1820,11 +1822,41 @@ def _validate_dicom_slice_grid(headers: list) -> None:
         )
 
     first = positions[0][0]
-    iop = [float(v) for v in getattr(
-        first, "ImageOrientationPatient",
-        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])]
+    # S06 re-review round 3: the orientation evidence itself must be
+    # trustworthy. IOP needs 6 finite numbers forming approximately unit,
+    # mutually orthogonal vectors. Non-unit vectors used to be silently
+    # normalized downstream and a 45° non-orthogonal pair (IOP like
+    # [1,0,0,1,1,0]) sailed through with a sheared grid — both are refused;
+    # only rounding-level deviations are tolerated.
+    try:
+        iop = [float(v) for v in first.ImageOrientationPatient]
+    except (TypeError, ValueError):
+        raise ValueError(
+            "DICOM 序列中存在无法解析的层面方向（ImageOrientationPatient）："
+            "{0}".format(getattr(first, "filename", "<unknown>"))
+        )
+    if len(iop) != 6 or not all(np.isfinite(iop)):
+        raise ValueError(
+            "该 DICOM 序列的层面方向（ImageOrientationPatient）需为 6 个有"
+            "限数值，当前为 {0}，已拒绝导入。请回原图源重新导出。".format(iop)
+        )
     row_cosine = np.asarray(iop[0:3], dtype=float)
     column_cosine = np.asarray(iop[3:6], dtype=float)
+    if (abs(float(np.linalg.norm(row_cosine)) - 1.0) > 1e-3
+            or abs(float(np.linalg.norm(column_cosine)) - 1.0) > 1e-3):
+        raise ValueError(
+            "该 DICOM 序列的层面方向不是单位向量（行向量模 {0:.6g}、列向量"
+            "模 {1:.6g}），不可信的几何已拒绝导入。请回原图源重新导出。"
+            .format(
+                float(np.linalg.norm(row_cosine)),
+                float(np.linalg.norm(column_cosine)))
+        )
+    if abs(float(np.dot(row_cosine, column_cosine))) > 1e-3:
+        raise ValueError(
+            "该 DICOM 序列的行/列方向不正交（夹角余弦 {0:.6g}），会产生剪"
+            "切网格，已拒绝导入。请回原图源重新导出。".format(
+                float(np.dot(row_cosine, column_cosine)))
+        )
     slice_dir = np.cross(row_cosine, column_cosine)
     norm = float(np.linalg.norm(slice_dir))
     if norm <= 1e-9:
@@ -1894,11 +1926,13 @@ def get_image_affine_from_dicom(dicom_folder: str) -> np.ndarray:
         return None
 
     first = headers[0]
-    pixel_spacing = [float(v) for v in first.PixelSpacing] if hasattr(first, "PixelSpacing") else [1.0, 1.0]
+    # _validate_dicom_slice_grid (upstream in _read_dicom_series_headers)
+    # refuses series with missing PixelSpacing or ImageOrientationPatient,
+    # so no fabricated [1, 1] spacing or identity-orientation fallback
+    # remains here.
+    pixel_spacing = [float(v) for v in first.PixelSpacing]
     slice_thickness = float(first.SliceThickness) if hasattr(first, "SliceThickness") else pixel_spacing[0]
-    iop = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    if hasattr(first, "ImageOrientationPatient"):
-        iop = [float(v) for v in first.ImageOrientationPatient]
+    iop = [float(v) for v in first.ImageOrientationPatient]
 
     # DICOM IOP first triplet is the direction of increasing column index;
     # the second triplet is the direction of increasing row index.
