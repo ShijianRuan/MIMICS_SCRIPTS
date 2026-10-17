@@ -1918,11 +1918,19 @@ def run_active_learning(job_dir: Path) -> int:
         if failed_cases:
             failed_dir = uncertainty_dir / "failed"
             failed_dir.mkdir(parents=True, exist_ok=True)
+            # U01: match the EXACT per-case output filenames, never a
+            # textual prefix. A failed "case01" used to quarantine
+            # "case01_phase2_uncertainty_*.nii.gz" too — a fully successful
+            # case vanished from the ranking and the run failed its own
+            # consistency check. run_batch writes exactly these two names
+            # per case here (save_components/save_plots are off).
+            fragment_names = set()
+            for case in failed_cases:
+                fragment_names.add(
+                    "{0}_uncertainty_{1}.nii.gz".format(case, method))
+                fragment_names.add("{0}_consensus.nii.gz".format(case))
             for fragment in sorted(uncertainty_dir.glob("*.nii.gz")):
-                if any(
-                    fragment.name.startswith(case + "_")
-                    for case in failed_cases
-                ):
+                if fragment.name in fragment_names:
                     # os.replace (not shutil.replace): the bundled
                     # python_env's stripped shutil lacks replace.
                     os.replace(

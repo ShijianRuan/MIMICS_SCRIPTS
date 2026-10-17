@@ -1590,6 +1590,77 @@ class TestActiveLearningLifecycle(unittest.TestCase):
                 [], list(
                     (uncertainty_dir / "bands").glob("case01_*.nii.gz")))
 
+    def test_al_quarantine_does_not_swallow_prefix_sibling_case(self):
+        """U01: the quarantine used to match fragments by case-id TEXT PREFIX
+        ("case01" failing also swept away "case01_phase2_uncertainty_*" —
+        a fully successful case of another phase/Image). A failed case must
+        only quarantine its own two exact output files; the sibling's
+        products stay in the ranking and the bands."""
+        import nibabel as nib
+        import numpy as np
+
+        def fragment_writing_run_batch(
+                mask_dirs, out_dir, case_names, **kwargs):
+            # Every case gets real uncertainty/consensus files on disk;
+            # case01 "fails after its map was saved" (no metrics row).
+            os.makedirs(out_dir, exist_ok=True)
+            for case in case_names:
+                data = np.zeros((4, 4, 4), dtype=np.uint8)
+                data[1:-1, 1:-1, 1:-1] = 3
+                image = nib.Nifti1Image(data, np.eye(4))
+                nib.save(image, os.path.join(
+                    out_dir,
+                    "{}_uncertainty_disagreement.nii.gz".format(case)))
+                nib.save(image, os.path.join(
+                    out_dir, "{}_consensus.nii.gz".format(case)))
+            return [
+                {"case": case} for case in case_names if case != "case01"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=2)
+            # A same-prefix sibling phase of case01: fully successful.
+            _make_case(Path(tmp) / "pool", "case01_phase2")
+            from flexict_common import flexict_repo_dir
+            repo = flexict_repo_dir()
+            if str(repo) not in sys.path:
+                sys.path.insert(0, str(repo))
+            import uncertainty  # noqa: E402
+
+            with mock.patch.object(
+                    fp, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch("flexict_pipeline._acquire_local_gpu",
+                            return_value=None), \
+                 mock.patch.object(
+                     uncertainty, "run_batch",
+                     side_effect=fragment_writing_run_batch):
+                exit_code = fp.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            from nnunet_common import read_json
+
+            status = read_json(job_dir / "status.json", {}) or {}
+            ranked = [row["case"] for row in status.get("ranking") or []]
+            self.assertEqual(["case00", "case01_phase2"], ranked)
+            self.assertEqual(1, status.get("excluded_case_count"))
+            uncertainty_dir = Path(str(status["uncertainty_dir"]))
+            # Only the failed case's own fragments moved to failed/...
+            failed = sorted(
+                path.name
+                for path in (uncertainty_dir / "failed").glob("*.nii.gz"))
+            self.assertEqual(
+                ["case01_consensus.nii.gz",
+                 "case01_uncertainty_disagreement.nii.gz"],
+                failed)
+            # ...the successful sibling's products stayed in place.
+            for name in ("case01_phase2_uncertainty_disagreement.nii.gz",
+                         "case01_phase2_consensus.nii.gz"):
+                self.assertTrue(
+                    (uncertainty_dir / name).is_file(),
+                    "sibling fragment wrongly quarantined: {}".format(name))
+            bands = status.get("uncertainty_bands") or {}
+            self.assertEqual(2, bands["written"]["moderate"])
+            self.assertEqual(2, bands["written"]["high"])
+
     def test_al_fails_without_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset_root = Path(tmp) / "pool"
