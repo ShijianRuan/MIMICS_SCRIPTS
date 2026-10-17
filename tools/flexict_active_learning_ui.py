@@ -455,7 +455,13 @@ class ActiveLearningWindow:
         # slow first write behind a fast second one).
         self._state_write_queue: Queue = Queue()
         self._state_write_thread: threading.Thread | None = None
-        self._state_write_busy = False
+        # T04 re-review: enqueued-minus-processed count under a lock. The
+        # old busy flag was only raised on enqueue, so "queue empty and not
+        # busy" looked clean while the worker was still mid-write on the
+        # item it had already taken — the exit check then reported 0 pending
+        # and the last marking could be dropped.
+        self._state_write_lock = threading.Lock()
+        self._state_write_pending = 0
         self._refresh_async()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -1049,7 +1055,8 @@ class ActiveLearningWindow:
         slow "annotated" could land after a later "skipped" and the case
         ended up with the first, overruled intent. Queue order = click
         order, so the last click is the last write."""
-        self._state_write_busy = True
+        with self._state_write_lock:
+            self._state_write_pending += 1
         self._state_write_queue.put((self._job_dir, case_id, value))
         if self._state_write_thread is None or \
                 not self._state_write_thread.is_alive():
@@ -1062,8 +1069,10 @@ class ActiveLearningWindow:
     def _run_state_writes(self):
         """T04: drain queued state writes strictly in order. The receipt
         carries the value so the poll never confuses one case's annotated
-        receipt with another's skipped. The thread parks on the queue —
-        the exit drain watches the busy flag instead of joining it."""
+        receipt with another's skipped. Pending is counted at enqueue and
+        released ONLY here, after the write (or its failure receipt) — the
+        exit drain reads that counter, because an empty queue never proved
+        the taken item had landed."""
         while True:
             job_dir, case_id, value = self._state_write_queue.get()
             try:
@@ -1072,7 +1081,8 @@ class ActiveLearningWindow:
             except Exception as exc:
                 self._state_write_results.put((case_id, value, str(exc)))
             finally:
-                self._state_write_busy = False
+                with self._state_write_lock:
+                    self._state_write_pending -= 1
 
     def wait_for_state_writes(self, timeout: float = 5.0) -> int:
         """T04: bounded exit drain — a marking the annotator already made
@@ -1081,15 +1091,13 @@ class ActiveLearningWindow:
         unsaved (0 = everything landed)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not self._state_write_busy and \
-                    self._state_write_queue.empty():
+            with self._state_write_lock:
+                pending = self._state_write_pending
+            if pending <= 0:
                 return 0
             time.sleep(0.02)
-        pending = self._state_write_queue.qsize()
-        if self._state_write_busy:
-            # One write is still in flight inside the guard's bounded wait.
-            pending += 1
-        return pending
+        with self._state_write_lock:
+            return max(0, self._state_write_pending)
 
     def _mark_annotated(self):
         case_id = self._selected_case()

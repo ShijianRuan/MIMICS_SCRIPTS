@@ -2527,6 +2527,63 @@ class TestActiveLearningWindow(unittest.TestCase):
             finally:
                 window.window.close()
 
+    def test_exit_drain_counts_write_taken_but_unfinished(self):
+        """T04 轮3：先点「已标注」再点「跳过」，第一笔已落盘、第二笔已被
+        worker 取走正在执行（此刻队列为空）。旧的 busy 标志只在入队时置
+        位、每笔完成即清除，退出检查据此立即返回 0，最后一笔被当作已保存
+        丢弃。未完成计数（入队 - 回执）必须把 in-flight 一笔也算作待保
+        存；释放后终态为最后意图。"""
+        import flexict_active_learning_ui as al_ui
+
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                window.table.selectRow(0)
+                first_done = threading.Event()
+                second_started = threading.Event()
+                release_second = threading.Event()
+
+                def controlled_set_case_state(job_dir, case_id, value):
+                    if value == "annotated":
+                        first_done.set()
+                        return None
+                    # The SECOND write (skipped): in flight, deliberately
+                    # slow (slow workspace / big shared folder).
+                    second_started.set()
+                    release_second.wait(timeout=5.0)
+                    return al_ui.set_case_state(job_dir, case_id, value)
+
+                with mock.patch.object(
+                        al_ui, "set_case_state",
+                        side_effect=controlled_set_case_state):
+                    window._mark_annotated()
+                    window._mark_skipped()
+                    self.assertTrue(
+                        first_done.wait(timeout=5.0),
+                        "first write never ran")
+                    self.assertTrue(
+                        second_started.wait(timeout=5.0),
+                        "second write never taken")
+                    # Exactly the card's window: the second write has been
+                    # DEQUEUED (queue may be empty) and is mid-execution.
+                    pending = window.wait_for_state_writes(timeout=0.3)
+                    self.assertGreaterEqual(
+                        pending, 1,
+                        "in-flight write reported as saved (queue empty)")
+                    release_second.set()
+                # Released: everything lands, count returns to zero and the
+                # disk carries the LAST intent.
+                self.assertEqual(
+                    0, window.wait_for_state_writes(timeout=5.0))
+                state = json.loads(
+                    (Path(window._job_dir) / "annotation_state.json")
+                    .read_text(encoding="utf-8"))
+                self.assertEqual(
+                    "skipped", state["cases"]["caseA"]["state"])
+            finally:
+                release_second.set()
+                window.window.close()
+
     def test_failed_request_message_survives_refresh(self):
         # F14/T14: the poll sets the outcome AFTER refreshing the table.
         with tempfile.TemporaryDirectory() as tmp:
