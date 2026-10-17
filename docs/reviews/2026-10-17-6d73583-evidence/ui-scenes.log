@@ -1,0 +1,55 @@
+qt.qpa.fonts: Populating font family aliases took 55 ms. Replace uses of missing font family "Segoe UI" with one that exists to avoid this cost.
+{
+  "nnunet_recovery_entry": {
+    "enabled": true,
+    "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。",
+    "button_size": [
+      80,
+      36
+    ],
+    "button_visible_size": [
+      80,
+      36
+    ],
+    "window_size": [
+      853,
+      440
+    ]
+  },
+  "nnunet_restore_callback": {
+    "elapsed_seconds": 0.4135961669962853,
+    "fingerprint_reads_on_ui_thread": true,
+    "timer_callbacks_during_restore": 0,
+    "timer_callbacks_after_process_events": 1,
+    "restored_value": 1,
+    "synthetic_delay_per_storage_read_seconds": 0.2
+  },
+  "flexict_recovery_entry": {
+    "enabled": true,
+    "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。",
+    "button_size": [
+      80,
+      36
+    ],
+    "button_visible_size": [
+      80,
+      36
+    ],
+    "window_size": [
+      853,
+      440
+    ]
+  },
+  "flexict_restore_callback": {
+    "elapsed_seconds": 0.42098529206123203,
+    "fingerprint_reads_on_ui_thread": true,
+    "timer_callbacks_during_restore": 0,
+    "timer_callbacks_after_process_events": 1,
+    "restored_value": 1,
+    "synthetic_delay_per_storage_read_seconds": 0.2
+  },
+  "receipt_warning": {
+    "note": "1 例工程已生成但撤销记录写入失败（caseA），正在自动补写",
+    "rows": 1
+  }
+}

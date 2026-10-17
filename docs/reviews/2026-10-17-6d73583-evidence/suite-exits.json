@@ -1,0 +1,82 @@
+[
+  {
+    "suite": "ui",
+    "command": [
+      "<audit-python>",
+      "tests/test_ui_workflow_regressions.py"
+    ],
+    "exit": 1
+  },
+  {
+    "suite": "gui",
+    "command": [
+      "<audit-python>",
+      "tests/test_gui_smoke.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "nnunet",
+    "command": [
+      "<audit-python>",
+      "tests/test_nnunet_integration.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "flexict",
+    "command": [
+      "<audit-python>",
+      "tests/test_flexict_integration.py"
+    ],
+    "exit": 1
+  },
+  {
+    "suite": "remote",
+    "command": [
+      "<audit-python>",
+      "tests/test_remote_training.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "runtime",
+    "command": [
+      "<audit-python>",
+      "tests/test_all.py",
+      "TestSyntax",
+      "TestScriptingLibraryEntries",
+      "TestImportReceiptAndUndo",
+      "TestFlexiCTActiveLearningApply",
+      "TestNNInteractiveContinuousPrompting",
+      "TestNNInteractiveSessionWriteMode",
+      "TestImportDropWindow",
+      "TestGuiThreadBlockingContract"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "cross",
+    "command": [
+      "<audit-python>",
+      "tests/test_cross_workflow_transitions.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "geometry",
+    "command": [
+      "<audit-python>",
+      "tests/test_geometry_manifest_regressions.py"
+    ],
+    "exit": 0
+  },
+  {
+    "suite": "review",
+    "command": [
+      "<audit-python>",
+      "tests/test_review_workflow_regressions.py"
+    ],
+    "exit": 0
+  }
+]

@@ -1,0 +1,117 @@
+{
+  "source_commit": "6d735832db9847e98d60fd99eab4f241b21c6d28",
+  "result": "pass",
+  "method": "Independent post-generation check against observed outputs and source identity; no Windows/Mimics medical validation claim",
+  "checks": [
+    {
+      "claim": "Receipt absent replay writes correct snapshotted generation without changing project",
+      "verified": true,
+      "evidence": "observations.json:receipt_replay_missing; real replay/JSON files"
+    },
+    {
+      "claim": "Existing old receipt is falsely healed and pending new-generation payload discarded",
+      "verified": true,
+      "evidence": "observations.json:receipt_replay_existing"
+    },
+    {
+      "claim": "Visible receipt failure text is now passed through actual status-row contract",
+      "verified": true,
+      "evidence": "observations.json:receipt_visible_note and actual batch-receipt-warning.png"
+    },
+    {
+      "claim": "Changed existing target is protected and validated candidate retained",
+      "verified": true,
+      "evidence": "observations.json:publish_changed_existing"
+    },
+    {
+      "claim": "Absent-at-start guard is disabled and later target replaced",
+      "verified": true,
+      "evidence": "observations.json:publish_appeared_later; exact production fingerprint/publisher chain"
+    },
+    {
+      "claim": "Normal restore succeeds and later manual edit blocks another restore",
+      "verified": true,
+      "evidence": "observations.json:restore_*"
+    },
+    {
+      "claim": "96-slice actual gzip decode is near linear ~1.04x",
+      "verified": true,
+      "evidence": "observations.json:gzip_cost; actual reader return-byte count"
+    },
+    {
+      "claim": "Fixed explicit-count grouped and four-case splits preserve c0-only validation",
+      "verified": true,
+      "evidence": "observations.json:frozen_grouped/frozen_four"
+    },
+    {
+      "claim": "Automatic proportion still expands frozen validation after data growth",
+      "verified": true,
+      "evidence": "observations.json:frozen_default_expansion"
+    },
+    {
+      "claim": "Partly missing spacing/all-missing position reject; regular input passes",
+      "verified": true,
+      "evidence": "observations.json:dicom; real public geometry functions with synthetic headers"
+    },
+    {
+      "claim": "All-missing spacing and nonorthogonal directions remain accepted",
+      "verified": true,
+      "evidence": "observations.json:dicom; DICOM official plane-module semantic reference linked in report"
+    },
+    {
+      "claim": "Single underscore exact labels resolve while double underscore aliases remain ambiguous",
+      "verified": true,
+      "evidence": "observations.json:flat_labels_*"
+    },
+    {
+      "claim": "Exit drain reports zero while second write is active and first value still persisted",
+      "verified": true,
+      "evidence": "observations.json:fifo_exit_drain/fifo_final_state; controlled schedule and actual OS lock/JSON"
+    },
+    {
+      "claim": "Original AL partial-write result now excludes failed case",
+      "verified": true,
+      "evidence": "observations.json:al_partial_write; only model/GPU and consensus write boundaries replaced"
+    },
+    {
+      "claim": "Shared-prefix successful case files get quarantined and whole AL run fails safely",
+      "verified": true,
+      "evidence": "observations.json:al_prefix_collision; actual full AL chain with failed consensus save"
+    },
+    {
+      "claim": "Same-second generated run basenames differ by UUID",
+      "verified": true,
+      "evidence": "observations.json:al_uuid_names; two invocations, naming clock controlled"
+    },
+    {
+      "claim": "nnunet recovery button is visible and actual restore callback blocks UI under slow-storage simulation",
+      "verified": true,
+      "evidence": "ui-observations.json and manually inspected actual Qt PNG; 200ms injected per fingerprint read, not native performance claim"
+    },
+    {
+      "claim": "flexict recovery button is visible and actual restore callback blocks UI under slow-storage simulation",
+      "verified": true,
+      "evidence": "ui-observations.json and manually inspected actual Qt PNG; 200ms injected per fingerprint read, not native performance claim"
+    },
+    {
+      "claim": "Primary regression totals preserve failures, missing dependency and platform skips",
+      "verified": true,
+      "evidence": "10 final primary raw logs; no diagnostic replacements counted"
+    },
+    {
+      "claim": "Previous-card and open-card counts align with independent findings",
+      "verified": true,
+      "evidence": "2026-10-17-6d73583-revalidation.json"
+    },
+    {
+      "claim": "Git audit range has 9 commits and 20 changed files",
+      "verified": true,
+      "evidence": "exact Git topology and fixed source SHA"
+    },
+    {
+      "claim": "Source snapshot, artifact hashes, document links, JSON, executable syntax and source locations validate",
+      "verified": true,
+      "evidence": "manifest and explicit checks"
+    }
+  ]
+}

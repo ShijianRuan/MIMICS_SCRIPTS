@@ -1,0 +1,103 @@
+{
+  "source_commit": "6d735832db9847e98d60fd99eab4f241b21c6d28",
+  "suites": [
+    {
+      "suite": "ui",
+      "executed": 23,
+      "passed": 21,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0,
+      "log": "ui.log"
+    },
+    {
+      "suite": "gui",
+      "executed": 88,
+      "passed": 85,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 3,
+      "log": "gui.log"
+    },
+    {
+      "suite": "nnunet",
+      "executed": 138,
+      "passed": 138,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "nnunet.log"
+    },
+    {
+      "suite": "flexict",
+      "executed": 148,
+      "passed": 147,
+      "failures": 0,
+      "errors": 1,
+      "skipped": 0,
+      "log": "flexict.log"
+    },
+    {
+      "suite": "remote",
+      "executed": 140,
+      "passed": 140,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "remote.log"
+    },
+    {
+      "suite": "runtime",
+      "executed": 114,
+      "passed": 114,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "runtime.log"
+    },
+    {
+      "suite": "cross",
+      "executed": 2,
+      "passed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "cross.log"
+    },
+    {
+      "suite": "geometry",
+      "executed": 6,
+      "passed": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "geometry.log"
+    },
+    {
+      "suite": "review",
+      "executed": 11,
+      "passed": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "review.log"
+    },
+    {
+      "suite": "runtime-changed",
+      "executed": 64,
+      "passed": 64,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "runtime-changed.log"
+    }
+  ],
+  "totals": {
+    "executed": 734,
+    "passed": 728,
+    "failures": 2,
+    "errors": 1,
+    "skipped": 3
+  },
+  "scope": "10 affected suite/class selections; executions may overlap; no real Mimics or model inference"
+}

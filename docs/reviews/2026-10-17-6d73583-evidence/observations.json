@@ -1,0 +1,432 @@
+{
+  "receipt_replay_missing": {
+    "healed": [
+      "caseA"
+    ],
+    "pending": {},
+    "written_guid": "new-mask-guid",
+    "expected_guid": "new-mask-guid",
+    "source_fingerprint": "new-source",
+    "project_unchanged": true
+  },
+  "receipt_replay_existing": {
+    "healed": [
+      "caseA"
+    ],
+    "pending": {},
+    "written_guid": "old-mask-guid",
+    "expected_guid": "new-mask-guid",
+    "source_fingerprint": "old-source",
+    "project_unchanged": true
+  },
+  "receipt_visible_note": {
+    "row": {
+      "kind": "Import",
+      "label": "synthetic",
+      "status": "closed",
+      "phase": "",
+      "completed": 1,
+      "failed": 0,
+      "total": 0,
+      "case_id": "",
+      "error": "",
+      "updated_at_epoch": 0.0,
+      "status_path": "<synthetic-state>/synthetic-status.json",
+      "job_dir": "<synthetic-state>",
+      "output_path": "",
+      "receipt_failed": 1,
+      "receipt_failed_cases": "caseA"
+    },
+    "note": "1 例工程已生成但撤销记录写入失败（caseA），正在自动补写"
+  },
+  "publish_changed_existing": {
+    "initial_fingerprint": "0eb535b01cbc3897294ac75e8690effd78e92d6eb06041f269efe8ae40e66f46",
+    "accepted": false,
+    "newer_target_preserved": true,
+    "candidate_parked": true,
+    "error": "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），为避免覆盖较新的结果，本次预测未替换它。本次预测已保留在：<synthetic-state>/changed_existing/prediction.nii.candidate-ba950e9d.nii.gz",
+    "final_value": 3
+  },
+  "publish_appeared_later": {
+    "initial_fingerprint": null,
+    "accepted": true,
+    "newer_target_preserved": false,
+    "candidate_parked": null,
+    "error": "",
+    "final_value": 2
+  },
+  "restore_normal": {
+    "current_value": 1,
+    "kept_previous_exists": true
+  },
+  "restore_after_manual_edit": {
+    "blocked": true,
+    "current_preserved": true
+  },
+  "gzip_cost": {
+    "payload_bytes": 393216,
+    "decompressed_bytes": 409952,
+    "amplification": 1.0425618489583333
+  },
+  "frozen_grouped": [
+    {
+      "train": [
+        "c1"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1"
+      ],
+      "val": [
+        "c0"
+      ]
+    }
+  ],
+  "frozen_four": [
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3"
+      ],
+      "val": [
+        "c0"
+      ]
+    }
+  ],
+  "frozen_default_expansion": [
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c4",
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "val": [
+        "c0",
+        "c3"
+      ]
+    },
+    {
+      "train": [
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "val": [
+        "c0",
+        "c1"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6"
+      ],
+      "val": [
+        "c0",
+        "c7"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c3",
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "val": [
+        "c0",
+        "c4"
+      ]
+    },
+    {
+      "train": [
+        "c1",
+        "c2",
+        "c4",
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "val": [
+        "c0",
+        "c3"
+      ]
+    }
+  ],
+  "dicom": [
+    {
+      "case": "regular",
+      "accepted": true,
+      "affine": [
+        [
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "case": "partly_missing_spacing",
+      "accepted": false,
+      "error": "该 DICOM 序列有 1 个层面缺少像素间距（PixelSpacing，如 <unknown>），间距不完整的序列无法证明为统一网格，已拒绝导入。请回原图源重新导出。"
+    },
+    {
+      "case": "all_missing_spacing",
+      "accepted": true,
+      "affine": [
+        [
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "case": "all_missing_position",
+      "accepted": false,
+      "error": "该 DICOM 序列的所有层面都缺少层面位置（ImagePositionPatient），无法确定物理坐标（原点与层间距将被凭空构造），已拒绝导入。请回原图源重新导出带位置的序列。"
+    },
+    {
+      "case": "non_unit_direction",
+      "accepted": true,
+      "affine": [
+        [
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "case": "non_orthogonal_direction",
+      "accepted": true,
+      "affine": [
+        [
+          -1.0,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  ],
+  "flat_labels_single": {
+    "Liver-Left": {
+      "files": [
+        "caseA_Liver-Left.nii.gz"
+      ]
+    },
+    "Liver_Left": {
+      "files": [
+        "caseA_Liver_Left.nii.gz"
+      ]
+    }
+  },
+  "flat_labels_double": {
+    "Liver-Left": {
+      "error": "Case 'caseA' has more than one file matching aliases Liver-Left: caseA__Liver-Left.nii.gz, caseA__Liver_Left.nii.gz"
+    },
+    "Liver_Left": {
+      "error": "Case 'caseA' has more than one file matching aliases Liver_Left: caseA__Liver-Left.nii.gz, caseA__Liver_Left.nii.gz"
+    }
+  },
+  "fifo_exit_drain": {
+    "pending_reported": 0,
+    "queue_size": 0,
+    "busy_flag": false,
+    "second_write_inflight": true,
+    "persisted_before_second_release": "annotated"
+  },
+  "fifo_final_state": "skipped",
+  "al_partial_write": {
+    "code": 0,
+    "status": "completed",
+    "ranked": [
+      "case00",
+      "case02"
+    ],
+    "excluded_case_count": 1,
+    "error": null,
+    "uncertainty_dir": "<synthetic-state>/al_normal/jobs/infer/uncertainty_run_20261017T160505_1b20e200",
+    "failed_fragments": [
+      "case01_uncertainty_disagreement.nii.gz"
+    ]
+  },
+  "al_prefix_collision": {
+    "code": 1,
+    "status": "failed",
+    "ranked": [],
+    "excluded_case_count": null,
+    "error": "RuntimeError: 排名结果与本轮成功清单不一致（排名 1 例、成功 2 例），排名未生成。请重试本轮不确定度计算。",
+    "uncertainty_dir": null,
+    "failed_fragments": [
+      "case01_phase2_consensus.nii.gz",
+      "case01_uncertainty_disagreement.nii.gz",
+      "case01_phase2_uncertainty_disagreement.nii.gz"
+    ]
+  },
+  "al_uuid_names": {
+    "names": [
+      "uncertainty_run_20000101T000000_ed845a09",
+      "uncertainty_run_20000101T000000_b299878a"
+    ],
+    "both_completed": true,
+    "different": true
+  }
+}

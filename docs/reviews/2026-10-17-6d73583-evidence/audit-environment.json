@@ -1,0 +1,21 @@
+{
+  "source_commit": "6d735832db9847e98d60fd99eab4f241b21c6d28",
+  "python": "3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]",
+  "platform": "darwin",
+  "packages": {
+    "numpy": "2.3.5",
+    "nibabel": "5.4.2",
+    "pydicom": "3.0.2",
+    "SimpleITK": "2.5.6",
+    "scipy": "1.18.1",
+    "PySide6_Essentials": "6.12.0",
+    "shiboken6": "6.12.0",
+    "pytest": "9.1.1"
+  },
+  "unavailable": [
+    "torch",
+    "model weights",
+    "Windows",
+    "Mimics"
+  ]
+}
