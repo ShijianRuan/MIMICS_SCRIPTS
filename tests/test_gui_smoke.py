@@ -2325,8 +2325,12 @@ class TestActiveLearningWindow(unittest.TestCase):
                 job_dir = Path(window._job_dir)
                 guard_file = job_dir / "annotation_state.json.guard"
                 guard_file.write_bytes(b"\0")
-                # Simulate Mimics holding the single-writer guard.
+                # Simulate Mimics holding the single-writer guard. a+b
+                # starts at EOF and msvcrt locks from the current
+                # position — seek(0) or this locks byte 1, not the byte
+                # the worker contends on, and no contention ever happens.
                 handle = open(str(guard_file), "a+b")
+                handle.seek(0)
                 import msvcrt
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                 try:
@@ -2357,6 +2361,103 @@ class TestActiveLearningWindow(unittest.TestCase):
                 self.assertEqual(
                     "已标注", window.table.item(0, 4).text())
                 self.assertIn("已标注 1 例", window.status_label.text())
+            finally:
+                window.window.close()
+
+    def test_click_order_last_intent_wins(self):
+        """T04: 先点「已标注」再点「跳过」时，第一次写入可能卡在跨进程
+        锁上。每次点击各开线程的年代里两个写入乱序落盘，最终状态是已被
+        覆盖的第一个意图。单一顺序工作线程必须保证磁盘终态 = 最后一次
+        点击，且回执不把两个值串起来。"""
+        if os.name != "nt":
+            self.skipTest("guard-hold simulation uses msvcrt")
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                window.table.selectRow(0)
+                job_dir = Path(window._job_dir)
+                guard_file = job_dir / "annotation_state.json.guard"
+                guard_file.write_bytes(b"\0")
+                # 让第一笔写入"晚完成"：按住锁，第一次点击的守护线程
+                # 在锁的有界等待里排队。a+b 的指针在文件尾，msvcrt 锁
+                # 的是当前位置的字节——必须先 seek(0) 才真锁住 worker
+                # 竞争的第 0 字节。
+                handle = open(str(guard_file), "a+b")
+                handle.seek(0)
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                try:
+                    window._mark_annotated()
+                    window._mark_skipped()
+                    # 两笔都已登记待写：第一笔卡在锁上，第二笔排在其后
+                    # （worker 可能已取走第一笔，队列里剩 1 或 2 笔）。
+                    self.assertIn(
+                        window._state_write_queue.qsize(), (1, 2))
+                finally:
+                    msvcrt.locking(
+                        handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    handle.close()
+                # 解锁后按顺序落盘：annotated 先写、skipped 后写，
+                # 终态必须是最后点击的 skipped。
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    _AppFixture.app().processEvents()
+                    window._poll_background_results()
+                    if window.table.item(0, 4).text() == "已跳过":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(
+                    "已跳过", window.table.item(0, 4).text())
+                state = json.loads(
+                    (job_dir / "annotation_state.json").read_text(
+                        encoding="utf-8"))
+                self.assertEqual(
+                    "skipped", state["cases"]["caseA"]["state"])
+            finally:
+                window.window.close()
+
+    def test_exit_drain_bounded_and_reports_unsaved(self):
+        """T04 失败路径：点击后立刻关窗，守护线程会在进程退出时被砍掉，
+        标记静默丢失。退出排空必须有界等待：锁一直被占时及时返回并如实
+        报告未保存数量，而不是无限等待或假装成功。"""
+        if os.name != "nt":
+            self.skipTest("guard-hold simulation uses msvcrt")
+        with tempfile.TemporaryDirectory() as tmp:
+            window = self._window(tmp)
+            try:
+                window.table.selectRow(0)
+                job_dir = Path(window._job_dir)
+                guard_file = job_dir / "annotation_state.json.guard"
+                guard_file.write_bytes(b"\0")
+                # a+b 指针在文件尾：seek(0) 后锁的才是 worker 竞争的
+                # 第 0 字节（同 test_click_order_last_intent_wins）。
+                handle = open(str(guard_file), "a+b")
+                handle.seek(0)
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                try:
+                    window._mark_annotated()
+                    started = time.time()
+                    pending = window.wait_for_state_writes(timeout=0.5)
+                    elapsed = time.time() - started
+                    # 有界：没有无限等待（守卫自身上限 2 s，这里 0.5 s
+                    # 就该让步），并如实报告还有未保存的标记。
+                    self.assertLess(elapsed, 1.5)
+                    self.assertGreaterEqual(pending, 1)
+                    self.assertFalse(
+                        (job_dir / "annotation_state.json").exists(),
+                        "锁被占时不得落盘")
+                finally:
+                    msvcrt.locking(
+                        handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    handle.close()
+                # 解锁后再排空：写入落地，计数归零。
+                self.assertEqual(0, window.wait_for_state_writes(timeout=5.0))
+                state = json.loads(
+                    (job_dir / "annotation_state.json").read_text(
+                        encoding="utf-8"))
+                self.assertEqual(
+                    "annotated", state["cases"]["caseA"]["state"])
             finally:
                 window.window.close()
 

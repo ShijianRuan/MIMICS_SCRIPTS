@@ -450,6 +450,12 @@ class ActiveLearningWindow:
         # (up to 2 s) must not run on the GUI thread. Same worker + poll
         # pattern as the scans above.
         self._state_write_results: Queue = Queue()
+        # T04: one FIFO worker applies the writes in click order, so the
+        # LAST marking wins on disk (per-click threads could interleave a
+        # slow first write behind a fast second one).
+        self._state_write_queue: Queue = Queue()
+        self._state_write_thread: threading.Thread | None = None
+        self._state_write_busy = False
         self._refresh_async()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -592,7 +598,8 @@ class ActiveLearningWindow:
         first_error = ""
         while True:
             try:
-                _case_id, error = self._state_write_results.get_nowait()
+                _case_id, _value, error = \
+                    self._state_write_results.get_nowait()
             except Empty:
                 break
             if error:
@@ -1035,20 +1042,54 @@ class ActiveLearningWindow:
         to its timeout while Mimics holds the lock — running it directly in
         the click handler froze the window for those seconds. Write on a
         worker thread (the guard serializes concurrent writers); the poll
-        timer applies the outcome and refreshes the row."""
-        job_dir = self._job_dir
+        timer applies the outcome and refreshes the row.
 
-        def write():
+        T04: the writes queue FIFO onto ONE worker instead of one thread
+        per click — the guard serializes writers but not click order, so a
+        slow "annotated" could land after a later "skipped" and the case
+        ended up with the first, overruled intent. Queue order = click
+        order, so the last click is the last write."""
+        self._state_write_busy = True
+        self._state_write_queue.put((self._job_dir, case_id, value))
+        if self._state_write_thread is None or \
+                not self._state_write_thread.is_alive():
+            self._state_write_thread = threading.Thread(
+                target=self._run_state_writes,
+                name="al-state-write", daemon=True)
+            self._state_write_thread.start()
+        self.status_label.setText('正在{0} {1}…'.format(verb, case_id))
+
+    def _run_state_writes(self):
+        """T04: drain queued state writes strictly in order. The receipt
+        carries the value so the poll never confuses one case's annotated
+        receipt with another's skipped. The thread parks on the queue —
+        the exit drain watches the busy flag instead of joining it."""
+        while True:
+            job_dir, case_id, value = self._state_write_queue.get()
             try:
                 set_case_state(job_dir, case_id, value)
-                self._state_write_results.put((case_id, None))
+                self._state_write_results.put((case_id, value, None))
             except Exception as exc:
-                self._state_write_results.put((case_id, str(exc)))
+                self._state_write_results.put((case_id, value, str(exc)))
+            finally:
+                self._state_write_busy = False
 
-        worker = threading.Thread(
-            target=write, name="al-state-write", daemon=True)
-        worker.start()
-        self.status_label.setText('正在{0} {1}…'.format(verb, case_id))
+    def wait_for_state_writes(self, timeout: float = 5.0) -> int:
+        """T04: bounded exit drain — a marking the annotator already made
+        must not be lost silently when the window closes. Waits up to
+        `timeout` for the writes to land, then reports how many are still
+        unsaved (0 = everything landed)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self._state_write_busy and \
+                    self._state_write_queue.empty():
+                return 0
+            time.sleep(0.02)
+        pending = self._state_write_queue.qsize()
+        if self._state_write_busy:
+            # One write is still in flight inside the guard's bounded wait.
+            pending += 1
+        return pending
 
     def _mark_annotated(self):
         case_id = self._selected_case()
@@ -1113,7 +1154,14 @@ def main() -> int:
         app.setStyleSheet(stylesheet())
         window = ActiveLearningWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()
-        return int(app.exec())
+        exit_code = int(app.exec())
+        # T04: a marking already clicked must land (or say it didn't)
+        # before the process exits — a daemon worker alone would drop it.
+        pending = window.wait_for_state_writes()
+        if pending:
+            print('警告：有 {0} 个标记未在退出前保存。'.format(pending),
+                  file=sys.stderr)
+        return exit_code
     except Exception as exc:
         if context.get("setup_status_path"):
             from nnunet_common import update_status
