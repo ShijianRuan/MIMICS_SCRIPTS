@@ -69,7 +69,7 @@
       "id": "S01",
       "priority": "P1",
       "title": "补写遇到旧回执就清空待办，把错误版本当作补写成功",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S01",
         "R03",
@@ -109,13 +109,14 @@
         "旧回执存在时不丢新待办；补写后GUID/源指纹/导入时工程摘要一致，人工保存不被重新采样为历史事实。",
         "任务已关闭且没有扫描器时不持续显示“正在自动补写”；重启/重试触发与实际状态一致。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "补写逐条计算载荷事务摘要（canonical JSON sha256）与磁盘回执比对：摘要一致视为已愈且不改写文件；磁盘回执 created_at_epoch 更新视为待办过时（保留磁盘版本，撤销证据已在盘上）；仅旧回执/损坏 JSON 才原子替换，写后读回验证摘要一致才出队。状态面板文案区分任务已结束（重新运行导入任务后补写）与进行中（正在自动补写）。测试：test_all.py 新增 4 个失败路径测试（旧回执替换、摘要一致不改写、损坏 JSON 替换、待办过时保留新回执）+ viewer 文案状态区分断言。验证：commit 711b706、smoke 8/8（工件 20261017T165051_smoke.json）。"
     },
     {
       "id": "S02",
       "priority": "P1",
       "title": "任务启动时目标不存在会禁用冲突检查，后来出现的新结果仍被覆盖",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S02",
         "R10",
@@ -157,13 +158,14 @@
         "启动存在→修改/删除/重建、不可读、两个并发首次发布均覆盖。",
         "正常替换和恢复保持可用，界面可打开旧版；不能仅测试初始目标已经存在的分支。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "nnunet_common 新增 FINGERPRINT_ABSENT/FINGERPRINT_UNREADABLE 哨兵与 capture_output_fingerprint（缺失/存在/不可读三态显式入档，哨兵字符串可经 status.json JSON 往返）与 publish_target_conflict（无法证明未变=冲突：运行期出现/删除/修改/不可读均保守拒替）。本地 nnunet/flexict run_inference、远程 _prepare_*_infer 改用三态捕获，publish 冲突分支统一判定；目标在运行期间被删除也不再静默首发布。测试：absent→出现冲突（目标原样+候选停泊）、absent→仍缺失正常首发布、存在→删除冲突、启动不可读保守冲突、远程 prepare 记录 absent 后目标出现冲突；nnunet publish 11 passed、remote RemotePredictionPublish 7 passed。验证：commit 72c7916、smoke 8/8（工件 20261017T163340）。"
     },
     {
       "id": "S06",
       "priority": "P1",
       "title": "全部缺像素间距仍默认为1mm，非法方向也未被完整拒绝",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S06",
         "R09",
@@ -197,13 +199,14 @@
         "规则斜位、线性机架倾斜和合理舍入误差仍通过。",
         "Windows/Mimics以物理点和多Image身份核对，不能只比shape。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "任何层面缺 PixelSpacing 一律拒绝（默认 1mm 不是证据）；IOP 需为 6 个有限数值、行/列向量近似单位（容差 1e-3）且相互正交，仅容许舍入级偏差；get_image_affine_from_dicom 中不可达的 [1,1] 间距与单位方向捏造回退同步删除。测试：test_dicom_helpers_refuse_default_spacing_and_bad_orientation（全缺间距、单位长 45° 非正交、非单位、长度不足四类拒绝；规则斜位与 1e-6 舍入仍通过且 in-plane 轴携带真实间距）；既有 4 个 DICOM 几何测试不受影响。验证：commit a9d66b0、smoke 8/8（工件 20261017T165806_smoke.json）。"
     },
     {
       "id": "T02",
       "priority": "P1",
       "title": "指定验证数的反例已修，自动比例下新增病例仍扩张冻结验证集",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "T02",
         "S05",
@@ -240,13 +243,14 @@
         "明确重划分时显示新增/移出成员与患者组影响，用户决定后形成新评估版本。",
         "保留两患者非空训练及最终writer校验；新增数据、中文key、多期患者组都验证。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "拆出 _validation_target_count 统一两条路径（分组/非分组）语义：显式 val_cases 数仍是权威（允许扩员）；自动比例下有冻结集则目标=冻结集成员数，仅患者组闭包可新增已验证患者的新期相，新患者/新病例不再自动入验证。最终写盘与远程复用同一清单，引擎语义一致。测试：test_split_folds_auto_fraction_does_not_grow_frozen_validation（4→8 例冻结成员不变（分组与非分组）、同患者新期相经组闭包入验证而新患者不入、显式 val_cases=2 仍可扩员）；既有 15 个 split/materialize 测试不受影响。验证：commit 0de5186、smoke 8/8（工件 20261017T170457_smoke.json）。"
     },
     {
       "id": "T03",
       "priority": "P2",
       "title": "平铺单下划线已修，双下划线病例前缀仍被短前缀抢先解析",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "T03",
         "S07",
@@ -280,13 +284,14 @@
         "别名、大小写、Unicode与相似病例前缀不跨病例认领。",
         "无唯一匹配时清楚说明候选与处理办法，不用英文技术错误代替引导。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "_strip_case_prefix 改为最长分隔符（“__”）优先：确认病例边界后保留原标签拼写做语义精确匹配，不再被短前缀抢占；单下划线、横线、点、空格布局与跨标签源文件独占保护（S07）不变。测试：test_find_label_files_flat_layout_matches_exact_after_prefix 追加双下划线两近似标签各自唯一匹配 + 横线/点前缀矩阵；4 项查找测试全绿。验证：commit ccae207、smoke 8/8（工件 20261017T172501_smoke.json）。"
     },
     {
       "id": "T04",
       "priority": "P2",
       "title": "FIFO顺序已正确，但退出检查会在最后一笔仍运行时误报全部保存",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "T04",
         "S08",
@@ -325,13 +330,14 @@
         "全部成功后返回0且磁盘为最后意图；写入失败单列处理，不能当作已保存。",
         "真实Qt关闭窗口、锁超时、断开共享目录、跨任务切换均有清楚可见的结果。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "退出排空改为锁保护的未完成计数：入队 +1，worker 在写入（或失败回执）完成后才 −1，wait_for_state_writes 读计数而非以空队列猜测；in-flight 写入不再被误报为已保存。FIFO 顺序、失败回执单列、跨进程锁保护不变。测试：test_exit_drain_counts_write_taken_but_unfinished（第一笔完成、第二笔已出队且被阻塞时退出检查报告 ≥1 待保存，释放后计数归零且磁盘终态=最后意图）。验证：commit 64334c9、smoke 8/8（工件 20261017T173455_smoke.json）。"
     },
     {
       "id": "U01",
       "priority": "P1",
       "title": "隔离失败残片按病例前缀匹配，误搬走同前缀的成功病例",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S10",
         "R15",
@@ -361,13 +367,14 @@
         "排名/辅助带只包含成功病例，失败原因逐例可见。",
         "同秒多轮隔离、旧轮保留及本轮部分写失败保护不回退。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "失败残片隔离改为精确文件名匹配：只隔离失败病例自身的两个确切产物文件（{case}_uncertainty_{method}.nii.gz 与 {case}_consensus.nii.gz，run_batch 在本调用参数下仅产出这两种），不再以 startswith 病例前缀判定归属；排名/辅助带继续只消费成功清单，S10 部分写失败保护与集合一致性断言不变。测试：test_al_quarantine_does_not_swallow_prefix_sibling_case（case01 失败、case01_phase2 成功时仅前者残片入 failed/，兄弟病例产物原位保留并正常进排名与辅助带）；既有 23 个 AL 测试不受影响。验证：commit 45bdd26、smoke 8/8（工件 20261017T171953_smoke.json）。"
     },
     {
       "id": "U02",
       "priority": "P2",
       "title": "恢复旧结果的入口可见，但完整校验和文件交换同步运行在界面线程",
-      "status": "open",
+      "status": "fixed",
       "previous_ids": [
         "S02",
         "R04"
@@ -407,7 +414,8 @@
         "成功与冲突/权限/磁盘错误均在GUI线程呈现，但文件IO都在worker。",
         "重复点击、切换任务、关闭窗口不会重复交换或失去版本位置。"
       ],
-      "target_environment_validation": "not_run"
+      "target_environment_validation": "not_run",
+      "fix_note": "恢复旧结果的体素校验/文件摘要/交换移到 worker 线程执行，100ms QTimer 轮询回执队列在 GUI 线程弹结果框；busy 标志拒绝恢复期间重复提交，关窗停掉轮询定时器避免在已销毁窗口上回调（铁律 1）。测试：tests/test_gui_smoke.py TestRestorePreviousOffGuiThread 7 项——慢 IO 期间 GUI 线程持续可响应且 IO 不在 GUI 线程、busy 二次点击不重复交换、失败回执在 GUI 线程呈现、关窗停轮询不再触达窗口（nnunet 与 flexict 两 viewer 同构覆盖）。验证：commit e8f4770、smoke 8/8（工件 20261017T180022_smoke.json）。"
     }
   ],
   "regression_totals": {

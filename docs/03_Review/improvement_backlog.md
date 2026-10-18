@@ -3419,3 +3419,52 @@ S04/S10 语义波及的两处测试未同步 + overlay 旧目录缺口，补充�
 **验证**：每卡独立失败路径测试 + smoke 门禁全绿（工件见
 revalidation.json 各 fix_note）；轮末 fast 门禁 30/30（工件
 20261017T143045_fast.json）。净代码变化见复杂度账本修复轮 2 行。
+
+### 修复轮 3（2026-10-17/18 复审销项轮：6d73583-revalidation 8 卡全部修复 + 1 项 P0）
+
+> 用户指令：修复 `docs/reviews/2026-10-17-6d73583-revalidation.md`
+> （轮 3 复审，基线 6d73583）的 8 项开放卡（6 张 remaining_partial：
+> S01/S02/S06/T02/T03/T04；2 张新增：U01/U02）。逐卡：失败路径测试 →
+> smoke 门禁 → 独立 commit → revalidation.json 卡片同步。P1×5、P2×3，
+> 全部关闭；另有 fast 门禁暴露的 P0（gui_smoke 堆损坏闪退）一并修复。
+
+- [x] **S02【P1】启动时目标缺失绕过冲突检查**〔commit `72c7916`〕：
+  目标存在性显式入档（FINGERPRINT_ABSENT/FINGERPRINT_UNREADABLE 哨兵 +
+  capture_output_fingerprint 三态捕获，可经 status.json 往返）；
+  publish_target_conflict 统一判定——无法证明未变即冲突，运行期出现/
+  删除/修改/不可读均保守拒替；本地 nnunet/flexict、远程 prepare 同一
+  策略。
+- [x] **S01【P1】旧回执被谎报为本次导入补写成功**〔commit `711b706`〕：
+  补写按载荷事务摘要（canonical JSON sha256）裁决：一致=已愈不改写、
+  磁盘较新=待办过时保留、旧回执/损坏 JSON 才原子替换且写后读回验证
+  才出队；状态文案区分任务已结束与进行中。
+- [x] **S06【P1】全缺像素间距默认 1mm / 非法方向未拒绝**〔commit
+  `a9d66b0`〕：任何层面缺间距一律拒绝；IOP 需 6 个有限值、行/列向量
+  近似单位（1e-3 容差）且正交；affine 中不可达的捏造回退删除。
+- [x] **T02【P1】自动比例下冻结验证集随病例总量扩员**〔commit
+  `0de5186`〕：_validation_target_count 统一两条路径——显式 val_cases
+  仍权威；自动比例下目标=冻结集成员数，仅患者组闭包可新增已验证
+  患者新期相，新患者/新病例不自动入验证。
+- [x] **U01【P1】失败残片按前缀误搬同前缀成功病例**〔commit
+  `45bdd26`〕：隔离改精确文件名匹配（{case}_uncertainty_{method} 与
+  {case}_consensus 两个确切产物），不再 startswith 前缀归属；
+  case01_phase2 类兄弟病例产物原位保留并正常排名。
+- [x] **T03【P2】双下划线前缀被短前缀抢占**〔commit `ccae207`〕：
+  _strip_case_prefix 改最长分隔符（"__"）优先，确认病例边界后保留原
+  标签拼写做精确匹配；其余布局与跨标签独占保护不变。
+- [x] **T04【P2】退出检查误报 in-flight 写入已保存**〔commit
+  `64334c9`〕：退出排空改锁保护的未完成计数（入队 +1、写入/失败回执
+  完成才 −1），不再以空队列猜测；FIFO 与失败回执单列不变。
+- [x] **U02【P2】恢复旧结果同步 IO 阻塞界面线程**〔commit `e8f4770`〕：
+  校验/摘要/交换移 worker 线程，100ms QTimer 轮询回执队列在 GUI 线程
+  弹结果；busy 拒绝重复提交，关窗停轮询（nnunet/flexict 同构）。
+- [x] **P0【P0】gui_smoke 随机堆损坏闪退（0xC0000374）**〔commit
+  `9ce69c0`，fast 门禁暴露、非复审卡〕：被丢弃查看器窗口的 C++ 部件
+  树此前留给 Python GC 在 collect 中销毁，随机损坏堆并杀死整个套件。
+  三个状态查看器 close() 改为 deleteLater() 把销毁交还 Qt；新增
+  TestWindowCloseTeardown 3 项（修复前 GC 探针测试确定性杀死进程）。
+
+**验证**：每卡独立失败路径测试 + smoke 门禁全绿（工件见
+revalidation.json 各 fix_note）；轮末 fast 门禁 30/30（工件
+20261018T135344_fast.json，gui_smoke 99/99 且连续三次复跑全绿）。
+净代码变化见复杂度账本修复轮 3 行。
