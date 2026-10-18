@@ -267,6 +267,10 @@ class StatusWindow:
     def _close_event(self, event):
         self.refresher.stop()
         self._restore_timer.stop()
+        # Hand the C++ widget tree to Qt: leaving it for Python GC to
+        # destroy mid-collect corrupted the heap (0xC0000374) and killed
+        # whole gui_smoke runs.
+        self.window.deleteLater()
 
     def _populate_tasks(self, snapshot=None):
         """Rebuild the task combo, keeping the user's selection.

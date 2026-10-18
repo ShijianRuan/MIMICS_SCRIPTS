@@ -365,6 +365,10 @@ class BatchStatusWindow:
 
     def _close_event(self, event):
         self.refresher.stop()
+        # Hand the C++ widget tree to Qt: leaving it for Python GC to
+        # destroy mid-collect corrupted the heap (0xC0000374) in the
+        # sibling viewers.
+        self.window.deleteLater()
 
     def refresh(self, rows=None):
         if rows is None:

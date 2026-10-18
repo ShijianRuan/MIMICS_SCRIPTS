@@ -3309,6 +3309,95 @@ class TestWindowClampedToSmallScreen(unittest.TestCase):
                     window.window.close()
 
 
+class TestWindowCloseTeardown(unittest.TestCase):
+    """A closed viewer window must hand its C++ widget tree to Qt.
+
+    Dropping a viewer left its C++ widget tree for Python GC to destroy
+    mid-collect, which corrupted the heap (0xC0000374) and killed whole
+    gui_smoke runs. close() must stop the refresh heartbeat and defer
+    destruction to Qt via deleteLater, so GC only ever clears Python
+    wrappers and never touches a live C++ tree."""
+
+    def test_viewer_close_stops_timers(self):
+        import flexict_status_viewer as viewer
+
+        _AppFixture.app()
+        window = viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            window._restore_timer.start()
+            self.assertFalse(window.refresher._stop)
+            self.assertTrue(window._restore_timer.isActive())
+            window.window.close()
+            self.assertTrue(window.refresher._stop)
+            self.assertFalse(window._restore_timer.isActive())
+        finally:
+            window.window.close()
+
+    def test_setup_close_without_submit_writes_cancelled_status(self):
+        # The Mimics-side launcher waits on this status file; closing the
+        # setup window without a submission must mark it cancelled instead
+        # of leaving the launcher waiting forever.
+        import json
+
+        import nnunet_training_setup_ui as ui
+
+        _AppFixture.app()
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            status_path = tmp / "status" / "setup.json"
+            status_path.parent.mkdir(parents=True)
+            home = tmp / "home"
+            (home / ".mimics_script").mkdir(parents=True)
+            with mock.patch.object(ui.Path, "home", lambda: home):
+                window = ui.TrainingSetupWindow(
+                    {
+                        "workspace": str(tmp / "ws"),
+                        "setup_status_path": str(status_path),
+                    },
+                    tmp / "ctx.json",
+                    QT,
+                )
+                try:
+                    window.window.close()
+                    self.assertTrue(
+                        status_path.exists(),
+                        "closing without submitting must write the "
+                        "cancelled status",
+                    )
+                    payload = json.loads(
+                        status_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(payload.get("status"), "cancelled")
+                finally:
+                    window.window.close()
+
+    def test_closed_viewer_garbage_does_not_corrupt_heap(self):
+        # Regression for the 0xC0000374 crash: the whole gui_smoke run
+        # died when GC destroyed a dropped viewer's C++ widget tree.
+        # Pre-fix this test killed the process; it must finish cleanly.
+        import gc
+
+        import flexict_status_viewer as viewer
+
+        app = _AppFixture.app()
+        for _ in range(6):
+            window = viewer.StatusWindow({"workspace": ""}, QT)
+            window.window.close()
+            del window
+        gc.collect()
+        app.processEvents()
+        probe = QtWidgets.QMainWindow()
+        probe.setWindowTitle("probe")
+        import ui_theme
+
+        ui_theme.clamp_window_to_screen(probe, (800, 620))
+        probe.show()
+        app.processEvents()
+        probe.close()
+        probe.deleteLater()
+        app.processEvents()
+
+
 class _FakeScreen:
     def __init__(self, geometry):
         self._geometry = geometry
