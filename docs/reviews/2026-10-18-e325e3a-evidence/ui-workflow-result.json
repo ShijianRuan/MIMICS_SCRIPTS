@@ -1,0 +1,12 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "suite": "ui-workflow",
+  "selections": [
+    "test_ui_workflow_regressions"
+  ],
+  "executed": 23,
+  "failures": 2,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 21
+}

@@ -1,0 +1,110 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "result": "PASS",
+  "checks": [
+    {
+      "claim": "Normal old receipt replay now writes the queued generation",
+      "verified": true,
+      "evidence": "observations.json:receipt_replay_existing"
+    },
+    {
+      "claim": "Clock rollback keeps old guid despite current project matching queued payload, then clears pending",
+      "verified": true,
+      "evidence": "observations.json:receipt_clock_rollback"
+    },
+    {
+      "claim": "A target appearing after capture is preserved and candidate parked",
+      "verified": true,
+      "evidence": "observations.json:publish_appeared_later"
+    },
+    {
+      "claim": "Both concurrent protected publishers report success; second retains first as backup",
+      "verified": true,
+      "evidence": "observations.json:publish_concurrent; only scheduling gate injected"
+    },
+    {
+      "claim": "Missing spacing/multiple-slice bad direction refuse; valid single/multiple input pass",
+      "verified": true,
+      "evidence": "observations.json:dicom"
+    },
+    {
+      "claim": "Single-plane unit but nonorthogonal IOP remains accepted with sheared affine",
+      "verified": true,
+      "evidence": "observations.json:dicom"
+    },
+    {
+      "claim": "Automatic frozen validation remains c0 across all five folds as dataset grows",
+      "verified": true,
+      "evidence": "observations.json:frozen_default_expansion"
+    },
+    {
+      "claim": "Double-underscore exact labels select one distinct file apiece",
+      "verified": true,
+      "evidence": "observations.json:flat_labels_double"
+    },
+    {
+      "claim": "In-flight FIFO count now remains one before last write lands",
+      "verified": true,
+      "evidence": "observations.json:fifo_exit_drain/fifo_final_state"
+    },
+    {
+      "claim": "Failed write still drains to zero despite empty persisted state",
+      "verified": true,
+      "evidence": "observations.json:failed_write_exit_drain"
+    },
+    {
+      "claim": "Prefix collision AL chain completes while excluding only failed case",
+      "verified": true,
+      "evidence": "observations.json:al_prefix_collision"
+    },
+    {
+      "claim": "nnunet real restore worker preserves GUI responsiveness and restores old voxels",
+      "verified": true,
+      "evidence": "ui-observations.json and actual 853x440 Qt PNGs; delay is synthetic, not a performance benchmark"
+    },
+    {
+      "claim": "nnunet normal Qt process exit interrupts restore between real swaps; versions preserved, status stale",
+      "verified": true,
+      "evidence": "ui-observations.json; child process normal exit, no kill"
+    },
+    {
+      "claim": "flexict real restore worker preserves GUI responsiveness and restores old voxels",
+      "verified": true,
+      "evidence": "ui-observations.json and actual 853x440 Qt PNGs; delay is synthetic, not a performance benchmark"
+    },
+    {
+      "claim": "flexict normal Qt process exit interrupts restore between real swaps; versions preserved, status stale",
+      "verified": true,
+      "evidence": "ui-observations.json; child process normal exit, no kill"
+    },
+    {
+      "claim": "Closed import task feedback no longer claims ongoing replay",
+      "verified": true,
+      "evidence": "ui-observations.json:receipt_warning and batch-receipt-warning.png"
+    },
+    {
+      "claim": "Ten suite/class selections preserve primary results, failures and skips",
+      "verified": true,
+      "evidence": "regression-results.json and each raw primary log"
+    },
+    {
+      "claim": "Eight previous cards assessed independently; four partial plus one new yields five open",
+      "verified": true,
+      "evidence": "../2026-10-18-e325e3a-revalidation.json"
+    },
+    {
+      "claim": "Exact increment is ten commits and nineteen files",
+      "verified": true,
+      "evidence": "Git topology; source-scope.json"
+    },
+    {
+      "claim": "Source symbols, links, AST, JSON and pinned Git/source/evidence hashes agree",
+      "verified": true,
+      "evidence": "manifest.json; symbol and relative-link checks above"
+    }
+  ],
+  "limits": [
+    "No claim of all bugs found or native Windows/Mimics/GPU acceptance",
+    "Schedule gates are injected; actual file/Qt effects are observed"
+  ]
+}

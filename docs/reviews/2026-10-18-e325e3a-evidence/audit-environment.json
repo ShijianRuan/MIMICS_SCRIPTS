@@ -1,0 +1,19 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "python": "3.13.12 | packaged by Anaconda, Inc. | (main, Feb 24 2026, 16:07:20) [Clang 20.1.8 ]",
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "packages": {
+    "numpy": "2.4.6",
+    "nibabel": "5.4.2",
+    "pydicom": "3.0.2",
+    "SimpleITK": "2.5.5",
+    "PySide6": "6.11.1",
+    "pytest": "9.1.1",
+    "torch": "2.12.0",
+    "scipy": "1.17.1"
+  },
+  "limits": [
+    "No Windows/Mimics/CUDA/model weights validation",
+    "Existing host Python; no environment changes"
+  ]
+}

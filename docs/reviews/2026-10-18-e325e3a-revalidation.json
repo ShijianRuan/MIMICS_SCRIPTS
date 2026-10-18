@@ -1,0 +1,303 @@
+{
+  "schema": "mimics_cross_functional_review.v1",
+  "review_date": "2026-10-18",
+  "timezone": "Asia/Shanghai",
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "baseline": "b609be3ece372f0d4299542394ee16f018532527",
+  "commit_count": 10,
+  "changed_file_count": 19,
+  "evidence_dir": "2026-10-18-e325e3a-evidence",
+  "counts": {
+    "previous": 8,
+    "verified_offline": 4,
+    "partial": 4,
+    "open": 5,
+    "remaining": 4,
+    "new": 1,
+    "P1": 4,
+    "P2": 1
+  },
+  "previous_issue_assessment": [
+    {
+      "id": "S01",
+      "status": "partial",
+      "conclusion": "同摘要/较旧/损坏回执补写与关闭文案已改善；回拨时钟仍把旧事务当作补写成功。"
+    },
+    {
+      "id": "S02",
+      "status": "partial",
+      "conclusion": "缺失、出现、删除、不可读状态显式保护已补；冲突检查与文件交换间无共享锁，并发发布仍同时成功。"
+    },
+    {
+      "id": "S06",
+      "status": "partial",
+      "conclusion": "全缺 PixelSpacing、多个层面非法方向拒绝；单层提前返回跳过方向约束。"
+    },
+    {
+      "id": "T02",
+      "status": "verified_offline",
+      "conclusion": "自动比例下已有冻结验证成员在五折均保持 c0，扩增数据只进训练；患者整组/空训练回归通过。"
+    },
+    {
+      "id": "T03",
+      "status": "verified_offline",
+      "conclusion": "单/双下划线两个精确器官文件各只命中自身，旧别名防混淆保留。"
+    },
+    {
+      "id": "T04",
+      "status": "partial",
+      "conclusion": "FIFO 与第二项 in-flight 计数修复；写入失败也把 pending 减至零，退出误认保存完毕。"
+    },
+    {
+      "id": "U01",
+      "status": "verified_offline",
+      "conclusion": "失败 case01 不再隔离成功 case01_phase2，真实 AL 整理/排名链完成；模型边界为合成输出。"
+    },
+    {
+      "id": "U02",
+      "status": "verified_offline",
+      "conclusion": "两窗口恢复回调真实 IO 均离开 GUI 线程，事件循环持续响应；新后台生命周期缺陷另记 V01。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "S01",
+      "priority": "P1",
+      "status": "open",
+      "classification": "remaining_partial",
+      "evidence_type": "reproduced_synthetic",
+      "title": "回拨时钟下旧回执仍被误认成本次导入证据",
+      "scenario": "工程经过一次重新导入，系统时间回调或来自不同机器的时钟不一致；本次导入回执写失败，进入补写队列。",
+      "phenomenon": "当前工程指纹与 queued payload 匹配，新 guid 为 new-guid、epoch=100；磁盘是 old-guid 的旧事务、epoch=200。flush 返回 healed=[caseA]、队列清空，却仍是 old-guid。普通较旧/相同摘要回执用例已通过。",
+      "cause": "flush 在摘要不同时仅比较 created_at_epoch，新时间值被视为新事务的充分证明，没核对当前工程与两个事务的实际关联。",
+      "impact": "本次 Mask 的撤销证据丢出待恢复队列，用户看不到仍未补写的事务；本反例未执行 Mask 删除，也未复现人工数据被删。",
+      "what_to_change": "把时间排序降为显示线索，以事务 ID、项目代次与内容指纹裁决；不能确定时保留 pending。",
+      "why": "时间可能回拨；文件较新不等于属于当前工程。",
+      "how": "为导入建立事务 ID；补写先对比当前工程/版本与排队快照，再保留旧事务历史并原子发布新回执、读回核对。若工程已编辑或代次不明，保持待处理并显示具体冲突，不能称已恢复。",
+      "acceptance": [
+        "项目匹配新 payload、旧回执 epoch 更大时不得误报 healed；新事务必须有正确 guid 和指纹，或明确冲突并保留队列。",
+        "较旧队列确实属于历史项目时保持新证据；相同事务幂等、不重复写；旧证据有可追溯历史。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/create_mcs_batch.py",
+          "line": 376,
+          "symbol": "flush_pending_receipts"
+        },
+        {
+          "file": "runtime_py35/create_mcs_batch.py",
+          "line": 369,
+          "symbol": "_receipt_epoch"
+        }
+      ],
+      "evidence_file": "observations.json",
+      "observations": [
+        "receipt_replay_existing",
+        "receipt_clock_rollback"
+      ]
+    },
+    {
+      "id": "S02",
+      "priority": "P1",
+      "status": "open",
+      "classification": "remaining_partial",
+      "evidence_type": "reproduced_synthetic",
+      "title": "同时发布仍能越过缺失目标保护",
+      "scenario": "两个本地/远端任务都以同一尚不存在的输出为目标，计算完成后接近同时发布。",
+      "phenomenon": "两个真实 publisher 均记录 __absent__，均在目标缺失时检查为无冲突；A 完成后放行已检查的 B，二者都成功，最终是 B=2，A=1 被存成 B 的备份。目标运行中先出现的顺序场景已正确拒绝。",
+      "cause": "publish_target_conflict 与 exists/rename/replace 是分离操作，没有目标路径共享互斥；检查完成后可继续使用已经过时的结论。",
+      "impact": "较新的已发布结果被无冲突提示地替换，两个任务都可认定交付成功；A 仍有备份，并非不可恢复丢失。",
+      "what_to_change": "将最终身份检查、备份和发布放进同一按规范化目标路径共享的跨进程提交临界区，并与恢复入口共用。",
+      "why": "唯一 staging 只能避免临时文件重名，不能提供目标版本的提交一致性。",
+      "how": "复用项目现有锁机制，计算与大文件校验在锁外；锁内重读预期存在性/摘要，只有匹配者提交，另一个保留 candidate 并显式冲突。恢复操作也参与同一提交协议，状态写明真实输出版本。",
+      "acceptance": [
+        "用屏障让两个任务同时通过初次检查；最终只允许一个提交，另一个冲突，两个有效结果均保留。",
+        "本地 nnU-Net/FlexiCT、远端 finalize、恢复旧结果共用目标锁；正向顺序发布、缺失/删除/不可读用例不退化。"
+      ],
+      "locations": [
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 1968,
+          "symbol": "publish_prediction_output"
+        },
+        {
+          "file": "tools/nnunet_common.py",
+          "line": 158,
+          "symbol": "publish_target_conflict"
+        },
+        {
+          "file": "tools/nnunet_jobs.py",
+          "line": 392,
+          "symbol": "restore_replaced_output"
+        }
+      ],
+      "evidence_file": "observations.json",
+      "observations": [
+        "publish_appeared_later",
+        "publish_changed_existing",
+        "publish_concurrent"
+      ]
+    },
+    {
+      "id": "S06",
+      "priority": "P1",
+      "status": "open",
+      "classification": "remaining_partial",
+      "evidence_type": "reproduced_synthetic",
+      "title": "单层 DICOM 提前返回，绕过方向单位正交校验",
+      "scenario": "数据集里有单层图像、单层导出或拆分后的单幅 Image；PixelSpacing/IPP 存在但 IOP 两向量夹角为 45 度。",
+      "phenomenon": "单位长度却不正交的 [1,0,0,.7071,.7071,0] 在单层真实 public affine 路径被接受，前两轴点积约 .7071，输出剪切矩阵；有效单层仍正确通过。多层缺间距/非法方向均正确拒绝。",
+      "cause": "_validate_dicom_slice_grid 在 len(positions)<2 时返回，新增的 IOP 六个有限值、单位、正交判断位于该返回之后。",
+      "impact": "错误物理网格进入后续链路的源码边界仍开放；这里只验证解析与仿射返回，未执行真实 Mimics 导入或医学测量。",
+      "what_to_change": "每幅图像自身的方向/坐标完整性验证放到单层返回之前，只有层间步长验证依赖至少两层。",
+      "why": "单幅图像同样必须有可信的平面方向；只有层间差分在单层时不可计算。",
+      "how": "提取逐图像几何验证函数，统一检查 IOP/IPP 长度、有限值、单位与正交；单层仅跳过相邻层差分。缺少可靠层厚时对三维体素语义给出明确限制。",
+      "acceptance": [
+        "单层 45 度非正交、非单位、非有限、错长度方向都拒绝；正规单层、正规多层保持可用。",
+        "同一异常头放进 1 层和 3 层时，逐图像方向校验结果一致；在目标 Mimics 检查物理坐标。"
+      ],
+      "locations": [
+        {
+          "file": "mimics_bridge.py",
+          "line": 1694,
+          "symbol": "_validate_dicom_slice_grid"
+        }
+      ],
+      "evidence_file": "observations.json",
+      "observations": [
+        "dicom"
+      ]
+    },
+    {
+      "id": "T04",
+      "priority": "P2",
+      "status": "open",
+      "classification": "remaining_partial",
+      "evidence_type": "reproduced_synthetic",
+      "title": "失败写入被计为排空成功，关窗丢失未保存反馈",
+      "scenario": "标注者点击已标注后立刻关窗，保存线程遇到锁超时或存储写失败，错误回执尚未被界面轮询。",
+      "phenomenon": "模拟存储拒写，真实 FIFO 线程产生错误回执，disk cases 为空，但 wait_for_state_writes 返回 0；最后可见文案仍是正在标记。第二项写入在途时返回 1 的上一轮反例已修复。",
+      "cause": "pending 在成功和失败 finally 中均减一；退出只看未完成数量，没有消费/累计失败回执，app.exec 返回后也不会再触发 GUI 轮询。",
+      "impact": "丢失进度标记而非 Mask 内容；正常开窗会显示错误，关窗竞态才绕过该反馈。超时仅 stderr 提示也不足以保证可见。",
+      "what_to_change": "区分完成、持久化成功、失败待处理，退出前展示并保留未保存操作。",
+      "why": "请求处理完并不意味着状态已保存。",
+      "how": "维护带操作 ID 的结果与失败集合；关闭流程仍在事件循环内异步等待并处理回执，失败提供重试/保留未保存日志/明确放弃。不能在普通失败分支统一把保存成功计数归零。",
+      "acceptance": [
+        "拒写后立即关窗不能返回零未保存且无可见反馈；重开能发现待处理标记并安全重试。",
+        "FIFO、第二项 in-flight、锁超时、成功排空都覆盖；Windows msvcrt 的 3 项目标检查补跑。"
+      ],
+      "locations": [
+        {
+          "file": "tools/flexict_active_learning_ui.py",
+          "line": 1069,
+          "symbol": "_run_state_writes"
+        },
+        {
+          "file": "tools/flexict_active_learning_ui.py",
+          "line": 1087,
+          "symbol": "wait_for_state_writes"
+        },
+        {
+          "file": "tools/flexict_active_learning_ui.py",
+          "line": 1152,
+          "symbol": "main"
+        }
+      ],
+      "evidence_file": "observations.json",
+      "observations": [
+        "fifo_exit_drain",
+        "fifo_final_state",
+        "failed_write_exit_drain"
+      ]
+    },
+    {
+      "id": "V01",
+      "priority": "P1",
+      "status": "open",
+      "classification": "new_regression",
+      "evidence_type": "reproduced_synthetic",
+      "title": "恢复期间关窗可中断交换，当前结果缺失且状态仍完成",
+      "scenario": "标注者恢复旧结果，文件系统慢或线程恰在两次 rename 间被调度挂起，此时关闭状态窗口。nnU-Net 和 FlexiCT 都受影响。",
+      "phenomenon": "真实 Qt 子进程在真实 current→backup rename 后暂停工作线程；关闭最后窗口后正常 exit=0。父进程检查 current 不存在，old 仍在、保留版本值为 2，status 仍 completed；未用 kill，未碰真实病例。",
+      "cause": "新增恢复线程 daemon=True，无进程持有的事务生命周期；close 只停刷新/恢复轮询并 deleteLater，main 在 app.exec 后直接退出。旧同步回调不会在中途处理关闭事件，后台化暴露该时序。",
+      "impact": "当前结果路径不可用，任务完成状态与磁盘不一致，需要手动找备份恢复；两个数据版本都保留，不是体素数据永久丢失。",
+      "what_to_change": "恢复必须受关窗/进程退出协调，短提交段不可被正常退出打断，并记录可恢复事务状态。",
+      "why": "把 IO 移出 GUI 线程后，界面能关窗了；数据提交仍需要比窗口更长的生命周期。",
+      "how": "保留可等待的非守护工作任务；开始恢复显示忙碌并禁用冲突动作。关闭时可在校验阶段取消，但进入短交换阶段要异步等待提交/回滚确认；配合最小事务记录让重启检查当前/旧/备份与状态，修复中断提交。保留现有 deleteLater 和停计时器清理，不以恢复 GUI 阻塞解决。",
+      "acceptance": [
+        "对两窗口在校验、首个 rename 后、状态发布前分别触发正常关窗；退出后 current 必存在且内容/状态/备份关系一致。",
+        "新开窗口识别未完成恢复事务并提供恢复路径；失败弹窗与忙碌提示实际可见；10ms GUI 计时器在慢校验时持续响应。"
+      ],
+      "locations": [
+        {
+          "file": "tools/nnunet_status_viewer.py",
+          "line": 595,
+          "symbol": "_restore_previous"
+        },
+        {
+          "file": "tools/nnunet_status_viewer.py",
+          "line": 267,
+          "symbol": "_close_event"
+        },
+        {
+          "file": "tools/nnunet_status_viewer.py",
+          "line": 653,
+          "symbol": "main"
+        },
+        {
+          "file": "tools/flexict_status_viewer.py",
+          "line": 541,
+          "symbol": "_restore_previous"
+        },
+        {
+          "file": "tools/flexict_status_viewer.py",
+          "line": 244,
+          "symbol": "_close_event"
+        },
+        {
+          "file": "tools/flexict_status_viewer.py",
+          "line": 599,
+          "symbol": "main"
+        },
+        {
+          "file": "tools/nnunet_jobs.py",
+          "line": 392,
+          "symbol": "restore_replaced_output"
+        }
+      ],
+      "evidence_file": "ui-observations.json",
+      "observations": [
+        "nnunet_status_viewer_close_during_swap",
+        "flexict_status_viewer_close_during_swap"
+      ]
+    }
+  ],
+  "provenance": "10 commits first observed by fetch after known self-push b609be3; local remote-tracking reflog has fetch fast-forward, no matching local update-by-push for these SHAs. Physical author/pusher unknown; not inferred from author/email.",
+  "limitations": [
+    "仅合成病例、真实 Qt offscreen 和离线回归；不是真实 Windows/Mimics/GPU 验收。",
+    "采用现有宿主 Python 3.13.12/PySide6 6.11.1，未安装或修复环境；与前轮隔离 Python/PySide6 版本不同。",
+    "698 次套件/类方法执行，可能覆盖重复方法；693 通过、2 断言失败、0 错误、3 Windows msvcrt 跳过。",
+    "模型/GPU/SSH 与 Mimics API 为桩边界；未跑真实模型推理、训练、病例处理、环境修复。",
+    "单层几何为真实解析/仿射逻辑加合成 DICOM 头；并发与进程退出反例仅控制调度，不量化真实发生频率。",
+    "之前全局问题与同网格错患者/错器官等身份风险没有在本批重新完整验收；不因本轮局部通过关闭。"
+  ],
+  "external_sources": [
+    {
+      "url": "https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.7.6.2.html",
+      "use": "影像平面每幅图像方向余弦须单位、正交；非 Mimics API 证明。",
+      "accessed": "2026-10-18"
+    },
+    {
+      "url": "https://docs.python.org/3.13/library/threading.html#thread-objects",
+      "use": "仅剩 daemon 时进程可退出，后台线程不会获保证完成资源提交。",
+      "accessed": "2026-10-18"
+    }
+  ],
+  "regression_totals": {
+    "executed": 698,
+    "passed": 693,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 3
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "baseline": "b609be3ece372f0d4299542394ee16f018532527",
+  "commits": [
+    {
+      "sha": "72c79164b3e0ad48b14e84560df0cdb9729c9bf2",
+      "subject": "修复 S02 轮3 (P1)：目标存在性显式入档，启动缺失后来出现的结果不再被静默替换"
+    },
+    {
+      "sha": "711b7061f1eb9c6c707e3118d50df17e6a446ba9",
+      "subject": "修复 S01 轮3 (P1)：导入回执补写按事务摘要裁决，不再把旧回执谎报为本次导入证据"
+    },
+    {
+      "sha": "a9d66b0429d4cbbc47e8338f6e141c89afdb9b7e",
+      "subject": "修复 S06 轮3 (P1)：全缺像素间距不再默认 1mm，层面方向必须为有限单位正交向量"
+    },
+    {
+      "sha": "0de51860df5b487af3bc45b75bad601e7825c6ba",
+      "subject": "修复 T02 轮3 (P1)：自动比例下冻结验证集不再随病例总量增长擅自扩员"
+    },
+    {
+      "sha": "45bdd26e59a1236a7eff962f757998bfa9806121",
+      "subject": "修复 U01 (P1)：隔离失败残片改为精确文件名匹配，不再误搬同前缀成功病例"
+    },
+    {
+      "sha": "ccae2079f5d8728f035623a57edaf2a8129e0bd0",
+      "subject": "修复 T03 轮3 (P2)：病例前缀剥离改为最长分隔符优先，双下划线布局不再被短前缀抢占"
+    },
+    {
+      "sha": "64334c99647f1436ec4fbe2b3fa9afce2546beb0",
+      "subject": "修复 T04 轮3 (P2)：退出排空以入队-回执未完成计数为准，in-flight 写入不再误报已保存"
+    },
+    {
+      "sha": "e8f4770e802b7c324b2cb65f15b5aa5d42df47a8",
+      "subject": "修复 U02 (P2)：恢复旧结果的校验/摘要/文件交换移出界面线程，回执经队列在 GUI 线程呈现"
+    },
+    {
+      "sha": "9ce69c0a290ac7427b61a89e192511d98a39532d",
+      "subject": "修复 gui_smoke 堆损坏闪退 (P0)：关闭状态查看器即把 C++ 窗口树交还 Qt"
+    },
+    {
+      "sha": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "subject": "收尾入账修复轮 3：6d73583 复审 8 卡全部置 fixed"
+    }
+  ],
+  "changed_files": [
+    "docs/03_Review/complexity_ledger.md",
+    "docs/03_Review/improvement_backlog.md",
+    "docs/03_Review/round_reports.md",
+    "docs/reviews/2026-10-17-6d73583-revalidation.json",
+    "mimics_bridge.py",
+    "runtime_py35/create_mcs_batch.py",
+    "tests/test_all.py",
+    "tests/test_flexict_integration.py",
+    "tests/test_gui_smoke.py",
+    "tests/test_nnunet_integration.py",
+    "tests/test_remote_training.py",
+    "tools/batch_status_viewer.py",
+    "tools/flexict_active_learning_ui.py",
+    "tools/flexict_pipeline.py",
+    "tools/flexict_status_viewer.py",
+    "tools/nnunet_common.py",
+    "tools/nnunet_pipeline.py",
+    "tools/nnunet_status_viewer.py",
+    "tools/remote_training_controller.py"
+  ],
+  "provenance": "10 commits first observed by fetch after known self-push b609be3; local remote-tracking reflog has fetch fast-forward, no matching local update-by-push for these SHAs. Physical author/pusher unknown; not inferred from author/email."
+}

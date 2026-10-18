@@ -1,0 +1,12 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "suite": "cross",
+  "selections": [
+    "test_cross_workflow_transitions"
+  ],
+  "executed": 2,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 2
+}

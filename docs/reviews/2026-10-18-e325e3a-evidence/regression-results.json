@@ -1,0 +1,150 @@
+{
+  "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+  "suites": [
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "nnunet",
+      "selections": [
+        "test_nnunet_integration"
+      ],
+      "executed": 143,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 143
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "flexict",
+      "selections": [
+        "test_flexict_integration"
+      ],
+      "executed": 149,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 149
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "remote",
+      "selections": [
+        "test_remote_training"
+      ],
+      "executed": 141,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 141
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "gui",
+      "selections": [
+        "test_gui_smoke"
+      ],
+      "executed": 99,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 3,
+      "passed": 96
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "ui",
+      "selections": [
+        "test_ui_quality"
+      ],
+      "executed": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 5
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "geometry",
+      "selections": [
+        "test_geometry_manifest_regressions"
+      ],
+      "executed": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 6
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "cross",
+      "selections": [
+        "test_cross_workflow_transitions"
+      ],
+      "executed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 2
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "review",
+      "selections": [
+        "test_review_workflow_regressions"
+      ],
+      "executed": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 11
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "runtime",
+      "selections": [
+        "test_all.TestCreateMcsBatch",
+        "test_all.TestEdgeCases",
+        "test_all.TestBridgeDicomLoading",
+        "test_all.TestImportReceiptAndUndo",
+        "test_all.TestFlexiCTActiveLearningApply",
+        "test_all.TestGuiThreadBlockingContract"
+      ],
+      "executed": 119,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 119
+    },
+    {
+      "source_commit": "e325e3a8a91c7c64e2c68e1b8b117f6cf08fc31f",
+      "suite": "ui-workflow",
+      "selections": [
+        "test_ui_workflow_regressions"
+      ],
+      "executed": 23,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 21
+    }
+  ],
+  "exits": {
+    "nnunet": 0,
+    "flexict": 0,
+    "remote": 0,
+    "gui": 0,
+    "ui": 0,
+    "geometry": 0,
+    "cross": 0,
+    "review": 0,
+    "runtime": 0,
+    "ui-workflow": 1
+  },
+  "totals": {
+    "executed": 698,
+    "passed": 693,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 3
+  },
+  "scope": "Suite/class method executions may overlap; offline synthetic/mocked boundaries, not end-to-end Mimics acceptance"
+}

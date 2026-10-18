@@ -1,0 +1,323 @@
+test_apply_one_returns_true_until_queue_empty (test_flexict_integration.FlexictMimicsApplyQueueTests.test_apply_one_returns_true_until_queue_empty) ... ok
+test_empty_prediction_rejected (test_flexict_integration.FlexictMimicsApplyQueueTests.test_empty_prediction_rejected) ... ok
+test_legacy_monitor_without_labels_maps_value_zero (test_flexict_integration.FlexictMimicsApplyQueueTests.test_legacy_monitor_without_labels_maps_value_zero)
+A resume from an old job (no labels in status) still applies. ... ok
+test_multiclass_queue_has_one_item_per_label (test_flexict_integration.FlexictMimicsApplyQueueTests.test_multiclass_queue_has_one_item_per_label) ... ok
+test_partially_empty_prediction_records_skipped_labels (test_flexict_integration.FlexictMimicsApplyQueueTests.test_partially_empty_prediction_records_skipped_labels)
+Multiclass run where some labels predict nothing: the queue skips ... ok
+test_single_label_binary_prediction_still_applies (test_flexict_integration.FlexictMimicsApplyQueueTests.test_single_label_binary_prediction_still_applies)
+Backward compat: binary prediction, label_value 1 or 0. ... ok
+test_update_mode_matches_primary_label_mask (test_flexict_integration.FlexictMimicsApplyQueueTests.test_update_mode_matches_primary_label_mask) ... ok
+test_al_fails_without_pair (test_flexict_integration.TestActiveLearningLifecycle.test_al_fails_without_pair) ... ok
+test_al_quarantine_does_not_swallow_prefix_sibling_case (test_flexict_integration.TestActiveLearningLifecycle.test_al_quarantine_does_not_swallow_prefix_sibling_case)
+U01: the quarantine used to match fragments by case-id TEXT PREFIX ... 
+开始统计分析：共 2 例，逐例读取并计算指标...
+
+分析进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok
+test_al_quarantines_failed_case_fragments (test_flexict_integration.TestActiveLearningLifecycle.test_al_quarantines_failed_case_fragments)
+S10 re-review: a case run_batch fails mid-write (uncertainty map ... 
+全部 2 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                              2.4              8.0     0.3000   0.3000            0.0          0.0
+   2  case01_phase2                       2.4              8.0     0.3000   0.3000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=2.4  不确定体积=8.0 mm^3  最大不确定度=0.3000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: /private/tmp/tmpy6eegb6w/jobs/infer/uncertainty_run_20261018T163923_5f62f9a4/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: /private/tmp/tmpy6eegb6w/jobs/infer/uncertainty_run_20261018T163923_5f62f9a4/ranking.csv
+
+开始统计分析：共 2 例，逐例读取并计算指标...
+
+分析进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok
+test_al_rejects_predictions_sharing_wrong_grid (test_flexict_integration.TestActiveLearningLifecycle.test_al_rejects_predictions_sharing_wrong_grid)
+S09: two predictions that share the SAME wrong grid pass the ... ok
+test_al_reports_excluded_case_count (test_flexict_integration.TestActiveLearningLifecycle.test_al_reports_excluded_case_count)
+R81 复审: a case the uncertainty batch skips (grid mismatch, ... ok
+test_al_retry_does_not_rank_stale_uncertainty (test_flexict_integration.TestActiveLearningLifecycle.test_al_retry_does_not_rank_stale_uncertainty)
+S10: a retried AL job ranks only THIS run's successful cases. ... 
+全部 2 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                              2.4              8.0     0.3000   0.3000            0.0          0.0
+   2  case02                              2.4              8.0     0.3000   0.3000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=2.4  不确定体积=8.0 mm^3  最大不确定度=0.3000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: /private/tmp/tmpbajk9rap/jobs/infer/uncertainty_run_20261018T163923_45e564c7/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: /private/tmp/tmpbajk9rap/jobs/infer/uncertainty_run_20261018T163923_45e564c7/ranking.csv
+开始批量计算：共 3 例...
+
+批量进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+批量进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0s
+批量完成：成功 3/3 例，耗时 0.0s。
+日志已写入: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_log.txt
+
+开始统计分析：共 3 例，逐例读取并计算指标...
+
+分析进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+分析进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0s
+全部 3 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_run_20260101T000000_9a61ae65/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_run_20260101T000000_9a61ae65/ranking.csv
+开始批量计算：共 2 例...
+
+批量进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0s
+批量完成：成功 2/2 例，耗时 0.0s。
+日志已写入: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_log.txt
+
+开始统计分析：共 2 例，逐例读取并计算指标...
+
+分析进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok
+test_completed_al_lifecycle (test_flexict_integration.TestActiveLearningLifecycle.test_completed_al_lifecycle) ... 
+全部 2 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                              0.0              0.0     0.0000   0.0000            0.0          0.0
+   2  case02                              0.0              0.0     0.0000   0.0000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=0.0  不确定体积=0.0 mm^3  最大不确定度=0.0000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_run_20260101T000000_efac19f4/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: /private/tmp/tmp8bf7hbwa/jobs/infer/uncertainty_run_20260101T000000_efac19f4/ranking.csv
+开始批量计算：共 3 例...
+
+批量进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+批量进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+批量进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0s
+批量完成：成功 3/3 例，耗时 0.0s。
+日志已写入: /private/tmp/tmpykf1wdy7/jobs/infer/uncertainty_log.txt
+
+开始统计分析：共 3 例，逐例读取并计算指标...
+
+分析进度 |##########--------------------|  33.3%  1/3  已用 0.0s  剩余 0.0s
+分析进度 |####################----------|  66.7%  2/3  已用 0.0s  剩余 0.0s
+分析进度 |##############################| 100.0%  3/3  已用 0.0s  剩余 0.0sok
+test_annotation_state_roundtrip (test_flexict_integration.TestActiveLearningReviewUI.test_annotation_state_roundtrip) ... ok
+test_bands_degenerate_detects_pair_mode_collapse (test_flexict_integration.TestActiveLearningReviewUI.test_bands_degenerate_detects_pair_mode_collapse) ... ok
+test_load_ranking_prefers_status_then_csv (test_flexict_integration.TestActiveLearningReviewUI.test_load_ranking_prefers_status_then_csv) ... ok
+test_materialized_pool_disambiguates_slug_collisions (test_flexict_integration.TestActiveLearningReviewUI.test_materialized_pool_disambiguates_slug_collisions)
+F22: two Chinese case names collapse to the same safe_identifier ... ok
+test_materialized_pool_records_source_paths (test_flexict_integration.TestActiveLearningReviewUI.test_materialized_pool_records_source_paths)
+_al_materialize_inputs records each case's original image path ... ok
+test_request_updates_reads_back_monitor_outcomes (test_flexict_integration.TestActiveLearningReviewUI.test_request_updates_reads_back_monitor_outcomes)
+The UI poll helper: applied/failed requests newer than the ... ok
+test_set_case_state_lock_contention_raises_instead_of_clobbering (test_flexict_integration.TestActiveLearningReviewUI.test_set_case_state_lock_contention_raises_instead_of_clobbering)
+UI31: when the guard is held by another writer past the bounded ... ok
+test_set_case_state_never_loses_concurrent_case_entries (test_flexict_integration.TestActiveLearningReviewUI.test_set_case_state_never_loses_concurrent_case_entries)
+UI31/F45: the UI and the Mimics-side monitor interleave their ... ok
+test_mimics_side_viewed_write_respects_ui_guard (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_mimics_side_viewed_write_respects_ui_guard)
+UI31: runtime_py35's _al_mark_viewed must use the same guard file ... ok
+test_open_case_already_active_is_noop_success (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_open_case_already_active_is_noop_success) ... ok
+test_open_case_opens_recorded_mcs (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_open_case_opens_recorded_mcs) ... ok
+test_open_case_refuses_to_stomp_open_project (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_open_case_refuses_to_stomp_open_project) ... ok
+test_open_case_unknown_state_refuses_to_switch (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_open_case_unknown_state_refuses_to_switch)
+F17/T17 查询失败: with the project query failing, the handler ... ok
+test_open_case_without_mcs_gives_guidance (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_open_case_without_mcs_gives_guidance) ... ok
+test_overlay_marks_viewed_not_annotated (test_flexict_integration.TestActiveLearningRuntimeHandlers.test_overlay_marks_viewed_not_annotated)
+UI14/F05: applying an overlay records 'viewed', never 'annotated' ... ok
+test_2d_and_3d_are_concrete (test_flexict_integration.TestConfigurationResolution.test_2d_and_3d_are_concrete) ... ok
+test_auto_big_gpu_picks_pair (test_flexict_integration.TestConfigurationResolution.test_auto_big_gpu_picks_pair) ... ok
+test_auto_small_gpu_picks_2d (test_flexict_integration.TestConfigurationResolution.test_auto_small_gpu_picks_2d) ... ok
+test_pair_expands_to_both (test_flexict_integration.TestConfigurationResolution.test_pair_expands_to_both) ... ok
+test_remote_backend_defers_continue_training_to_controller (test_flexict_integration.TestContinueTraining.test_remote_backend_defers_continue_training_to_controller)
+R72-C2: remote continue-training is accepted at normalization ... ok
+test_resume_configuration_filter_and_pair_fallback (test_flexict_integration.TestContinueTraining.test_resume_configuration_filter_and_pair_fallback)
+A concrete 3d request must not resume from a 2d-only run, but ... ok
+test_resume_reuses_interrupted_dataset_id (test_flexict_integration.TestContinueTraining.test_resume_reuses_interrupted_dataset_id) ... ok
+test_resume_without_interrupted_run_is_rejected (test_flexict_integration.TestContinueTraining.test_resume_without_interrupted_run_is_rejected) ... ok
+test_runtime_module_has_all_actions (test_flexict_integration.TestEntryRouting.test_runtime_module_has_all_actions) ... ok
+test_runtime_module_is_py35_clean (test_flexict_integration.TestEntryRouting.test_runtime_module_is_py35_clean) ... ok
+test_shells_route_to_flexict_mimics (test_flexict_integration.TestEntryRouting.test_shells_route_to_flexict_mimics) ... ok
+test_waiting_messages_reference_reachable_stop_paths (test_flexict_integration.TestEntryRouting.test_waiting_messages_reference_reachable_stop_paths) ... ok
+test_edit_then_undo_back_to_original_still_updates (test_flexict_integration.TestEqualVolumeEditProtection.test_edit_then_undo_back_to_original_still_updates) ... ok
+test_equal_volume_edit_falls_back_to_copy (test_flexict_integration.TestEqualVolumeEditProtection.test_equal_volume_edit_falls_back_to_copy) ... ok
+test_legacy_snapshot_without_digest_degrades_to_count_check (test_flexict_integration.TestEqualVolumeEditProtection.test_legacy_snapshot_without_digest_degrades_to_count_check) ... ok
+test_snapshot_records_content_digest (test_flexict_integration.TestEqualVolumeEditProtection.test_snapshot_records_content_digest) ... ok
+test_unchanged_mask_still_updates (test_flexict_integration.TestEqualVolumeEditProtection.test_unchanged_mask_still_updates) ... ok
+test_unreadable_buffer_degrades_to_count_check (test_flexict_integration.TestEqualVolumeEditProtection.test_unreadable_buffer_degrades_to_count_check) ... ok
+test_infer_environment_trainer_seam_only (test_flexict_integration.TestFlexictInferEnvironment.test_infer_environment_trainer_seam_only)
+Inference needs the trainer seam but NOT the pretrained backbone ... ok
+test_explicit_val_selection_replaces_frozen_contract (test_flexict_integration.TestFrozenValidationContract.test_explicit_val_selection_replaces_frozen_contract)
+A deliberate re-split (val_case_ids) is the user's chosen new ... ok
+test_frozen_case_freezes_whole_patient_group (test_flexict_integration.TestFrozenValidationContract.test_frozen_case_freezes_whole_patient_group)
+F16: freezing one scan of a patient freezes the whole group — the ... ok
+test_frozen_four_case_rebuild_does_not_grow_validation (test_flexict_integration.TestFrozenValidationContract.test_frozen_four_case_rebuild_does_not_grow_validation)
+S05: rebuilding with one frozen val case keeps exactly one val ... ok
+test_frozen_group_emptying_train_side_fails_closed (test_flexict_integration.TestFrozenValidationContract.test_frozen_group_emptying_train_side_fails_closed)
+A frozen val that genuinely swallows every case (the whole ... ok
+test_frozen_group_keeps_remaining_cases_training (test_flexict_integration.TestFrozenValidationContract.test_frozen_group_keeps_remaining_cases_training)
+S05: the frozen set (group-expanded) IS the validation contract. ... ok
+test_frozen_two_case_retrain_keeps_original_split (test_flexict_integration.TestFrozenValidationContract.test_frozen_two_case_retrain_keeps_original_split)
+S05: a two-case rebuild with a frozen val keeps the original ... ok
+test_previous_frozen_val_translates_chinese_case_keys (test_flexict_integration.TestFrozenValidationContract.test_previous_frozen_val_translates_chinese_case_keys)
+splits store nnU-Net case keys; a Chinese case id has key != id, ... ok
+test_retrain_with_new_cases_keeps_old_val_out_of_train (test_flexict_integration.TestFrozenValidationContract.test_retrain_with_new_cases_keeps_old_val_out_of_train)
+New cases + re-scanned order: the previously-validated case stays ... ok
+test_create_infer_job_fills_output_path (test_flexict_integration.TestInferJobCreation.test_create_infer_job_fills_output_path) ... ok
+test_completed_inference (test_flexict_integration.TestInferenceLifecycle.test_completed_inference) ... ok
+test_grid_mismatch_marks_failure (test_flexict_integration.TestInferenceLifecycle.test_grid_mismatch_marks_failure)
+A prediction on the wrong grid must never reach Mimics. ... ok
+test_stale_source_geometry_rejected_before_gpu (test_flexict_integration.TestInferenceLifecycle.test_stale_source_geometry_rejected_before_gpu)
+If the on-disk image no longer matches the launch-time geometry, ... ok
+test_abandoned_inference_stops_monitor_with_failure_message (test_flexict_integration.TestInferenceMonitorTerminalStates.test_abandoned_inference_stops_monitor_with_failure_message) ... ok
+test_failed_inference_still_stops_monitor (test_flexict_integration.TestInferenceMonitorTerminalStates.test_failed_inference_still_stops_monitor) ... ok
+test_create_job_launches_pipeline (test_flexict_integration.TestJobCreation.test_create_job_launches_pipeline) ... ok
+test_list_flexict_jobs_reads_workspace (test_flexict_integration.TestJobCreation.test_list_flexict_jobs_reads_workspace) ... ok
+test_cancelled_lifecycle (test_flexict_integration.TestJobLifecycle.test_cancelled_lifecycle) ... ok
+test_completed_lifecycle_2d (test_flexict_integration.TestJobLifecycle.test_completed_lifecycle_2d) ... ok
+test_completed_lifecycle_pair (test_flexict_integration.TestJobLifecycle.test_completed_lifecycle_pair) ... ok
+test_failure_records_error (test_flexict_integration.TestJobLifecycle.test_failure_records_error) ... ok
+test_prepared_case_all_zero_label_fails_before_training (test_flexict_integration.TestJobLifecycle.test_prepared_case_all_zero_label_fails_before_training)
+Remote label_source="prepared": an all-zero label must fail fast. ... ok
+test_prepared_case_missing_file_fails_before_training (test_flexict_integration.TestJobLifecycle.test_prepared_case_missing_file_fails_before_training)
+Remote label_source="prepared": an incomplete case must fail fast. ... ok
+test_registry_rows_derive_manifest_path (test_flexict_integration.TestLoadModelsManifestPath.test_registry_rows_derive_manifest_path) ... ok
+test_operation_active_learning_routes_to_run_active_learning (test_flexict_integration.TestMainRouting.test_operation_active_learning_routes_to_run_active_learning) ... ok
+test_operation_infer_routes_to_run_inference (test_flexict_integration.TestMainRouting.test_operation_infer_routes_to_run_inference) ... ok
+test_operation_train_routes_to_run_training (test_flexict_integration.TestMainRouting.test_operation_train_routes_to_run_training) ... ok
+test_register_creates_usable_model (test_flexict_integration.TestModelRegistration.test_register_creates_usable_model) ... ok
+test_2d_request_still_rejects_3_element_patch_size (test_flexict_integration.TestNormalizeFlexictRequest.test_2d_request_still_rejects_3_element_patch_size) ... ok
+test_3d_request_accepts_3_element_patch_size (test_flexict_integration.TestNormalizeFlexictRequest.test_3d_request_accepts_3_element_patch_size)
+R-P1-9: the normalizer used a 2d placeholder, so every 3-element ... ok
+test_3d_request_accepts_manual_spacing (test_flexict_integration.TestNormalizeFlexictRequest.test_3d_request_accepts_manual_spacing) ... ok
+test_accepts_all_configurations (test_flexict_integration.TestNormalizeFlexictRequest.test_accepts_all_configurations) ... ok
+test_auto_request_accepts_3_element_patch_size (test_flexict_integration.TestNormalizeFlexictRequest.test_auto_request_accepts_3_element_patch_size) ... ok
+test_bad_operation_rejected (test_flexict_integration.TestNormalizeFlexictRequest.test_bad_operation_rejected) ... ok
+test_infer_operation_uses_infer_normalization (test_flexict_integration.TestNormalizeFlexictRequest.test_infer_operation_uses_infer_normalization) ... ok
+test_label_spec_is_single_binary (test_flexict_integration.TestNormalizeFlexictRequest.test_label_spec_is_single_binary) ... ok
+test_minimal_request_defaults (test_flexict_integration.TestNormalizeFlexictRequest.test_minimal_request_defaults) ... ok
+test_missing_dataset_id_suggested_from_flexict_band (test_flexict_integration.TestNormalizeFlexictRequest.test_missing_dataset_id_suggested_from_flexict_band)
+A request without dataset_id must NOT land in the nnU-Net band. ... ok
+test_multiclass_duplicate_names_rejected (test_flexict_integration.TestNormalizeFlexictRequest.test_multiclass_duplicate_names_rejected) ... ok
+test_multiclass_labels_list_normalizes (test_flexict_integration.TestNormalizeFlexictRequest.test_multiclass_labels_list_normalizes)
+Explicit labels list trains one N-class model (multiclass). ... ok
+test_multiclass_more_than_four_rejected (test_flexict_integration.TestNormalizeFlexictRequest.test_multiclass_more_than_four_rejected) ... ok
+test_rejects_unknown_configuration (test_flexict_integration.TestNormalizeFlexictRequest.test_rejects_unknown_configuration) ... ok
+test_single_label_request_stays_binary (test_flexict_integration.TestNormalizeFlexictRequest.test_single_label_request_stays_binary)
+Default (no explicit labels) keeps the validated binary recipe. ... ok
+test_different_fingerprint_invalidates (test_flexict_integration.TestPreprocessCache.test_different_fingerprint_invalidates) ... ok
+test_pair_identities_are_independent (test_flexict_integration.TestPreprocessCache.test_pair_identities_are_independent) ... ok
+test_roundtrip_valid_after_record (test_flexict_integration.TestPreprocessCache.test_roundtrip_valid_after_record) ... ok
+test_prepare_flexict_infer_rejects_changed_source_geometry (test_flexict_integration.TestRemoteExecution.test_prepare_flexict_infer_rejects_changed_source_geometry) ... ok
+test_prepare_flexict_infer_returns_remote_contract (test_flexict_integration.TestRemoteExecution.test_prepare_flexict_infer_returns_remote_contract) ... ok
+test_prepare_flexict_rejects_non_training_request (test_flexict_integration.TestRemoteExecution.test_prepare_flexict_rejects_non_training_request) ... ok
+test_prepare_flexict_returns_remote_contract (test_flexict_integration.TestRemoteExecution.test_prepare_flexict_returns_remote_contract) ... ok
+test_prepare_flexict_serializes_patient_group_per_row (test_flexict_integration.TestRemoteExecution.test_prepare_flexict_serializes_patient_group_per_row)
+R08: the remote split reads per-row patient_group; the controller ... ok
+test_prepared_rows_patient_group_rules (test_flexict_integration.TestRemoteExecution.test_prepared_rows_patient_group_rules)
+R08 contract for the container-side row rebuild: row field wins, ... ok
+test_register_flexict_registers_pair_with_remote_provenance (test_flexict_integration.TestRemoteExecution.test_register_flexict_registers_pair_with_remote_provenance) ... ok
+test_register_flexict_without_manifest_fails (test_flexict_integration.TestRemoteExecution.test_register_flexict_without_manifest_fails) ... ok
+test_remote_infer_job_uses_flexict_infer_kind (test_flexict_integration.TestRemoteExecution.test_remote_infer_job_uses_flexict_infer_kind) ... ok
+test_remote_job_without_profile_is_refused (test_flexict_integration.TestRemoteExecution.test_remote_job_without_profile_is_refused) ... ok
+test_remote_prepared_split_matches_local_split (test_flexict_integration.TestRemoteExecution.test_remote_prepared_split_matches_local_split)
+R08 acceptance: two patients, four scans — the remote container ... ok
+test_remote_training_job_launches_controller_with_spec (test_flexict_integration.TestRemoteExecution.test_remote_training_job_launches_controller_with_spec) ... ok
+test_worker_dispatch_covers_flexict_kinds (test_flexict_integration.TestRemoteExecution.test_worker_dispatch_covers_flexict_kinds) ... ok
+test_worker_environment_resolves_remote_weights_override (test_flexict_integration.TestRemoteExecution.test_worker_environment_resolves_remote_weights_override) ... ok
+test_worker_preflight_reports_flexict_weights_and_import (test_flexict_integration.TestRemoteExecution.test_worker_preflight_reports_flexict_weights_and_import) ... ok
+test_worker_run_flexict_writes_pipeline_job_and_dispatches (test_flexict_integration.TestRemoteExecution.test_worker_run_flexict_writes_pipeline_job_and_dispatches) ... ok
+test_explicit_manifests_win (test_flexict_integration.TestResolveFlexictPair.test_explicit_manifests_win) ... ok
+test_no_pair_is_rejected (test_flexict_integration.TestResolveFlexictPair.test_no_pair_is_rejected) ... ok
+test_one_manifest_only_is_rejected (test_flexict_integration.TestResolveFlexictPair.test_one_manifest_only_is_rejected) ... ok
+test_registry_pair_fallback (test_flexict_integration.TestResolveFlexictPair.test_registry_pair_fallback) ... ok
+test_scan_full_case_is_usable (test_flexict_integration.TestScanFlexictCases.test_scan_full_case_is_usable) ... ok
+test_scan_multiclass_requires_all_labels (test_flexict_integration.TestScanFlexictCases.test_scan_multiclass_requires_all_labels) ... ok
+test_scan_prefers_preferred_image_name (test_flexict_integration.TestScanFlexictCases.test_scan_prefers_preferred_image_name)
+P1 audit: ct.nii.gz wins over an unrelated .nii.gz beside it. ... ok
+test_scan_rejects_missing_root (test_flexict_integration.TestScanFlexictCases.test_scan_rejects_missing_root) ... ok
+test_scan_reports_missing_label (test_flexict_integration.TestScanFlexictCases.test_scan_reports_missing_label) ... ok
+test_live_jobs_never_pruned (test_flexict_integration.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok
+test_old_terminal_jobs_are_pruned_keeping_status (test_flexict_integration.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok
+test_recent_jobs_kept (test_flexict_integration.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok
+test_zero_retention_disables (test_flexict_integration.TestSweepExpiredJobs.test_zero_retention_disables) ... ok
+test_dataset_and_cache_tree_of_running_job_are_kept (test_flexict_integration.TestSweepRuntimeAndCache.test_dataset_and_cache_tree_of_running_job_are_kept) ... ok
+test_dataset_referenced_by_registry_model_is_kept (test_flexict_integration.TestSweepRuntimeAndCache.test_dataset_referenced_by_registry_model_is_kept) ... ok
+test_expired_cache_case_removed (test_flexict_integration.TestSweepRuntimeAndCache.test_expired_cache_case_removed) ... ok
+test_expired_unreferenced_dataset_removed (test_flexict_integration.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed) ... ok
+test_zero_retention_disables_both_sweeps (test_flexict_integration.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok
+test_build_dataset_zstart_matches_pipeline_orientation_invariant (test_flexict_integration.TestTrainValSplit.test_build_dataset_zstart_matches_pipeline_orientation_invariant)
+F29: the standalone build_dataset._zstart and the pipeline's ... ok
+test_explicit_val_case_selection_wins (test_flexict_integration.TestTrainValSplit.test_explicit_val_case_selection_wins) ... ok
+test_group_expansion_emptying_train_split_is_rejected (test_flexict_integration.TestTrainValSplit.test_group_expansion_emptying_train_split_is_rejected) ... ok
+test_normal_split_still_succeeds_with_groups (test_flexict_integration.TestTrainValSplit.test_normal_split_still_succeeds_with_groups) ... ok
+test_si_start_anisotropic_axial (test_flexict_integration.TestTrainValSplit.test_si_start_anisotropic_axial) ... ok
+test_si_start_empty_target (test_flexict_integration.TestTrainValSplit.test_si_start_empty_target) ... ok
+test_si_start_isotropic_ras_is_not_in_plane_axis (test_flexict_integration.TestTrainValSplit.test_si_start_isotropic_ras_is_not_in_plane_axis) ... ok
+test_si_start_same_physical_target_all_orientations (test_flexict_integration.TestTrainValSplit.test_si_start_same_physical_target_all_orientations)
+F29: the same physical target must stratify identically however ... ok
+test_split_never_straddles_patient_group (test_flexict_integration.TestTrainValSplit.test_split_never_straddles_patient_group)
+F16: the same patient's multi-phase scans share a patient_group; ... ok
+test_split_stratifies_across_physical_si (test_flexict_integration.TestTrainValSplit.test_split_stratifies_across_physical_si) ... ok
+test_split_without_groups_unchanged (test_flexict_integration.TestTrainValSplit.test_split_without_groups_unchanged)
+No patient_group info: case-level split behavior must be exactly ... ok
+test_two_case_minimum (test_flexict_integration.TestTrainValSplit.test_two_case_minimum) ... ok
+test_val_at_least_one (test_flexict_integration.TestTrainValSplit.test_val_at_least_one) ... ok
+test_val_cases_count_respected (test_flexict_integration.TestTrainValSplit.test_val_cases_count_respected) ... ok
+test_val_never_exceeds_half_minus (test_flexict_integration.TestTrainValSplit.test_val_never_exceeds_half_minus) ... ok
+test_environment_caps_blas_threads_every_stage (test_flexict_integration.TestWorkerEnvironment.test_environment_caps_blas_threads_every_stage)
+FlexiCT stages must cap BLAS threads (same A10 fix as nnunet). ... ok
+test_environment_carries_trainer_contract (test_flexict_integration.TestWorkerEnvironment.test_environment_carries_trainer_contract) ... ok
+test_gpu_id_forwarded (test_flexict_integration.TestWorkerEnvironment.test_gpu_id_forwarded) ... ok
+test_infer_environment_caps_blas_threads (test_flexict_integration.TestWorkerEnvironment.test_infer_environment_caps_blas_threads)
+FlexiCT inference workers replace _worker_environment too. ... ok
+test_mirror_axes_forwarded (test_flexict_integration.TestWorkerEnvironment.test_mirror_axes_forwarded) ... ok
+test_nnunet_roots_point_at_workspace (test_flexict_integration.TestWorkerEnvironment.test_nnunet_roots_point_at_workspace) ... ok
+test_windows_forces_single_process_da_train_stage_only (test_flexict_integration.TestWorkerEnvironment.test_windows_forces_single_process_da_train_stage_only)
+Windows TRAIN workers must pin nnUNet_n_proc_DA=0. ... ok
+
+----------------------------------------------------------------------
+Ran 149 tests in 17.131s
+
+OK
+
+全部 3 例读取+计算完成，耗时 0.0s。
+
+==== 不确定度排序（按 integrated 从高到低）====
+rank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol
+--------------------------------------------------------------------------------------------------------------
+   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0
+   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0
+
+差异最大（不确定度最大且区域最大）的病例: case00
+  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000
+  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0
+  文件: /private/tmp/tmpykf1wdy7/jobs/infer/uncertainty_run_20261018T163923_dbd71bae/case00_uncertainty_disagreement.nii.gz
+
+排序报告已写入: /private/tmp/tmpykf1wdy7/jobs/infer/uncertainty_run_20261018T163923_dbd71bae/ranking.csv
+[FlexiCT] Mask 'Liver' was edited while prediction was running (content changed at the same volume); creating a copy instead.
+[FlexiCT] Mask 'Liver' changed while prediction was running; creating a copy instead.
+[FlexiCT] FlexiCT status: Abandoned | 
+[FlexiCT] FlexiCT status: Failed | 

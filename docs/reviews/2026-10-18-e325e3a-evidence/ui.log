@@ -1,0 +1,11 @@
+test_latin_and_cjk_labels_rasterize_glyphs (test_ui_quality.TestOffscreenRenderQuality.test_latin_and_cjk_labels_rasterize_glyphs) ... qt.qpa.fonts: Populating font family aliases took 113 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+ok
+test_shared_stylesheet_applies_without_qt_rejection (test_ui_quality.TestOffscreenRenderQuality.test_shared_stylesheet_applies_without_qt_rejection) ... ok
+test_friendly_error_maps_known_pipeline_errors (test_ui_quality.TestThemePaletteIntegrity.test_friendly_error_maps_known_pipeline_errors) ... ok
+test_stylesheet_colors_all_come_from_palette (test_ui_quality.TestThemePaletteIntegrity.test_stylesheet_colors_all_come_from_palette) ... ok
+test_theme_contrast_pairs_meet_wcag_aa (test_ui_quality.TestThemePaletteIntegrity.test_theme_contrast_pairs_meet_wcag_aa) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.307s
+
+OK

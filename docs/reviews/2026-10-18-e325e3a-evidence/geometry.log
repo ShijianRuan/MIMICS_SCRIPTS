@@ -1,0 +1,11 @@
+test_manifest_paths_survive_moving_the_dataset_bundle (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_manifest_paths_survive_moving_the_dataset_bundle) ... ok
+test_nninteractive_prepared_data_accepts_separate_label_root (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_nninteractive_prepared_data_accepts_separate_label_root) ... ok
+test_nonempty_mask_cannot_silently_become_empty (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_nonempty_mask_cannot_silently_become_empty) ... ok
+test_task_model_buffer_intensity_is_restored_to_source_values (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_task_model_buffer_intensity_is_restored_to_source_values) ... ok
+test_task_model_canonical_mapping_round_trip (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_task_model_canonical_mapping_round_trip) ... ok
+test_task_model_mapping_covers_every_axis_flip_orientation (test_geometry_manifest_regressions.GeometryManifestRegressionTests.test_task_model_mapping_covers_every_axis_flip_orientation) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.030s
+
+OK

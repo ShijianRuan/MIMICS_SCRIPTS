@@ -1,0 +1,300 @@
+test_acquire_lock (test_all.TestCreateMcsBatch.test_acquire_lock) ... ok
+test_creation_status_combines_prepare_and_mcs_failures (test_all.TestCreateMcsBatch.test_creation_status_combines_prepare_and_mcs_failures) ... ok
+test_failed_mcs_case_does_not_stop_later_cases (test_all.TestCreateMcsBatch.test_failed_mcs_case_does_not_stop_later_cases) ... ok
+test_failed_mcs_rebuild_keeps_previous_complete_project (test_all.TestCreateMcsBatch.test_failed_mcs_rebuild_keeps_previous_complete_project) ... ok
+test_fingerprint_skip_logic (test_all.TestCreateMcsBatch.test_fingerprint_skip_logic)
+When fingerprint matches, existing .mcs should be skipped. ... ok
+test_inject_buffer_correct_shape (test_all.TestCreateMcsBatch.test_inject_buffer_correct_shape)
+inject_buffer succeeds when byte count matches. ... ok
+test_inject_buffer_shape_mismatch_error (test_all.TestCreateMcsBatch.test_inject_buffer_shape_mismatch_error)
+inject_buffer should raise RuntimeError on byte count mismatch. ... ok
+test_local_queue_descriptor_is_consumed_by_background_creator (test_all.TestCreateMcsBatch.test_local_queue_descriptor_is_consumed_by_background_creator) ... ok
+test_log_message (test_all.TestCreateMcsBatch.test_log_message) ... ok
+test_logs_directory_created (test_all.TestCreateMcsBatch.test_logs_directory_created) ... ok
+test_native_mimics_exit_quarantines_only_current_case (test_all.TestCreateMcsBatch.test_native_mimics_exit_quarantines_only_current_case) ... ok
+test_partial_work_dir_without_manifest_is_never_converted (test_all.TestCreateMcsBatch.test_partial_work_dir_without_manifest_is_never_converted) ... ok
+test_pending_receipt_flush_corrupt_receipt_replaced (test_all.TestCreateMcsBatch.test_pending_receipt_flush_corrupt_receipt_replaced)
+S01 轮3验收：回执文件损坏（不可解析 JSON）——不能被当作有效证据， ... ok
+test_pending_receipt_flush_heals_across_restart (test_all.TestCreateMcsBatch.test_pending_receipt_flush_heals_across_restart)
+S01 re-review acceptance: after a receipt write failed, a later ... ok
+test_pending_receipt_flush_identical_receipt_heals_without_rewrite (test_all.TestCreateMcsBatch.test_pending_receipt_flush_identical_receipt_heals_without_rewrite)
+S01 轮3验收：磁盘回执与待写载荷属于同一次导入（事务摘要一致）—— ... ok
+test_pending_receipt_flush_replaces_older_receipt (test_all.TestCreateMcsBatch.test_pending_receipt_flush_replaces_older_receipt)
+S01 轮3验收：同病例重新导入后，上一轮回执仍留在工程旁。补写不得 ... ok
+test_pending_receipt_flush_stale_pending_keeps_newer_receipt (test_all.TestCreateMcsBatch.test_pending_receipt_flush_stale_pending_keeps_newer_receipt)
+S01 轮3验收：磁盘回执比待写记录新（待办是过期残留）——保留磁盘 ... ok
+test_pruned_fingerprint_with_manifest_match_keeps_existing_mcs (test_all.TestCreateMcsBatch.test_pruned_fingerprint_with_manifest_match_keeps_existing_mcs)
+R61-2: after the 14-day queue prune deletes the fingerprint file, ... ok
+test_pruned_fingerprint_with_manifest_mismatch_reprocesses (test_all.TestCreateMcsBatch.test_pruned_fingerprint_with_manifest_mismatch_reprocesses)
+R61-2: the manifest records a DIFFERENT source fingerprint — a ... ok
+test_pruned_fingerprint_without_manifest_record_keeps_existing_mcs (test_all.TestCreateMcsBatch.test_pruned_fingerprint_without_manifest_record_keeps_existing_mcs)
+R61-2: published .mcs, fingerprint file pruned, NO manifest record ... ok
+test_publish_failure_leaves_no_consumable_receipt (test_all.TestCreateMcsBatch.test_publish_failure_leaves_no_consumable_receipt)
+F30 failure path: when the publish (staging rename) fails, the ... ok
+test_receipt_failure_is_visible_in_status (test_all.TestCreateMcsBatch.test_receipt_failure_is_visible_in_status)
+S01: a receipt-write failure must not be buried — the final task ... ok
+test_receipt_handoff_uses_real_producer_payload (test_all.TestCreateMcsBatch.test_receipt_handoff_uses_real_producer_payload)
+S01: the receipt payload must survive the producer→queue handoff ... ok
+test_receipt_written_after_publish_against_final_path (test_all.TestCreateMcsBatch.test_receipt_written_after_publish_against_final_path)
+F30: the import receipt must point at the FINAL .mcs path and ... ok
+test_record_failed_case (test_all.TestCreateMcsBatch.test_record_failed_case) ... ok
+test_record_failed_case_keeps_user_source_path (test_all.TestCreateMcsBatch.test_record_failed_case_keeps_user_source_path)
+R61-5: a failure record must name the user's original input path, ... ok
+test_required_metadata_write_failure_is_not_silenced (test_all.TestCreateMcsBatch.test_required_metadata_write_failure_is_not_silenced) ... ok
+test_shape_product (test_all.TestCreateMcsBatch.test_shape_product) ... ok
+test_stop_marker_detected (test_all.TestCreateMcsBatch.test_stop_marker_detected)
+Simulate that the stop marker file is detected. ... ok
+test_supervisor_ignores_descriptor_whose_manifest_was_quarantined (test_all.TestCreateMcsBatch.test_supervisor_ignores_descriptor_whose_manifest_was_quarantined) ... ok
+test_supervisor_restarts_after_native_case_exit_and_finishes_queue (test_all.TestCreateMcsBatch.test_supervisor_restarts_after_native_case_exit_and_finishes_queue) ... [2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 2 .mcs file(s).
+[2026-10-18 16:39:43] [1/2] Creating: case_bad
+[2026-10-18 16:39:43] Create failed for case_bad: controlled create failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1655, in main
+    created_manifest = create_mcs_from_manifest(
+        work_dir, staging_mcs
+    )
+  File "<repo>/tests/test_all.py", line 4180, in fake_create
+    raise RuntimeError("controlled create failure")
+RuntimeError: controlled create failure
+
+[2026-10-18 16:39:43] [2/2] Creating: case_good
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test_ky_uojuc/output/case_good.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 1 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case001
+[2026-10-18 16:39:43] Create failed for case001: controlled rebuild failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1655, in main
+    created_manifest = create_mcs_from_manifest(
+        work_dir, staging_mcs
+    )
+  File "<repo>/tests/test_all.py", line 4226, in <lambda>
+    create_mcs_batch.create_mcs_from_manifest = lambda *_args: (_ for _ in ()).throw(
+                                                               ~~~~~~~~~~~~~~~~~~~~~^
+        RuntimeError("controlled rebuild failure")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "<repo>/tests/test_all.py", line 4226, in <genexpr>
+    create_mcs_batch.create_mcs_from_manifest = lambda *_args: (_ for _ in ()).throw(
+RuntimeError: controlled rebuild failure
+
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 0 succeeded, 1 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case001
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test_y4vfx3nf/output/case001.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-18 16:39:43] test message
+[2026-10-18 16:39:43] first message
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Discarding stale prepared-work descriptor: /private/tmp/mimics_test_xbtendib/local_queue/prepared_queue/case_killed.json
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-18 16:39:43] 补写导入回执成功：/private/tmp/mimics_test_ic7ohxjb/output/.case_s01f.import_receipt.json
+[2026-10-18 16:39:43] 补写导入回执成功：/private/tmp/mimics_test_mw_esmrs/output/.case_s01c.import_receipt.json
+[2026-10-18 16:39:43] 补写导入回执成功：/private/tmp/mimics_test_6fc7q8kk/output/.case_s01d.import_receipt.json
+[2026-10-18 16:39:43] 补写完成（磁盘回执比待写记录新，保留磁盘版本）：/private/tmp/mimics_test_yhw7s096/output/.case_s01g.import_receipt.json
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Fingerprint file missing for case_gone; dataset manifest confirms the source is unchanged. Skipping.
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Source fingerprint changed for case_changed; reprocessing.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case_changed
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test_271eakam/output/case_changed.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Fingerprint for case_unknown is missing and the dataset manifest has no record; keeping the existing .mcs and skipping reimport. Delete the .mcs manually to force a reimport.
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case_f30b
+[2026-10-18 16:39:43] Create failed for case_f30b: synthetic publish failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1658, in main
+    _publish_mcs(staging_mcs, mcs_path)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_all.py", line 4132, in failing_publish
+    raise RuntimeError("synthetic publish failure")
+RuntimeError: synthetic publish failure
+
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 0 succeeded, 1 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case_s01b
+[2026-10-18 16:39:43] Created case_s01b, but import receipt could not be written: synthetic receipt failure
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test_8kbbt358/output/case_s01b.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case_s01
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test_yuo_hczq/output/case_s01.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-18 16:39:43] Background Mimics batch process started.
+[2026-10-18 16:39:43] Creating 1 .mcs file(s).
+[2026-10-18 16:39:43] [1/1] Creating: case_f30
+[2026-10-18 16:39:43] Created: /private/tmp/mimics_test__ijsxsom/output/case_f30.mcs
+[2026-10-18 16:39:43] No pending manifests and producer marked the queue done; exiting.
+[2026-10-18 16:39:43] Background creation finished: 1 succeeded, 0 failed.
+Starting background Mimics queue worker.
+Background Mimics stopped during case case_bad; continuing the remaining queue.
+Starting background Mimics queue worker.
+ok
+test_affine_repair_already_running_returns_nonzero (test_all.TestEdgeCases.test_affine_repair_already_running_returns_nonzero)
+C6-4: offer_repair_for_prediction_failure treats main() == 0 as ... ok
+test_align_source_identity_affines (test_all.TestEdgeCases.test_align_source_identity_affines) ... ok
+test_align_source_no_metadata_shape_mismatch_raises (test_all.TestEdgeCases.test_align_source_no_metadata_shape_mismatch_raises) ... ok
+test_ambiguous_nifti_header_is_corrected_before_simpleitk_reads_it (test_all.TestEdgeCases.test_ambiguous_nifti_header_is_corrected_before_simpleitk_reads_it)
+A readable source must not bypass qform/sform normalization. ... ok
+test_bridge_worker_log_default_is_absolute (test_all.TestEdgeCases.test_bridge_worker_log_default_is_absolute)
+C6-2: before the first initialize request the worker's log path ... ok
+test_buffer_mapping_all_axis_permutations (test_all.TestEdgeCases.test_buffer_mapping_all_axis_permutations)
+Roundtrip works for all axis permutations + flip combos. ... ok
+test_buffer_mapping_double_flip_identity (test_all.TestEdgeCases.test_buffer_mapping_double_flip_identity)
+Flipping twice on same axis returns to original. ... ok
+test_clamp_equal_at_minimum (test_all.TestEdgeCases.test_clamp_equal_at_minimum) ... ok
+test_clamp_zero_range_image (test_all.TestEdgeCases.test_clamp_zero_range_image) ... ok
+test_cleanup_stale_invalid_lock_file (test_all.TestEdgeCases.test_cleanup_stale_invalid_lock_file)
+Stale empty/corrupt lock file older than grace period is removed. ... ok
+test_dicom_helpers_refuse_default_spacing_and_bad_orientation (test_all.TestEdgeCases.test_dicom_helpers_refuse_default_spacing_and_bad_orientation)
+S06 re-review round 3: a series with NO PixelSpacing at all used ... ok
+test_dicom_helpers_refuse_incomplete_or_drifting_geometry (test_all.TestEdgeCases.test_dicom_helpers_refuse_incomplete_or_drifting_geometry)
+S06: the old check only compared positions' projections onto the ... ok
+test_dicom_helpers_refuse_irregular_slice_positions (test_all.TestEdgeCases.test_dicom_helpers_refuse_irregular_slice_positions)
+R09: padded/rescan/overwritten series used to be squashed onto a ... ok
+test_dicom_helpers_refuse_mixed_series_and_multiframe (test_all.TestEdgeCases.test_dicom_helpers_refuse_mixed_series_and_multiframe)
+F01: shape/affine helpers count files for the third dimension, so a ... ok
+test_get_image_affine_from_dicom_standard_axial (test_all.TestEdgeCases.test_get_image_affine_from_dicom_standard_axial) ... ok
+test_lock_double_release_is_idempotent (test_all.TestEdgeCases.test_lock_double_release_is_idempotent)
+Double release should not crash and should report True. ... ok
+test_lock_release_wrong_token (test_all.TestEdgeCases.test_lock_release_wrong_token) ... ok
+test_matrix_close_uses_tolerance (test_all.TestEdgeCases.test_matrix_close_uses_tolerance) ... ok
+test_mimics_log_prints_on_api_failure (test_all.TestEdgeCases.test_mimics_log_prints_on_api_failure)
+When Mimics logging API raises, _mimics_log falls back to print. ... ok
+test_normalize_affine_both_corrupt (test_all.TestEdgeCases.test_normalize_affine_both_corrupt)
+When both qform and sform are NaN, falls back to pixdim. ... ok
+test_normalize_affine_survives_nan_sform (test_all.TestEdgeCases.test_normalize_affine_survives_nan_sform)
+_normalize_nifti_affine falls back to usable qform when sform is NaN. ... ok
+test_normalize_different_qform_sform (test_all.TestEdgeCases.test_normalize_different_qform_sform)
+A coded valid sform is authoritative when the forms disagree. ... ok
+test_parse_range_floating_point (test_all.TestEdgeCases.test_parse_range_floating_point) ... ok
+test_parse_range_negative_values (test_all.TestEdgeCases.test_parse_range_negative_values) ... ok
+test_parse_shape_semicolon_and_bracket_variants (test_all.TestEdgeCases.test_parse_shape_semicolon_and_bracket_variants) ... ok
+test_setup_monitor_deadline_extends_while_window_alive (test_all.TestEdgeCases.test_setup_monitor_deadline_extends_while_window_alive)
+C6-3: a training form left open past the 1h deadline must not ... ok
+test_setup_monitor_deadline_stops_when_window_dead (test_all.TestEdgeCases.test_setup_monitor_deadline_stops_when_window_dead) ... ok
+test_setup_root_sweeps_stale_files_only (test_all.TestEdgeCases.test_setup_root_sweeps_stale_files_only)
+R62-11: every wizard launch drops context/status/stderr files ... ok
+test_shape_permutation_detection (test_all.TestEdgeCases.test_shape_permutation_detection)
+Axes-permuted shapes with same product trigger reshape logic. ... ok
+test_stop_marker_priority_over_work (test_all.TestEdgeCases.test_stop_marker_priority_over_work)
+Stop marker should take priority even when work exists. ... ok
+test_write_json_stress_no_tmp_residue (test_all.TestEdgeCases.test_write_json_stress_no_tmp_residue)
+Rapid sequential writes leave no .tmp residue. ... ok
+test_dicom_missing_uid_distinct_series_number_same_grid (test_all.TestBridgeDicomLoading.test_dicom_missing_uid_distinct_series_number_same_grid) ... ok
+test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed (test_all.TestBridgeDicomLoading.test_dicom_missing_uid_duplicate_file_copy_residue_fails_closed) ... ok
+test_dicom_missing_uid_interleaved_series_fails_closed (test_all.TestBridgeDicomLoading.test_dicom_missing_uid_interleaved_series_fails_closed) ... ok
+test_dicom_series_number_zero_is_real_value (test_all.TestBridgeDicomLoading.test_dicom_series_number_zero_is_real_value) ... ok
+test_dicom_single_missing_uid_series_still_selects (test_all.TestBridgeDicomLoading.test_dicom_single_missing_uid_series_still_selects) ... ok
+test_dicom_sort_key (test_all.TestBridgeDicomLoading.test_dicom_sort_key) ... ok
+test_dicom_uid_series_exempt_from_duplicate_position_check (test_all.TestBridgeDicomLoading.test_dicom_uid_series_exempt_from_duplicate_position_check) ... ok
+test_capture_mask_snapshot_matches_live_digest (test_all.TestImportReceiptAndUndo.test_capture_mask_snapshot_matches_live_digest)
+R17: the snapshot captured at import time and the digest the ... ok
+test_find_latest_receipt_ignores_invalid_schemas (test_all.TestImportReceiptAndUndo.test_find_latest_receipt_ignores_invalid_schemas) ... ok
+test_find_latest_receipt_picks_newest (test_all.TestImportReceiptAndUndo.test_find_latest_receipt_picks_newest) ... ok
+test_receipt_records_content_snapshot (test_all.TestImportReceiptAndUndo.test_receipt_records_content_snapshot)
+R17 import side: write_import_receipt stores the pixel_count ... ok
+test_receipt_schema_and_location (test_all.TestImportReceiptAndUndo.test_receipt_schema_and_location) ... ok
+test_receipt_search_covers_drop_import_output_dirs (test_all.TestImportReceiptAndUndo.test_receipt_search_covers_drop_import_output_dirs) ... ok
+test_recent_drop_output_dirs_derives_from_output_mcs (test_all.TestImportReceiptAndUndo.test_recent_drop_output_dirs_derives_from_output_mcs)
+R03 失败路径：worker 改写状态后只保留 output_mcs 也能找回目录。 ... ok
+test_recent_drop_output_dirs_skips_missing_folders (test_all.TestImportReceiptAndUndo.test_recent_drop_output_dirs_skips_missing_folders) ... ok
+test_undo_announces_blocking_steps_in_log_before_deleting (test_all.TestImportReceiptAndUndo.test_undo_announces_blocking_steps_in_log_before_deleting)
+B33: open/fingerprint/save block the GUI thread for as long as ... ok
+test_undo_confirm_copy_explains_steps_and_one_shot_semantics (test_all.TestImportReceiptAndUndo.test_undo_confirm_copy_explains_steps_and_one_shot_semantics)
+B7: the confirm dialog states the close-project step and that ... ok
+test_undo_deletion_failure_leaves_receipt (test_all.TestImportReceiptAndUndo.test_undo_deletion_failure_leaves_receipt) ... ok
+test_undo_entry_points_exist (test_all.TestImportReceiptAndUndo.test_undo_entry_points_exist) ... ok
+test_undo_keeps_file_when_fingerprint_differs (test_all.TestImportReceiptAndUndo.test_undo_keeps_file_when_fingerprint_differs) ... ok
+test_undo_other_project_refusal_explains_two_steps (test_all.TestImportReceiptAndUndo.test_undo_other_project_refusal_explains_two_steps)
+B7: the refusal message gives the two-step recovery and says ... ok
+test_undo_r17_edited_mask_does_not_block_clean_siblings (test_all.TestImportReceiptAndUndo.test_undo_r17_edited_mask_does_not_block_clean_siblings)
+R17 blast radius: with two imported masks where one is edited ... ok
+test_undo_r17_equal_volume_edit_keeps_mask_and_receipt (test_all.TestImportReceiptAndUndo.test_undo_r17_equal_volume_edit_keeps_mask_and_receipt)
+R17: the imported mask's content changed after import (same ... ok
+test_undo_r17_unreadable_live_digest_fails_closed (test_all.TestImportReceiptAndUndo.test_undo_r17_unreadable_live_digest_fails_closed)
+R17 fail-closed: the receipt records a sha, but the live mask's ... ok
+test_undo_reports_when_no_receipt_exists (test_all.TestImportReceiptAndUndo.test_undo_reports_when_no_receipt_exists) ... ok
+test_undo_roundtrip_file_rolled_back_when_fingerprint_matches (test_all.TestImportReceiptAndUndo.test_undo_roundtrip_file_rolled_back_when_fingerprint_matches)
+F18: with an extra manual mask in the session, the import's own ... ok
+test_undo_s04_missing_sha_keeps_mask_even_on_matching_count (test_all.TestImportReceiptAndUndo.test_undo_s04_missing_sha_keeps_mask_even_on_matching_count)
+S04 fail-closed: a receipt entry without a sha snapshot (buffer ... ok
+test_undo_same_project_open_not_reloaded (test_all.TestImportReceiptAndUndo.test_undo_same_project_open_not_reloaded)
+F17/T17 同项目不重载: when the receipt's project is already ... ok
+test_undo_summary_shows_reason_not_count (test_all.TestImportReceiptAndUndo.test_undo_summary_shows_reason_not_count)
+F31: the file-kept summary renders the divergence reason in the ... ok
+test_undo_unknown_project_state_never_opens_another_project (test_all.TestImportReceiptAndUndo.test_undo_unknown_project_state_never_opens_another_project)
+F17/T17 查询失败/缺API: when the project query itself fails, ... ok
+test_undo_unnamed_project_refused (test_all.TestImportReceiptAndUndo.test_undo_unnamed_project_refused)
+F17/T17 未命名项目: a loaded project with no file path (never ... ok
+test_undo_v1_receipt_refused_before_confirm_and_project_open (test_all.TestImportReceiptAndUndo.test_undo_v1_receipt_refused_before_confirm_and_project_open)
+R81 复审: a v1 receipt must be refused BEFORE the confirm box ... ok
+test_undo_v1_receipt_refused_single_name_too (test_all.TestImportReceiptAndUndo.test_undo_v1_receipt_refused_single_name_too)
+R17: the v1 refusal covers the single-holder case as well - a ... ok
+test_undo_v1_receipt_refused_without_deleting (test_all.TestImportReceiptAndUndo.test_undo_v1_receipt_refused_without_deleting)
+R17: a v1 receipt (names only) has no strong ownership proof and ... ok
+test_undo_v2_clean_session_removes_file (test_all.TestImportReceiptAndUndo.test_undo_v2_clean_session_removes_file)
+F18 positive control: with no manual work anywhere (session and ... ok
+test_undo_v2_deleted_and_recreated_mask_keeps_file (test_all.TestImportReceiptAndUndo.test_undo_v2_deleted_and_recreated_mask_keeps_file)
+F18/T19 删除后重建同名: the imported mask was deleted and a ... ok
+test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask (test_all.TestImportReceiptAndUndo.test_undo_v2_dirty_session_keeps_file_with_saved_manual_mask)
+F18/T18 已保存新增: the manual mask WAS saved to disk, so the ... ok
+test_undo_v2_dirty_session_keeps_file_with_unsaved_manual_mask (test_all.TestImportReceiptAndUndo.test_undo_v2_dirty_session_keeps_file_with_unsaved_manual_mask)
+F18/T18: an unsaved manual mask in the session must stop the ... ok
+test_undo_v2_guid_drift_falls_back_to_token_and_name (test_all.TestImportReceiptAndUndo.test_undo_v2_guid_drift_falls_back_to_token_and_name)
+F19/T19 重命名/GUID漂移: the host regenerated guids across the ... ok
+test_undo_v2_per_mask_delete_failure_keeps_receipt (test_all.TestImportReceiptAndUndo.test_undo_v2_per_mask_delete_failure_keeps_receipt)
+F31: when the host delete itself fails on a mask, the failure ... ok
+test_undo_v2_same_name_on_two_images_deletes_only_owned (test_all.TestImportReceiptAndUndo.test_undo_v2_same_name_on_two_images_deletes_only_owned)
+F19/T19 多Image同名: two images each hold a 'liver' mask; only ... ok
+test_worker_status_rewrites_preserve_bootstrap_context (test_all.TestImportReceiptAndUndo.test_worker_status_rewrites_preserve_bootstrap_context)
+R03 主链路：真实 worker 状态转换不丢 output_path/source_path。 ... ok
+test_al_apply_rejects_same_grid_different_case (test_all.TestFlexiCTActiveLearningApply.test_al_apply_rejects_same_grid_different_case)
+F20: geometry equality is not case identity. The annotator has ... ok
+test_al_apply_request_returns_without_waiting_for_bridge (test_all.TestFlexiCTActiveLearningApply.test_al_apply_request_returns_without_waiting_for_bridge) ... ok
+test_al_conversion_applies_finished_result_and_marks_request (test_all.TestFlexiCTActiveLearningApply.test_al_conversion_applies_finished_result_and_marks_request) ... ok
+test_al_conversion_failure_marks_request_failed (test_all.TestFlexiCTActiveLearningApply.test_al_conversion_failure_marks_request_failed) ... ok
+test_al_conversion_refuses_when_project_switched (test_all.TestFlexiCTActiveLearningApply.test_al_conversion_refuses_when_project_switched) ... ok
+test_al_conversion_rejects_truncated_buffer (test_all.TestFlexiCTActiveLearningApply.test_al_conversion_rejects_truncated_buffer) ... ok
+test_al_conversion_rollback_on_apply_failure (test_all.TestFlexiCTActiveLearningApply.test_al_conversion_rollback_on_apply_failure) ... ok
+test_al_mark_viewed_never_blocks_gui_thread_on_lock (test_all.TestFlexiCTActiveLearningApply.test_al_mark_viewed_never_blocks_gui_thread_on_lock)
+R04 失败路径：外部窗口持锁时，Mimics 侧 viewed 写入不等待。 ... ok
+test_al_mark_viewed_writes_directly_when_lock_free (test_all.TestFlexiCTActiveLearningApply.test_al_mark_viewed_writes_directly_when_lock_free)
+R04 正常路径：无争用时直接写入（不经过重试队列）。 ... ok
+test_al_orphaned_converting_request_fails_after_restart (test_all.TestFlexiCTActiveLearningApply.test_al_orphaned_converting_request_fails_after_restart) ... ok
+test_no_tick_function_blocks_the_gui_thread (test_all.TestGuiThreadBlockingContract.test_no_tick_function_blocks_the_gui_thread) ... ok
+test_reaped_export_finishes_on_gui_thread (test_all.TestGuiThreadBlockingContract.test_reaped_export_finishes_on_gui_thread)
+F11 behavioral for the export path: cancel → reaper flag → the ... ok
+test_reaped_mask_import_deadline_finishes_with_diagnostic (test_all.TestGuiThreadBlockingContract.test_reaped_mask_import_deadline_finishes_with_diagnostic)
+F11 failure path: if the reap never completes (terminate ... ok
+test_reaped_mask_import_finishes_on_gui_thread (test_all.TestGuiThreadBlockingContract.test_reaped_mask_import_finishes_on_gui_thread)
+F11 behavioral: while the reaper runs, ticks do nothing but keep ... ok
+test_reaper_callbacks_never_call_mimics_apis (test_all.TestGuiThreadBlockingContract.test_reaper_callbacks_never_call_mimics_apis)
+F11: terminate_process_async callbacks run on the reaper thread. ... ok
+
+----------------------------------------------------------------------
+Ran 119 tests in 3.631s
+
+OK

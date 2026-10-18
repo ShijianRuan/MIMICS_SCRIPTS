@@ -1,0 +1,100 @@
+{
+  "nnunet_recovery_entry": {
+    "enabled": true,
+    "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。",
+    "button_size": [
+      80,
+      36
+    ],
+    "button_visible_size": [
+      80,
+      36
+    ],
+    "window_size": [
+      853,
+      440
+    ]
+  },
+  "nnunet_restore_callback": {
+    "return_seconds": 0.004060500000150569,
+    "total_seconds": 0.5033696250000048,
+    "fingerprint_reads_off_ui_thread": true,
+    "timer_callbacks_during_restore": 48,
+    "restored_value": 1,
+    "dialogs": [
+      "已恢复旧结果"
+    ],
+    "busy_snapshot": {
+      "busy": true,
+      "button_enabled": true,
+      "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。"
+    },
+    "synthetic_delay_per_storage_read_seconds": 0.2
+  },
+  "flexict_recovery_entry": {
+    "enabled": true,
+    "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。",
+    "button_size": [
+      80,
+      36
+    ],
+    "button_visible_size": [
+      80,
+      36
+    ],
+    "window_size": [
+      853,
+      440
+    ]
+  },
+  "flexict_restore_callback": {
+    "return_seconds": 0.000577791000068828,
+    "total_seconds": 0.483314541000027,
+    "fingerprint_reads_off_ui_thread": true,
+    "timer_callbacks_during_restore": 47,
+    "restored_value": 1,
+    "dialogs": [
+      "已恢复旧结果"
+    ],
+    "busy_snapshot": {
+      "busy": true,
+      "button_enabled": true,
+      "detail": "预测完成，空间校验通过。\n本次预测替换了旧结果（2025-10-09 16:53:20）。旧结果已保留，可用「旧结果…」打开或恢复。"
+    },
+    "synthetic_delay_per_storage_read_seconds": 0.2
+  },
+  "receipt_warning": {
+    "note": "1 例工程已生成但撤销记录写入失败（caseA），任务已结束，重新运行导入任务后会自动补写",
+    "rows": 1
+  },
+  "nnunet_status_viewer_close_during_swap": {
+    "app_exit": 0,
+    "entered_swap": true,
+    "output_exists_at_exit": false,
+    "restore_busy_at_exit": true,
+    "worker_is_daemon": true,
+    "process_exit": 0,
+    "output_exists_after_exit": false,
+    "old_exists": true,
+    "kept_versions": [
+      2
+    ],
+    "status_still_completed": true,
+    "stderr": "qt.qpa.fonts: Populating font family aliases took 110 ms. Replace uses of missing font family \"Sans Serif\" with one that exists to avoid this cost. \n"
+  },
+  "flexict_status_viewer_close_during_swap": {
+    "app_exit": 0,
+    "entered_swap": true,
+    "output_exists_at_exit": false,
+    "restore_busy_at_exit": true,
+    "worker_is_daemon": true,
+    "process_exit": 0,
+    "output_exists_after_exit": false,
+    "old_exists": true,
+    "kept_versions": [
+      2
+    ],
+    "status_still_completed": true,
+    "stderr": "qt.qpa.fonts: Populating font family aliases took 111 ms. Replace uses of missing font family \"Sans Serif\" with one that exists to avoid this cost. \n"
+  }
+}
