@@ -367,11 +367,26 @@ def _wait_for_mcs(
     return 1
 
 
+def _canonical_project_root(value) -> str:
+    """Canonicalize a project root to match mimics_batch_cli.ROOT.
+
+    A mapped network drive letter and its UNC form are the same folder but
+    two different strings, and import_queue_runtime_dir maps them to two
+    different queue runtime dirs (the UNC one redirects to LOCALAPPDATA).
+    The drop window used to pass the drive-letter form while the background
+    Mimics launcher used the resolved UNC root, splitting one import into
+    two queue dirs (R83-1).
+    """
+    return os.path.realpath(str(value))
+
+
 def run(selection_path: Path, status_path: Path, stop_path: Path, log_path: Path) -> int:
     selection = _read_json(selection_path)
     source_path = str(selection.get("source_path") or "").strip()
     output_dir = str(selection.get("output_path") or "").strip()
-    project_root = str(selection.get("project_root") or ROOT)
+    # R83-1: see _canonical_project_root — the serialized project_root may
+    # arrive in a non-canonical form (e.g. a mapped drive letter).
+    project_root = _canonical_project_root(selection.get("project_root") or ROOT)
 
     if not source_path or not output_dir:
         _write_status(status_path, "failed", "invalid_selection", error="选择文件缺少 source_path 或 output_path。")

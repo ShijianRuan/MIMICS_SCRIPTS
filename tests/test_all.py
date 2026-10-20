@@ -1048,6 +1048,38 @@ class TestMimicsBridgeNiftiNormalization(unittest.TestCase):
         self.assertEqual("output_dir_unavailable", status2["phase"])
         self.assertIn("输出文件夹不可用", status2["error"])
 
+    def test_single_case_worker_canonicalizes_project_root_to_cli_root(self):
+        # R83-1: on a mapped network drive, the drop window passed a
+        # drive-letter project_root while the background Mimics launcher
+        # (mimics_batch_cli, Path(__file__).resolve()) used the UNC root.
+        # import_queue_runtime_dir mapped the two forms to DIFFERENT queue
+        # runtime dirs, so background Mimics watched an empty queue until
+        # its 120s idle timeout and the worker reported "exited before
+        # creating the .mcs file (exit code 0)". Whatever form the
+        # serialized selection carries, the worker must land on the same
+        # root — and thus the same queue dir — the launcher uses.
+        import tools.single_case_import_worker as worker
+        import tools.mimics_batch_cli as batch_cli
+        import runtime_common
+
+        output_dir = os.path.join(self.tmp, "mcs_out")
+        os.makedirs(output_dir)
+        cli_root = str(batch_cli.ROOT)
+        noncanonical_forms = [
+            os.path.join(cli_root, "tools", ".."),   # un-normalized .. segment
+            cli_root + os.sep,                       # trailing separator
+            os.path.join(cli_root, ".", ""),         # redundant . component
+        ]
+        for form in noncanonical_forms:
+            self.assertNotEqual(form, cli_root)  # the alias must be a real alias
+            canonical = worker._canonical_project_root(form)
+            self.assertEqual(
+                runtime_common.import_queue_runtime_dir(canonical, output_dir),
+                runtime_common.import_queue_runtime_dir(cli_root, output_dir),
+                "non-canonical project_root {0!r} must resolve to the "
+                "launcher's queue runtime dir".format(form),
+            )
+
     def test_mask_nifti_publish_is_atomic_and_preserves_existing_on_failure(self):
         import nibabel as nib
         import mimics_bridge
@@ -12561,6 +12593,21 @@ class TestImportDropWindow(unittest.TestCase):
         kind, source, _children = dw.classify_payload([path])
         self.assertEqual("single", kind)
         self.assertEqual(path, source)
+
+    def test_root_form_matches_background_launcher_root(self):
+        # R83-1: on a mapped network drive, abspath(__file__) keeps the
+        # drive letter (R:\...) while mimics_batch_cli.ROOT resolves to the
+        # UNC form (\\server\share\...). The two forms map to different
+        # import-queue runtime dirs, splitting single-case imports into a
+        # worker-side queue and an empty launcher-side queue (background
+        # Mimics idles out with "exit code 0"). The drop window's root —
+        # used for the selection payload's project_root and for reading
+        # batch runtime state — must be the canonical, resolved form.
+        import import_drop_window as dw
+        import tools.mimics_batch_cli as batch_cli
+
+        self.assertEqual(os.path.realpath(dw._ROOT), dw._ROOT)
+        self.assertEqual(str(batch_cli.ROOT), dw._ROOT)
 
     def test_classify_case_folder(self):
         import import_drop_window as dw

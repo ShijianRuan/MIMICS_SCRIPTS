@@ -35,7 +35,11 @@ from pathlib import Path
 from queue import Empty, Queue
 
 # Embeddable Python can omit the script directory from sys.path.
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# realpath (not abspath): on a mapped network drive this yields the UNC form,
+# matching mimics_batch_cli.ROOT (Path.resolve()). A drive-letter _ROOT would
+# make the single-case worker compute a different import-queue runtime dir
+# than the background Mimics launcher (R83-1 split-brain on network copies).
+_HERE = os.path.dirname(os.path.realpath(__file__))
 _ROOT = os.path.dirname(_HERE)
 for _candidate in (_HERE, _ROOT, os.path.join(_ROOT, "runtime_py35")):
     if _candidate and _candidate not in sys.path:
