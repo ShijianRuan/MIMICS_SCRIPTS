@@ -18,6 +18,12 @@ tools/pyqt5_wheels/
 # Offline wheels (platform-specific, downloaded separately)
 wheels/
 
+# cu118 repair-kit wheels (~2.7 GB, ship with the deployment folder copy)
+/repair/cu118/*.whl
+
+# cu128 repair-kit wheels (~3.3 GB, for RTX 50-series, ship with the folder copy)
+/repair/cu128/*.whl
+
 # Local agent/browser state
 /.claude/
 # Project instructions for local agent sessions; contains credentials,

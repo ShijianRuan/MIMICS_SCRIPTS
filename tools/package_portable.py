@@ -43,6 +43,10 @@ INCLUDE_FILES = [
     "nninteractive_finetune_config.json",
     "interactive_algorithms_config.json",
     "window_level_presets.json",
+    "安装说明.md",
+    "修复GPU加速.bat",
+    "切回默认GPU.bat",
+    "repair/cu118/switch_gpu_torch.py",
     ".dockerignore",
     ".gitignore",
 ]

@@ -24,6 +24,9 @@ Issue kinds and their fix actions:
 * ``migration_pending``   -> run migrate_root with the detected old root
 * ``flexict_weights``     -> informational (where to put the weights)
 * ``scribbleprompt_checkpoint`` -> informational (where to put the .pt file)
+* ``gpu_unavailable``     -> informational (double-click 修复GPU加速.bat
+                             after closing Mimics; the torch switch cannot
+                             run from inside this environment)
 """
 
 from __future__ import annotations
@@ -194,6 +197,39 @@ def _nninteractive_official_model(root: Path) -> str:
     return ""
 
 
+def _gpu_unavailable_issue(root: Path) -> dict:
+    """The old-driver CUDA issue with the double-click repair path.
+
+    The torch switch itself cannot be a fix_action started from here: it
+    replaces DLLs of the very interpreter this dialog runs in. The repair
+    is a launcher in the package root the user double-clicks after fully
+    closing Mimics (修复GPU加速.bat wraps repair/cu118/switch_gpu_torch.py).
+    """
+    bat = root / "修复GPU加速.bat"
+    if bat.is_file():
+        repair = (
+            "完全退出 Mimics 和右下角所有小窗口后，双击部署包根目录的"
+            "「修复GPU加速.bat」（{0}），约 5 分钟、不需要联网，完成后重新"
+            "打开 Mimics。".format(bat)
+        )
+    else:
+        repair = "部署包根目录缺少「修复GPU加速.bat」，请重新完整拷贝部署包。"
+    return {
+        "kind": "gpu_unavailable",
+        "title": "GPU 加速不可用（AI 功能会明显变慢）",
+        "detail": (
+            "上次环境检查显示 CUDA 不可用，最常见的原因是显卡驱动过旧。\n"
+            "首选：请 IT 把 NVIDIA 驱动更新到最新版（nvidia.cn/drivers）并"
+            "重启电脑，不用改包内任何东西。\n"
+            "驱动实在无法更新时：{0}\n"
+            "若这台电脑没有独立 NVIDIA 显卡，可忽略本条（AI 功能用 CPU 也能"
+            "运行，只是慢）。".format(repair)
+        ),
+        "fix_action": "",
+        "severity": "warn",
+    }
+
+
 def collect_issues(project_root: Path | None = None) -> list[dict]:
     """Collect current environment issues. Pure reads; safe anywhere."""
     root = Path(project_root or ROOT)
@@ -242,6 +278,15 @@ def collect_issues(project_root: Path | None = None) -> list[dict]:
                 "fix_action": "install",
                 "severity": "warn",
             })
+
+    # GPU: only from the last check's recorded result. No live torch probe
+    # here on purpose -- collect_issues also feeds the system health panel's
+    # 10-second refresh, and importing torch on a network drive takes tens
+    # of seconds (R84).
+    if state:
+        detail = state.get("detail")
+        if isinstance(detail, dict) and detail.get("cuda_available") is False:
+            issues.append(_gpu_unavailable_issue(root))
 
     old_root = detect_old_root(root)
     if old_root:

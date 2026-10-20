@@ -15234,6 +15234,67 @@ class TestEnvGuidance(unittest.TestCase):
         })
         self.assertEqual([], eg.collect_issues(self.root))
 
+    def test_cuda_unavailable_state_points_at_double_click_repair(self):
+        # R84: a non-technical user must get the double-click repair path,
+        # never a command line. The torch switch replaces DLLs of the very
+        # interpreter this dialog runs in, so it cannot be a fix_action
+        # started from here -- informational only.
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        with open(os.path.join(self.root, "修复GPU加速.bat"), "w") as handle:
+            handle.write("x")
+        self._write_state({
+            "status": "ok",
+            "detail": {"cuda_available": False, "cuda_device_count": 0},
+        })
+        issues = eg.collect_issues(self.root)
+        issue = next(i for i in issues if i["kind"] == "gpu_unavailable")
+        self.assertEqual("", issue["fix_action"])
+        self.assertIn("修复GPU加速.bat", issue["detail"])
+
+    def test_cuda_unavailable_without_launcher_reports_missing_kit(self):
+        # Failure path: the launcher was not shipped / the folder copy was
+        # partial. The issue must say the kit is missing instead of pointing
+        # the user at a file that does not exist.
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        self._write_state({
+            "status": "ok",
+            "detail": {"cuda_available": False},
+        })
+        issues = eg.collect_issues(self.root)
+        issue = next(i for i in issues if i["kind"] == "gpu_unavailable")
+        self.assertIn("缺少", issue["detail"])
+
+    def test_cuda_available_state_has_no_gpu_issue(self):
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        self._write_state({
+            "status": "ok",
+            "detail": {"cuda_available": True, "cuda_device_count": 1},
+        })
+        issues = eg.collect_issues(self.root)
+        self.assertEqual(
+            [], [i for i in issues if i["kind"] == "gpu_unavailable"])
+
+    def test_stale_cuda_unavailable_state_does_not_nag(self):
+        # Failure path: a months-old "cuda unavailable" from a previous
+        # install must not keep telling the user to run the repair.
+        eg = self._import_guidance()
+        self._fake_env(self.root)
+        self._fake_official_model(self.root)
+        self._write_state({
+            "status": "ok",
+            "detail": {"cuda_available": False},
+            "updated_at_epoch": time.time() - 3 * 24 * 60 * 60,
+        })
+        self.assertEqual(
+            [], [i for i in eg.collect_issues(self.root)
+                 if i["kind"] == "gpu_unavailable"])
+
     def test_moved_checkout_detected_with_old_root(self):
         import json as _json
         eg = self._import_guidance()
@@ -15413,6 +15474,128 @@ class TestEnvGuidance(unittest.TestCase):
                 "ScribblePrompt_unet_v1_nf192_res128.pt")),
             "runtime checkpoint resolver must default to the bundled path, got: {0}".format(resolved),
         )
+
+
+class TestGpuRepairLauncher(unittest.TestCase):
+    """R84: double-click GPU repair for users who cannot type commands."""
+
+    def test_launchers_are_ascii_and_target_the_repair_script(self):
+        # cmd.exe parses .bat files in the legacy OEM/ANSI codepage: any
+        # non-ASCII byte in the launcher garbles on other machines' locales.
+        # All Chinese user-facing output must come from the Python script.
+        expected = {
+            "修复GPU加速.bat": "",        # switch to cu118 (default action)
+            "切回默认GPU.bat": "restore",  # back to the default cu124 build
+            "RTX50系列GPU修复.bat": "switch128",  # cu128 for RTX 50-series
+        }
+        for name, action in expected.items():
+            with open(os.path.join(PROJECT_ROOT, name), "rb") as handle:
+                raw = handle.read()
+            self.assertTrue(
+                all(b < 128 for b in raw),
+                "{0} must stay ASCII-only (cmd codepage safety)".format(name))
+            text = raw.decode("ascii")
+            self.assertIn("pause", text, name + " must keep its window open")
+            # %~dp0-relative paths: a hardcoded drive letter (e.g. R:\...)
+            # would break on every other machine's copy.
+            self.assertIn(r"%ROOT%repair\cu118\switch_gpu_torch.py", text)
+            self.assertIn(r"%ROOT%python_env\python.exe", text)
+            if action:
+                self.assertIn(action, text)
+            else:
+                self.assertNotIn(" restore", text)
+
+    def test_switch_script_matches_repo_layout(self):
+        # The launchers hard-code <root>\repair\cu118\switch_gpu_torch.py and
+        # the script itself derives python_env from its own location; both
+        # contracts must hold relative to the repo root or the double-click
+        # repair silently breaks (R84).
+        import importlib.util
+        script = os.path.join(PROJECT_ROOT, "repair", "cu118",
+                              "switch_gpu_torch.py")
+        self.assertTrue(os.path.isfile(script))
+        spec = importlib.util.spec_from_file_location(
+            "switch_gpu_torch_under_test", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(
+            os.path.normpath(os.path.join(module.HERE, "..", "..")),
+            os.path.normpath(PROJECT_ROOT))
+        self.assertTrue(module.PYTHON.endswith(
+            os.path.join("python_env", "python.exe")))
+        self.assertEqual(
+            ("torch", "torchvision"), tuple(sorted(module.VARIANTS["cu118"][1])))
+        self.assertEqual(
+            ("torch", "torchvision"), tuple(sorted(module.VARIANTS["cu128"][1])))
+
+    def _load_switch_module(self):
+        import importlib.util
+        script = os.path.join(PROJECT_ROOT, "repair", "cu118",
+                              "switch_gpu_torch.py")
+        spec = importlib.util.spec_from_file_location(
+            "switch_gpu_torch_rt", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _run_switch_main(self, module, mode):
+        old_argv = list(sys.argv)
+        sys.argv = ["switch_gpu_torch.py", mode]
+        try:
+            return module.main()
+        finally:
+            sys.argv = old_argv
+
+    def test_restore_on_default_is_idempotent(self):
+        """R85-2: 在已是默认 cu124 的环境上运行 restore 必须是无操作——
+        曾把 torch 整个删掉（真机复现：连续两次 restore 删光 torch）。"""
+        module = self._load_switch_module()
+        tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_idem_"))
+        for name in ("torch", "torch-2.6.0+cu124.dist-info",
+                     "torchvision", "torchvision-0.21.0+cu124.dist-info"):
+            (tmp / name).mkdir()
+        old_site = module.ENV_SITE
+        old_probe = module.cuda_probe
+        module.ENV_SITE = str(tmp)
+        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
+        try:
+            rc = self._run_switch_main(module, "restore")
+            self.assertEqual(0, rc)
+            # 环境保持原样：torch/torchvision 目录仍在，没产生 .bak
+            self.assertTrue((tmp / "torch").is_dir())
+            self.assertTrue((tmp / "torchvision").is_dir())
+            self.assertTrue((tmp / "torch-2.6.0+cu124.dist-info").is_dir())
+            self.assertFalse(any(p.name.endswith(".bak") for p in tmp.iterdir()))
+        finally:
+            module.ENV_SITE = old_site
+            module.cuda_probe = old_probe
+            shutil.rmtree(str(tmp), ignore_errors=True)
+
+    def test_restore_removes_variant_and_restores_default(self):
+        """R85-2: cu118/cu128 活动状态 + cu124 备份时，restore 清掉变体、
+        恢复默认 cu124，且 .bak 不再残留。"""
+        module = self._load_switch_module()
+        tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_var_"))
+        for name in ("torch", "torch-2.6.0+cu118.dist-info",
+                     "torchvision", "torchvision-0.21.0+cu118.dist-info",
+                     "torch.bak", "torch-2.6.0+cu124.dist-info.bak",
+                     "torchvision.bak", "torchvision-0.21.0+cu124.dist-info.bak"):
+            (tmp / name).mkdir()
+        old_site = module.ENV_SITE
+        old_probe = module.cuda_probe
+        module.ENV_SITE = str(tmp)
+        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
+        try:
+            rc = self._run_switch_main(module, "restore")
+            self.assertEqual(0, rc)
+            self.assertTrue((tmp / "torch-2.6.0+cu124.dist-info").is_dir())
+            self.assertTrue((tmp / "torchvision-0.21.0+cu124.dist-info").is_dir())
+            self.assertFalse((tmp / "torch-2.6.0+cu118.dist-info").exists())
+            self.assertFalse(any(p.name.endswith(".bak") for p in tmp.iterdir()))
+        finally:
+            module.ENV_SITE = old_site
+            module.cuda_probe = old_probe
+            shutil.rmtree(str(tmp), ignore_errors=True)
 
 
 class TestProcessRegistry(unittest.TestCase):

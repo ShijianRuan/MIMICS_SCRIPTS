@@ -279,6 +279,13 @@ def _show_result(monitor, state):
         devices = detail.get("cuda_device_count", 0)
         lines.append("\nCUDA：{0}（{1} 个设备）".format(
             "可用" if cuda else "不可用", devices))
+        if not cuda:
+            bat = os.path.join(_project_root(), "修复GPU加速.bat")
+            if os.path.isfile(bat):
+                lines.append(
+                    "GPU 修复：若显卡驱动较旧且无法更新，可完全退出 Mimics 后"
+                    "双击部署包根目录的「修复GPU加速.bat」切换旧驱动兼容包"
+                    "（约 5 分钟，不需要联网）。")
 
     lines.append("\n完整日志：{0}".format(_log_file()))
 
