@@ -46,6 +46,7 @@ INCLUDE_FILES = [
     "安装说明.md",
     "修复GPU加速.bat",
     "切回默认GPU.bat",
+    "RTX50系列GPU修复.bat",
     "repair/cu118/switch_gpu_torch.py",
     ".dockerignore",
     ".gitignore",
