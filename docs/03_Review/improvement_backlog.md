@@ -2214,8 +2214,12 @@
   当前菜单结构（R79 后：01_Data 5 入口 / 02_AI 含 ScribblePrompt +
   nnInteractive/FlexiCT/nnU-Net 子组 / 03_Review 3 入口 / 99_Admin
   精简后）重写功能介绍，删除 DINOv3（已淘汰），保留安装/破解截图。
-  注意：overwrite 时 lark-cli 因缺 `docs:document.media:download`
-  scope 下载图片 403，8 张截图 token 变空——待用户补授权后恢复图片。
+  用户已补授权（含 `docs:document.media:download`），8 张截图经
+  `docs +media-download` 取回本地后随 v2 markdown overwrite 重新上传，
+  回读验证：8 个 img 块、7 张表全部 3 列、加粗正常、无残留字面
+  `**`/lark-table（revision 341）。教训：lark-cli v2 不认 v1 的
+  `<lark-table>`/`<image token>` 语法，写入前须用 GFM 管道表 +
+  `![alt](@./local.png)`。
 
 ### R80（2026-10-12 UI 审查销项轮：用户报告，33 卡中本机可修 13 卡已修复）
 
