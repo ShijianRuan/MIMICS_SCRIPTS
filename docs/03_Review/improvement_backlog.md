@@ -2188,7 +2188,8 @@
 
 ### R83（2026-10-20 用户报告：网络盘部署包单病例导入必现失败）
 
-- [ ] **R83-1【P1】映射网络盘上单病例导入必现失败（批量导入正常）**：
+- [x] **R83-1【P1】映射网络盘上单病例导入必现失败（批量导入正常）**
+  〔当轮解决，commit `d5b66a4`〕：
   用户在 R:\MIMICS_SCRIPTS（映射盘符 →
   `\\file-uih-sh\Userdata\shijian.ruan`）拖拽导入单病例 4/4 次全部
   失败，报错「Background Mimics exited before creating the .mcs file
@@ -2216,6 +2217,18 @@
     mimics_batch_cli.ROOT 的规范化形式（回归测试）；③ smoke 门禁
     通过；④ 在 R 盘部署包上用修复后的 worker 以盘符形式 project_root
     端到端重放单病例导入并成功产出 .mcs。
+  - 修复：`import_drop_window._ROOT` 改 `os.path.realpath` + worker
+    新增 `_canonical_project_root` 归一 selection 的 project_root
+    （各一行核心改动，commit `d5b66a4`），修复文件已同步 R 盘部署包。
+  - 证据：①② 回归测试 ×2 进 tests/test_all.py
+    （test_single_case_worker_canonicalizes_project_root_to_cli_root、
+    TestImportDropWindow.test_root_form_matches_background_launcher_root）；
+    ③ smoke 8/8（`.mimics_runtime/regression/20261020T215650_smoke.json`）；
+    ④ R 盘部署包上以原始失败输入（project_root=R:\MIMICS_SCRIPTS）
+    原样重放 LUNG1-277 导入，98 秒级完成，status=completed，
+    `mask_exports\LUNG1-277.mcs`（31MB）+ 回执 .LUNG1-277.import_receipt.json
+    产出，worker/supervisor/后台 Mimics 全部干净退出，work 目录自动
+    清费；用户当天失败的两个病例（LUNG1-001/277）均已补齐 mcs。
 
 ### R82（2026-10-20 用户报告：肺窗变黑白 + 飞书手册重写）
 
