@@ -122,10 +122,11 @@ def _launch_setup_worker(action, extra_arg=None):
         state_dir = os.path.dirname(state_path)
         if state_dir and not os.path.isdir(state_dir):
             os.makedirs(state_dir)
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump({
                 "status": "launching",
-                "message": "Starting setup worker...",
+                "action": action,
+                "message": "正在启动环境检查/设置…",
                 "updated_at_epoch": time.time(),
             }, f, indent=2, sort_keys=True)
     except Exception as exc:
@@ -155,6 +156,28 @@ def _launch_setup_worker(action, extra_arg=None):
 
 
 # -- Timer-based monitor -------------------------------------------------
+
+def _launch_progress_window():
+    """启动外部进度窗口（PySide6）实时显示检查/设置进度。
+
+    失败（环境损坏/无 PySide6）时静默降级为原来的行为——只在日志里记一句，
+    不打扰检查本身。
+    """
+    try:
+        import external_window_launcher
+        external_window_launcher.open_external_window(
+            "setup_progress_window.py",
+            window_title="环境设置进度",
+            runtime_subdir="setup",
+            log_prefix="setup_progress",
+            log_start_message="[Setup] 进度窗口已启动（PID={0}）。",
+        )
+    except Exception as exc:
+        _mimics_log(
+            logging.WARNING,
+            "Could not launch setup progress window: {0}".format(exc),
+        )
+
 
 def _poll_setup_state(monitor):
     """Called by the timer. Check if the external worker has finished."""
@@ -262,6 +285,10 @@ def _show_result(monitor, state):
     if message:
         lines.append(message)
 
+    if state.get("network_drive"):
+        lines.append("\n提示：环境在网络盘上，检查和 AI 运行会很慢；"
+                     "建议先把整个 MIMICS_SCRIPTS 文件夹复制到本地盘再使用。")
+
     if missing:
         lines.append("\n缺失的软件包（{0} 个）：".format(len(missing)))
         lines.append(", ".join(missing[:10]))
@@ -279,7 +306,14 @@ def _show_result(monitor, state):
         devices = detail.get("cuda_device_count", 0)
         lines.append("\nCUDA：{0}（{1} 个设备）".format(
             "可用" if cuda else "不可用", devices))
-        if not cuda:
+        if detail.get("blackwell_unsupported"):
+            bat = os.path.join(_project_root(), "RTX50系列GPU修复.bat")
+            if os.path.isfile(bat):
+                lines.append(
+                    "GPU 修复：检测到 RTX 50 系新显卡，当前 CUDA 版本缺少它的内核。"
+                    "请完全退出 Mimics 后双击部署包根目录的「RTX50系列GPU修复.bat」"
+                    "切换新显卡兼容包（约 5 分钟，不需要联网）。")
+        elif not cuda:
             bat = os.path.join(_project_root(), "修复GPU加速.bat")
             if os.path.isfile(bat):
                 lines.append(
@@ -568,6 +602,7 @@ def main(action=None):
     }
 
     _start_monitor(monitor, poll_seconds=2.0, timeout_seconds=1800)
+    _launch_progress_window()
     _mimics_log(
         logging.INFO,
         "Setup worker PID={0} running in background. Results will appear when complete.".format(

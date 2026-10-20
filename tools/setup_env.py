@@ -191,7 +191,7 @@ def _write_state(status, **kwargs):
     state.update(kwargs)
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(STATE_FILE), "w") as f:
+        with open(str(STATE_FILE), "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, sort_keys=True)
     except Exception:
         pass  # State file is diagnostic only — never crash the worker
@@ -227,6 +227,38 @@ def _log(message):
             f.write(line + "\n")
     except Exception:
         pass  # Log file is diagnostic only — never crash the worker
+
+
+def _is_network_path(path):
+    """网络盘/UNC 路径检测：\\server 开头或盘符是网络映射盘（DRIVE_REMOTE）。"""
+    try:
+        import ctypes
+        norm = os.path.normpath(str(path))
+        drive, _ = os.path.splitdrive(norm)
+        if drive.startswith("\\\\"):
+            return True
+        if drive:
+            return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4
+    except Exception:
+        pass
+    return False
+
+
+# 本次运行的固定上下文，供每一步进度写入复用
+_PROGRESS_CTX = {"started_at_epoch": None, "network_drive": False}
+
+
+def _progress(step, message):
+    """写入一条"checking"进度状态，让 Mimics/进度窗口能实时看到走到哪一步。"""
+    if not _PROGRESS_CTX["started_at_epoch"]:
+        _PROGRESS_CTX["started_at_epoch"] = time.time()
+    _write_state(
+        "checking",
+        step=step,
+        message=message,
+        started_at_epoch=_PROGRESS_CTX["started_at_epoch"],
+        network_drive=_PROGRESS_CTX["network_drive"],
+    )
 
 
 def _run_python(args, timeout=600):
@@ -335,7 +367,8 @@ def _probe_gui_backends():
 
 def check():
     """Validate the environment and write results to the state file."""
-    _write_state("checking", step="starting", message="Environment check started.")
+    _PROGRESS_CTX["network_drive"] = _is_network_path(str(PROJECT_ROOT))
+    _progress("starting", "正在启动环境检查…")
     _log("=== Environment Check ===")
     result = {
         "python_version": None,
@@ -355,6 +388,7 @@ def check():
     if ret == 0:
         result["python_version"] = output.strip().split("\n")[0]
         _log("Python: {0}".format(result["python_version"]))
+        _progress("python", "Python 解释器正常（{0}）".format(result["python_version"]))
     else:
         result["python_error"] = output[:500]
         _log("Python check failed: {0}".format(output[:200]))
@@ -362,6 +396,7 @@ def check():
         return 1
 
     # 2. Packages
+    _progress("packages", "正在检查软件包…")
     ret, output = _run_python_script([
         "import json, importlib.util as U",
         "pkgs = {0}".format(REQUIRED_IMPORTS),
@@ -382,6 +417,7 @@ def check():
         _log("Package probe failed: {0}".format(output[:200]))
 
     # 3. Preferred external GUI backend
+    _progress("gui", "正在检查界面组件…")
     gui_backends = _probe_gui_backends()
     result["gui_backends"] = gui_backends
     if gui_backends.get("pyside6"):
@@ -394,6 +430,7 @@ def check():
             _log("GUI {0} error: {1}".format(name, error))
 
     # 4. Package versions
+    _progress("versions", "正在读取软件包版本…（这一步首次运行时较慢，请稍候）")
     ret, output = _run_python_script([
         "import json",
         "pkgs = {0}".format(REQUIRED_IMPORTS),
@@ -421,6 +458,7 @@ def check():
     )
 
     # 5. CUDA
+    _progress("cuda", "正在检查显卡与 CUDA…")
     ret, output = _run_python_script([
         "import json, os, traceback",
         "r = {}",
@@ -430,6 +468,7 @@ def check():
         "    r['cuda_compiled_version'] = str(getattr(torch.version, 'cuda', 'unknown'))",
         "    r['cuda_visible_devices'] = os.environ.get('CUDA_VISIBLE_DEVICES')",
         "    r['nvidia_visible_devices'] = os.environ.get('NVIDIA_VISIBLE_DEVICES')",
+        "    r['arch_list'] = [str(x) for x in torch.cuda.get_arch_list()]",
         "    r['is_available'] = bool(torch.cuda.is_available())",
         "    try:",
         "        r['device_count'] = int(torch.cuda.device_count())",
@@ -439,6 +478,7 @@ def check():
         "    if r.get('device_count', 0) > 0:",
         "        try:",
         "            r['device0_name'] = str(torch.cuda.get_device_name(0))",
+        "            r['device0_cap'] = [int(x) for x in torch.cuda.get_device_capability(0)]",
         "        except Exception as e:",
         "            r['device0_name_error'] = repr(e)",
         "    try:",
@@ -463,6 +503,16 @@ def check():
                 result["cuda_available"], result["cuda_device_count"], result["cuda_version"]))
             if cuda_probe.get("device0_name"):
                 _log("CUDA device0: {0}".format(cuda_probe.get("device0_name")))
+            cap = cuda_probe.get("device0_cap") or []
+            if cap:
+                _log("CUDA device0 capability: {0}".format(".".join(str(x) for x in cap)))
+            result["blackwell_unsupported"] = bool(
+                result["cuda_available"] and len(cap) >= 1
+                and cap[0] >= 12 and "sm_120" not in (cuda_probe.get("arch_list") or [])
+            )
+            if result["blackwell_unsupported"]:
+                _log("GPU is RTX 50-series (sm_120); cu124 torch lacks sm_120 kernels — "
+                     "use the RTX50-series repair kit.")
             if not result["cuda_available"]:
                 reason = cuda_probe.get("init_error") or cuda_probe.get("probe_error") or cuda_probe.get("device0_name_error") or "unknown"
                 _log("CUDA unavailable reason: {0}".format(reason))
@@ -474,6 +524,7 @@ def check():
         _log("CUDA probe failed: {0}".format(output[:200]))
 
     # 6. Model weights
+    _progress("models", "正在检查模型文件…")
     model_roots = [
         PROJECT_ROOT / name / "models" for name in ENV_DIR_CANDIDATES
     ]
@@ -506,24 +557,34 @@ def check():
         and nnunet_version_ok
     )
 
+    if all_ok:
+        status_msg = "All checks passed."
+    elif not broken_pkgs:
+        status_msg = "{0} package(s) missing; PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
+            len(missing_pkgs), gui_ready, nnunet_version_ok
+        )
+    else:
+        status_msg = "{0} package(s) failed to import (binary/DLL problem?); PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
+            len(broken_pkgs), gui_ready, nnunet_version_ok
+        )
+    hints = []
+    if _PROGRESS_CTX["network_drive"]:
+        hints.append("检测到环境在网络盘上，检查和 AI 运行会非常慢；建议先把整个 MIMICS_SCRIPTS 文件夹复制到本地盘再使用。")
+    if result.get("blackwell_unsupported"):
+        hints.append("显卡是 RTX 50 系新显卡，当前 CUDA 版本缺少它的内核；请完全退出 Mimics 后双击「RTX50系列GPU修复.bat」切换。")
+    if hints:
+        status_msg += "\n" + "\n".join(hints)
+
     _write_state(
         "ok" if all_ok else "incomplete",
-        message=(
-            "All checks passed."
-            if all_ok else
-            "{0} package(s) missing; PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
-                len(missing_pkgs), gui_ready, nnunet_version_ok
-            )
-            if not broken_pkgs else
-            "{0} package(s) failed to import (binary/DLL problem?); PySide6 GUI ready: {1}; nnU-Net version ready: {2}.".format(
-                len(broken_pkgs), gui_ready, nnunet_version_ok
-            )
-        ),
+        message=status_msg,
         detail=result,
         missing_packages=missing_pkgs,
         gui_ready=gui_ready,
         preferred_gui_backend=result["preferred_gui_backend"],
         all_ok=all_ok,
+        network_drive=_PROGRESS_CTX["network_drive"],
+        started_at_epoch=_PROGRESS_CTX["started_at_epoch"] or time.time(),
     )
     _log("=== Check complete: {0} ===".format("OK" if all_ok else "INCOMPLETE"))
     return 0 if all_ok else 1
@@ -1271,6 +1332,7 @@ def _run_shell(command, timeout=600):
 # ---------------------------------------------------------------------------
 
 def main():
+    _PROGRESS_CTX["network_drive"] = _is_network_path(str(PROJECT_ROOT))
     if len(sys.argv) < 2:
         print("Usage: python tools/setup_env.py <check|install|install-remote|extract|setup-from-scratch|offline-install> [archive]")
         return 1

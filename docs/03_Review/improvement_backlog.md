@@ -2186,6 +2186,62 @@
 
 ## 进行中
 
+### R85（2026-10-21 用户需求：Setup/Repair 检查无进度反馈 + 显卡太新（RTX 50 系）无解）
+
+- [x] **R85-1【P2】Setup/Repair 检查期间没有任何进度提示，用户以为卡死**
+  〔当轮解决，commit `8133648`〕：
+  R82-5 真机定位（网络盘部署检查 13 分半）后用户反馈"太慢时没有提示
+  用户在检测中，进度显示也没有，是否可以打印一些 log"。
+  - 痛点：环境检查（尤其网络盘部署）耗时数分钟且无任何可见进度，用户
+    以为卡死放弃，导致"从未验证成功"。
+  - 根因：check() 只在开始/结束各写一次 state；Py3.5 轮询端对非终态不弹窗；
+    Mimics 内嵌 Python 3.5 无 PySide6，进度 UI 只能走外部窗口。
+  - 方案：① `tools/setup_env.py` check() 每步写进度（python→packages→gui→
+    versions→cuda→models，中文 message + started_at_epoch + network_drive
+    标志，state 文件显式 utf-8）；② 新增 `tools/setup_progress_window.py`
+    （外部 PySide6 进度窗口：实时显示当前步骤/已用时/网络盘警告，终态短暂
+    停留后自动关闭）；③ `setup_environment.py` 启动 worker 后经
+    `external_window_launcher` 拉起进度窗口（失败静默降级）；④ 检查/修复
+    结果弹窗按 network_drive 与 RTX 50 系给出白话指引。
+  - 验收标准：① 检查期间有可见进度窗口且步骤文案实时更新；② 网络盘部署
+    时进度窗口与结果弹窗均提示"先复制到本地盘"；③ 本地正常检查照常 ok；
+    ④ 检查/安装/离线安装各动作通用；⑤ 回归门禁通过。
+  - 证据：进度窗口 offscreen 冒烟（读到进度 → 终态 2s 后自动退出）；本机
+    check() 跑通并产出新字段（network_drive/started_at_epoch/device0_cap/
+    blackwell_unsupported）；⑤ smoke 8/8
+    （`.mimics_runtime/regression/20261021T010825_smoke.json`）。
+- [x] **R85-2【P1】RTX 50 系（Blackwell sm_120）新显卡部署无解决方案；
+  顺带修复 switch_gpu_torch.py restore 误删默认 torch**
+  〔当轮解决，commit `8133648`〕：
+  用户问"部署上 cuda 驱动太高好像也不行？"——驱动高本身兼容（本机驱动
+  581.42 跑 cu124 正常）；真正的新机失败是 RTX 50 系：默认 torch 2.6.0+cu124
+  只编到 sm_90（实测 arch 列表），50 系 sm_120 需 cu128 构建。
+  - 痛点：50 系机器上 CUDA 探测显示"可用"但推理跑不起来（无 sm_120 内核），
+    用户无解。
+  - 根因：torch 2.6.0+cu124 的 arch 列表止于 sm_90；sm_120 需 cu128 构建
+    （torch 2.7.1+cu128 起）。
+  - 方案：① `repair/cu128/` 增加 cu128 修复套件（torch 2.7.1+cu128 +
+    torchvision 0.22.1+cu128，3.3GB wheel 随部署目录分发不入库）；
+    ② `switch_gpu_torch.py` 扩展 switch128 模式（按显卡计算能力检测，
+    仅 RTX 50 系触发；新增 cuda_probe 缺失的 `print(json.dumps(r))`——
+    原脚本探测永远 parse_failed，avail 短路从没生效）；③ 新增
+    「RTX50系列GPU修复.bat」；④ check() 的 CUDA 探测新增 device0_cap +
+    arch_list 并计算 blackwell_unsupported，结果弹窗给出对应双击指引；
+    ⑤ 安装说明.md 与飞书手册补 RTX 50 系一节。
+  - 顺带修复既有隐患（真机复现：连续两次 restore 把 torch 删光）：restore
+    在"当前已是默认 cu124 且无 .bak"时 no-op；switch 在目标变体已激活时
+    no-op、在另一变体激活时先恢复默认再切换（保证 .bak 永远备份默认 cu124）。
+  - 验收标准：① 50 系机器双击「RTX50系列GPU修复.bat」可切到 cu128 并跑通
+    GPU；② 默认/旧驱动机器运行该脚本明确提示"不是 RTX 50 系，无需切换"；
+    ③ 重复执行 restore/switch128 均幂等，不破坏环境；④ 非 50 系机器
+    check 正常不受影响；⑤ 回归门禁通过。
+  - 证据：真机往返测试（restore 幂等 → switch128 → 实测 arch 含 sm_120 +
+    GPU 实算通过 + nnunetv2/nnInteractive 兼容导入 → restore 回 cu124 →
+    restore 幂等）；真实决策路径测试（非 50 系 switch128 拒绝切换且环境
+    不变）；restore 幂等/变体恢复回归测试 ×2 进 test_all.py
+    （TestGpuRepairLauncher）；smoke 8/8
+    （`.mimics_runtime/regression/20261021T010825_smoke.json`）。
+
 ### R84（2026-10-20 用户需求：旧驱动 GPU 修复改为双击入口）
 
 - [x] **R84-1【P2】旧驱动 GPU 修复只能靠命令行，无代码基础的用户无法操作**
