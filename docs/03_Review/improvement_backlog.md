@@ -2182,6 +2182,41 @@
 
 ## 进行中
 
+### R82（2026-10-20 用户报告：肺窗变黑白 + 飞书手册重写）
+
+- [x] **R82-1【P1】肺窗预设应用后图像失去灰度（黑白色）**〔当轮解决〕：
+  根因（真实 Mimics 21 + 真实 CT 工程实证，诊断脚本
+  `E:\mimics_tmp_check\contrast_diag\contrast_probe.py`，报告
+  `report.json`）：Mimics `HU2GV` 把低于 0 的 GV 按无符号 32 位回绕
+  （HU2GV(-1350) 在 GV=HU+1024 的图上返回 2³²−326）。肺窗是唯一低点
+  HU < −1024 的预设，回绕后 low GV≈4.29e9，`_image_min_max` 三个真实
+  来源全部失败回落 (0,4095)，clamp 后窗口坍缩为 1 个 GV（1173,1174）
+  → 二值渲染。修复：`_hu_to_gv` 撤销回绕（gv≥2³¹ 时减 2³²）。实证：
+  修复后肺窗发送 (0, 1174)，其余 4 个预设发送值不变。回归测试
+  `test_lung_preset_negative_hu_not_wrapped_to_huge_gv` 进入
+  tests/test_all.py。smoke 8/8（`20261020T202858`）、fast 30/30
+  （`20261020T203916`）。
+- [ ] **R82-2【P2】"撤销上一次"永远无法恢复上次窗宽窗位**：Mimics 21
+  无 `mimics.view.get_contrast`（已对全部 .pyplugin 元数据核验），
+  `_current_contrast()` 恒为 None → `previous_contrast` 恒空 → 撤销
+  永远走"改为恢复全范围？"兜底询问。验收标准：撤销要么真正恢复上次
+  值（如通过状态文件记录 apply 前的实际 GV 对），要么明示告知用户
+  "无法获取当前对比度"而非伪装可撤销。
+- [ ] **R82-3【P2】"恢复全范围"用回落值 (0,4095) 而非真实图像 GV 范围**
+  ：真实工程有效范围 0..25879（set_contrast 的 ValueError 报文实证），
+  但 `_image_min_max` 三个来源（get_image_information 的 min/max 为
+  None、image.minimum_value 属性不存在、内嵌 Py3.5 无 numpy）全部失败
+  回落 (0,4095)，导致全范围恢复只显示 0..4095 HU+1024 区段。验收
+  标准：恢复全范围后与 Mimics 原生全范围显示一致（可借 set_contrast
+  先发非法值再从报文解析真实范围，或找到可靠 min/max 来源）。
+- [x] **R82-4 飞书手册重写**：wiki 文档 TlrLwRfbxiolmpkQV43c3qybn5e
+  （"Mimics安装使用手册"）内容已过时（还停留在 DINOv3 时代）。已按
+  当前菜单结构（R79 后：01_Data 5 入口 / 02_AI 含 ScribblePrompt +
+  nnInteractive/FlexiCT/nnU-Net 子组 / 03_Review 3 入口 / 99_Admin
+  精简后）重写功能介绍，删除 DINOv3（已淘汰），保留安装/破解截图。
+  注意：overwrite 时 lark-cli 因缺 `docs:document.media:download`
+  scope 下载图片 403，8 张截图 token 变空——待用户补授权后恢复图片。
+
 ### R80（2026-10-12 UI 审查销项轮：用户报告，33 卡中本机可修 13 卡已修复）
 
 > 用户指令：核查 2026-10-12 UI 与入口审查（`docs/reviews/2026-10-12-ui-review.md`）

@@ -180,9 +180,16 @@ def _image_min_max():
 
 def _hu_to_gv(value):
     try:
-        return int(mimics.segment.HU2GV(int(round(float(value)))))
+        gv = int(mimics.segment.HU2GV(int(round(float(value)))))
     except Exception:
         return int(round(float(value)))
+    # Mimics returns GV values below 0 wrapped as unsigned 32-bit ints
+    # (HU2GV(-1350) on a GV=HU+1024 image yields 2**32-326). Undo the wrap
+    # so clamping sees a negative GV instead of a huge one: otherwise the
+    # Lung preset collapses to a 1-GV window and the image loses all gray.
+    if gv >= 2 ** 31:
+        gv -= 2 ** 32
+    return gv
 
 
 def _current_contrast():

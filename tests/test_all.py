@@ -2945,6 +2945,34 @@ class TestWindowLevel(unittest.TestCase):
         self.assertEqual(1024, test_convert(0.4))
         self.assertEqual(1025, test_convert(0.6))
 
+    def test_lung_preset_negative_hu_not_wrapped_to_huge_gv(self):
+        """Regression (2026-10-20): Mimics HU2GV returns GV values below 0
+        wrapped as unsigned 32-bit ints (HU2GV(-1350) on a GV=HU+1024 image
+        returns 2**32-326, verified on Mimics 21 with a real CT project).
+        Without unwrapping, the Lung preset's low point clamps to the image
+        maximum and the window collapses to a single gray value -> the image
+        renders black-and-white with no grayscale."""
+        from window_level_mimics import _hu_to_gv, _set_contrast_points
+
+        original_hu2gv = _mock_mimics.segment.HU2GV
+        original_set_contrast = _mock_mimics.view.set_contrast
+        calls = []
+        try:
+            _mock_mimics.segment.HU2GV = (
+                lambda hu: (int(hu) + 1024) % 2 ** 32)
+            _mock_mimics.view.set_contrast = (
+                lambda low, high: calls.append((low, high)))
+
+            self.assertEqual(-326, _hu_to_gv(-1350))
+            low, high = _set_contrast_points(_hu_to_gv(-1350), _hu_to_gv(150))
+            self.assertEqual(0, low)
+            self.assertEqual(1174, high)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(((0, 0.0), (1174, 1.0)), calls[0])
+        finally:
+            _mock_mimics.segment.HU2GV = original_hu2gv
+            _mock_mimics.view.set_contrast = original_set_contrast
+
     def test_clamp_contrast_points(self):
         from window_level_mimics import _clamp_contrast_points
 
