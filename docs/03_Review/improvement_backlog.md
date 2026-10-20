@@ -2219,7 +2219,11 @@
   回读验证：8 个 img 块、7 张表全部 3 列、加粗正常、无残留字面
   `**`/lark-table（revision 341）。教训：lark-cli v2 不认 v1 的
   `<lark-table>`/`<image token>` 语法，写入前须用 GFM 管道表 +
-  `![alt](@./local.png)`。
+  `![alt](@./local.png)`。后按用户指正更新"安装库和脚本"：分发目录
+  改为 `\\file-uih-sh\Userdata\shijian.ruan\MIMICS_SCRIPTS`（免安装、
+  环境预置，无 setup_offline.bat），删过时截图与 test 数据段，补
+  安装说明.md 指引；并把肺窗修复同步到该分发目录的
+  window_level_mimics.py（其余文件与仓库一致）。
 
 ### R80（2026-10-12 UI 审查销项轮：用户报告，33 卡中本机可修 13 卡已修复）
 
