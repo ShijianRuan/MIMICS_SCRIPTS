@@ -2186,6 +2186,58 @@
 
 ## 进行中
 
+### R86（2026-10-21 用户复核轮：GPU 修复入口全面验证 + 证据更正 + R 盘清理）
+
+- [x] **R86-1【P1】restore 在 .bak 备份丢失时会删掉还能用的 torch，环境彻底损坏**
+  〔当轮解决，commit `d080f06`〕：
+  本轮复核 GPU 修复链路时发现的缺口：部署目录若被外部工具回退/覆盖
+  （本项目已两次发生，见 mysterious-file-revert 现象），可能丢掉 .bak
+  备份但保留变体版 torch。原 restore 路径会先 remove_variant_files()
+  把变体 torch/torchvision 全删，再发现无备份可恢复——还能用的环境
+  被删坏，且日志谎报"已恢复"。
+  - 痛点：用户按提示执行"切回默认GPU"后 AI 环境彻底损坏且无法自助恢复。
+  - 根因：restore 分支未校验"当前是非默认变体"与"存在可恢复 .bak"
+    的组合，删除动作先于备份校验执行。
+  - 影响视角：标注者（接收方）。
+  - 严重度：P1（数据层面是环境损毁；触发前提是已两次实际发生的回退现象）。
+  - 方案：restore 检测到"当前是 cu118/cu128 且无 .bak"时拒绝执行、
+    环境原样保留，并指路重新拷贝部署包或先用修复 bat 重装。
+  - 验收标准：① 变体激活但 .bak 丢失时 restore 返回 1 且环境原样
+    保留（torch/torchvision 目录一个不删）；② 默认状态 restore 仍幂等。
+  - 证据：回归测试 test_restore_without_backup_keeps_working_variant
+    进 test_all.py（TestGpuRepairLauncher，GPU 套件 8/8）；smoke 8/8
+    （`.mimics_runtime/regression/20261021T082349_smoke.json`）。
+    修复后文件已同步 R 盘并 sha1 校验一致
+    （`repair/cu118/switch_gpu_torch.py`，5a48d6c2）。
+- [x] **R86-2【P2】R 盘部署包含多余文件（139M 外部机器运行态 + __pycache__）**：
+  复核发现 R:\MIMICS_SCRIPTS 带着上一台机器（RTX 3060 机）的
+  `.mimics_runtime/`（139M，含 setup_env_state.json 等）和全部
+  `__pycache__`。运行态文件会让新机器上的「环境指引」在 24h 内读到
+  别的机器的检查结果而误报；__pycache__ 是纯垃圾。
+  - 处理：确认无进程占用后删除 R 盘 `.mimics_runtime/` 与所有
+    `__pycache__`（python_env 内的不动——随环境分发属正常）；保留
+    `docs/`（116K 真实手册，非垃圾）。清理后核查：python_env 外
+    `__pycache__`/`.pyc` 残留为 0，R 盘总量 22G。
+  - 验收标准：R 盘 python_env 外无 __pycache__、无 .mimics_runtime，
+    10 个关键文件与 E 盘 sha1 一致（bat ×3、安装说明、tools ×3、
+    runtime_py35/setup_environment.py、switch_gpu_torch.py、
+    mimics_bridge.py——已逐个核对全过）。
+- 复核结论（用户四条说法 + torch 切换安全性，全部实证通过）：
+  ① 四个支持入口说法准确（Setup/Repair 一键修复、Environment
+  Guidance 逐项体检、安装说明含旧驱动兼容办法、Collect Diagnostics
+  打诊断包）；② 显卡场景覆盖闭环：无显卡（指引明示可忽略）/ 旧驱动
+  2019+（修复GPU加速.bat→cu118）/ 2019 前驱动（切换后诚实提示只能
+  CPU）/ 常规显卡（默认 cu124 直接可用）/ RTX 50 系（check 计算
+  blackwell_unsupported 并指路 RTX50系列GPU修复.bat→cu128）；
+  ③ 切换脚本三条安全决策路径在本机真机复验（CUDA 可用时拒切 cu118、
+  非 50 系拒切 cu128、默认态 restore 幂等，每次环境原样未动）；
+  ④ E 盘与 R 盘 python_env 均为已验证可用版本 torch 2.6.0+cu124、
+  无 .bak、4 个离线 wheel 齐全。
+  - 证据更正：R84-1 ⑥、R85-2 原证据把本机显卡误记为 RTX 50 系
+    （实为 RTX 3060，Ampere sm_86，驱动 581.42；get_arch_list 返回
+    的是构建支持列表而非显卡本体），本轮已改写为准确表述（见对应
+    条目）。sm_120 本体执行仍无硬件可测，待真实 50 系机器首装验证。
+
 ### R85（2026-10-21 用户需求：Setup/Repair 检查无进度反馈 + 显卡太新（RTX 50 系）无解）
 
 - [x] **R85-1【P2】Setup/Repair 检查期间没有任何进度提示，用户以为卡死**
@@ -2235,12 +2287,17 @@
     GPU；② 默认/旧驱动机器运行该脚本明确提示"不是 RTX 50 系，无需切换"；
     ③ 重复执行 restore/switch128 均幂等，不破坏环境；④ 非 50 系机器
     check 正常不受影响；⑤ 回归门禁通过。
-  - 证据：真机往返测试（restore 幂等 → switch128 → 实测 arch 含 sm_120 +
-    GPU 实算通过 + nnunetv2/nnInteractive 兼容导入 → restore 回 cu124 →
-    restore 幂等）；真实决策路径测试（非 50 系 switch128 拒绝切换且环境
-    不变）；restore 幂等/变体恢复回归测试 ×2 进 test_all.py
-    （TestGpuRepairLauncher）；smoke 8/8
-    （`.mimics_runtime/regression/20261021T010825_smoke.json`）；
+  - 证据：真机往返测试在**本机 RTX 3060（Ampere，sm_86，驱动 581.42）**
+    上完成（restore 幂等 → 安装 cu128 → torch 2.7.1 导入 + GPU 实算 +
+    nnunetv2/nnInteractive 兼容 → restore 回 cu124 → restore 幂等）。
+    **注意边界**：sm_120（Blackwell）本体无硬件可测——"arch 含 sm_120"
+    指 cu128 **构建**的 arch 列表（get_arch_list 在任何显卡上都返回构建
+    支持的目标列表），Ampere 实算只能证明 cu128 构建本身可装可用，不能
+    证明 RTX 50 上跑得通；后者依据 pytorch 官方支持矩阵（2.7.1+cu128
+    起支持 sm_120），待真实 50 系机器首装时验证。真实决策路径测试
+    （非 50 系 switch128 拒绝切换且环境不变，本机复验通过）；restore
+    幂等/变体恢复回归测试 ×2 进 test_all.py（TestGpuRepairLauncher）；
+    smoke 8/8（`.mimics_runtime/regression/20261021T010825_smoke.json`）；
     fast 门禁 30/30
     （`.mimics_runtime/regression/20261021T080230_fast.json`）。
   - 修复文件已同步 R 盘部署包（`\\file-uih-sh\...\MIMICS_SCRIPTS`）：
@@ -2282,10 +2339,10 @@
     ×2 + TestEnvGuidance GPU 条目 ×4）；⑤ smoke 8/8
     （`.mimics_runtime/regression/20261020T225853_smoke.json`）；
     ⑥ 本机双击运行 修复GPU加速.bat 走通完整启动链（%~dp0 定位 →
-    python_env 拉起 → 离线安装 → 结果回显）。注：当时脚本探测有缺陷
-    （见 R85-2），本机实为 RTX 50 系新驱动，切换本应被 avail 短路
-    拦截；带 print 修复后的真机往返（switch128 → GPU 实算 → restore
-    → 幂等复跑）证据见 R85-2。
+    python_env 拉起 → 离线安装 → 结果回显）。注：本机是 RTX 3060
+    （Ampere，sm_86）+ 新驱动 581.42，cu124 本就正常，当时的切换发生在
+    旧脚本探测缺陷（probe 缺 print，avail 短路失效，见 R85-2）之下，
+    与显卡新旧无关；带 print 修复后的真机往返证据见 R85-2。
 
 ### R83（2026-10-20 用户报告：网络盘部署包单病例导入必现失败）
 
