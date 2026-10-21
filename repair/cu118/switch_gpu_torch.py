@@ -353,6 +353,14 @@ def main():
             probe = cuda_probe()
             _log("当前 GPU 状态: " + json.dumps(probe, ensure_ascii=False))
             return 0
+        if current_torch in ("cu118", "cu128") and not has_pending_backup():
+            # .bak 丢失（如部署目录被外部工具回退/覆盖）时绝不能把还能用的
+            # torch 删掉——删了环境就彻底坏了。保留现状并指路重装。
+            _log("!! 当前使用 {0}，但默认版本（cu124）的备份 .bak 丢失，"
+                 "无法恢复默认。为避免删坏环境，本次不做任何改动。".format(current_torch))
+            _log("   请重新拷贝/解压一份完整部署包覆盖本目录，"
+                 "或先用对应修复 bat 重装后再运行本脚本 restore。")
+            return 1
         removed = remove_variant_files()
         restored = restore_backups()
         _log("已移除 cu118/cu128（{0} 项）并恢复默认: {1}".format(

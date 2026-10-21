@@ -15571,6 +15571,30 @@ class TestGpuRepairLauncher(unittest.TestCase):
             module.cuda_probe = old_probe
             shutil.rmtree(str(tmp), ignore_errors=True)
 
+    def test_restore_without_backup_keeps_working_variant(self):
+        """变体活动但 .bak 备份丢失（部署目录被外部回退/覆盖）时，restore
+        必须拒绝而不是把还能用的 torch 删掉——删了环境就彻底坏了。"""
+        module = self._load_switch_module()
+        tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_nobak_"))
+        for name in ("torch", "torch-2.6.0+cu118.dist-info",
+                     "torchvision", "torchvision-0.21.0+cu118.dist-info"):
+            (tmp / name).mkdir()
+        old_site = module.ENV_SITE
+        old_probe = module.cuda_probe
+        module.ENV_SITE = str(tmp)
+        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
+        try:
+            rc = self._run_switch_main(module, "restore")
+            self.assertEqual(1, rc)
+            # 环境原样保留：可用的 cu118 torch 没被删除
+            self.assertTrue((tmp / "torch").is_dir())
+            self.assertTrue((tmp / "torchvision").is_dir())
+            self.assertTrue((tmp / "torch-2.6.0+cu118.dist-info").is_dir())
+        finally:
+            module.ENV_SITE = old_site
+            module.cuda_probe = old_probe
+            shutil.rmtree(str(tmp), ignore_errors=True)
+
     def test_restore_removes_variant_and_restores_default(self):
         """R85-2: cu118/cu128 活动状态 + cu124 备份时，restore 清掉变体、
         恢复默认 cu124，且 .bak 不再残留。"""
