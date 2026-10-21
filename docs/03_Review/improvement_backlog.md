@@ -2240,7 +2240,15 @@
     restore 幂等）；真实决策路径测试（非 50 系 switch128 拒绝切换且环境
     不变）；restore 幂等/变体恢复回归测试 ×2 进 test_all.py
     （TestGpuRepairLauncher）；smoke 8/8
-    （`.mimics_runtime/regression/20261021T010825_smoke.json`）。
+    （`.mimics_runtime/regression/20261021T010825_smoke.json`）；
+    fast 门禁 30/30
+    （`.mimics_runtime/regression/20261021T080230_fast.json`）。
+  - 修复文件已同步 R 盘部署包（`\\file-uih-sh\...\MIMICS_SCRIPTS`）：
+    R 盘原有 switch_gpu_torch.py 是 265 行旧版（无 switch128——
+    RTX50系列GPU修复.bat 在 R 盘会直接报错；且带 probe/restore 两处
+    旧缺陷）、安装说明是 cmd 版且缺两个 bat。已同步 6 个文件并逐个
+    cmp 校验一致：repair/cu118/switch_gpu_torch.py、tools/env_guidance.py、
+    tools/package_portable.py、安装说明.md、修复GPU加速.bat、切回默认GPU.bat。
 
 ### R84（2026-10-20 用户需求：旧驱动 GPU 修复改为双击入口）
 
