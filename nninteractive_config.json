@@ -5,5 +5,6 @@
   "existing_mask_result_mode": "ask",
   "keep_server_warm_after_session": true,
   "server_idle_timeout_seconds": 300,
-  "minimum_free_gpu_memory_gb": 4
+  "minimum_free_gpu_memory_gb": 4,
+  "fallback_to_mimics_buffer_when_source_unavailable": true
 }

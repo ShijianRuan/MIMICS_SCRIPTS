@@ -188,7 +188,11 @@ Internal keys (code defaults; add to the file only as an escape hatch):
 `image_input_mode` ("mimics"),
 `task_model_image_input_mode` ("auto"),
 `prefer_source_image_for_nninteractive` (false),
-`fallback_to_mimics_buffer_when_source_unavailable` (true),
+`fallback_to_mimics_buffer_when_source_unavailable` (true) —
+  deployment `nninteractive_config.json` writes this explicitly: source data
+  often sits on an inaccessible share (annotator machines have no read
+  permission), so the portable Mimics-buffer fallback is an intended default,
+  and an explicit value also protects older runtimes whose code default was false.
 `fallback_to_source_when_mimics_export_fails` (false),
 `async_start_worker_before_prompt` (true), `async_reuse_image_worker` (true),
 `incremental_interaction_replay` (true),
