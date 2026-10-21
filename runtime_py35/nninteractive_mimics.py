@@ -3780,11 +3780,25 @@ def _prewarm_async_image_worker(config, image):
     )
     # In explicit Mimics mode, prewarm must use buffer export; otherwise the
     # prewarmed source-image worker can be reused by later prompts.
+    #
+    # Official models must also prewarm with buffer export when the recorded
+    # source path may be unreachable: annotator machines often have no read
+    # access to the source share (fallback is the deployment default). Without
+    # buffer export the prewarm forces the source-image path and raises a
+    # misleading "missing file" error before the prompt is even captured.
+    allow_buffer_export = bool(
+        force_mimics_buffer
+        or task_buffer_fallback
+        or (
+            profile.get("source") != "task_model"
+            and bool(config.get("fallback_to_mimics_buffer_when_source_unavailable", True))
+        )
+    )
     return _get_or_start_image_worker(
         config,
         image,
         jobs_root,
-        allow_buffer_export=bool(force_mimics_buffer or task_buffer_fallback),
+        allow_buffer_export=allow_buffer_export,
     )
 
 

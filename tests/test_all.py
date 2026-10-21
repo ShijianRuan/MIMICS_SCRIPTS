@@ -8239,6 +8239,106 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "boom: no model"):
                 module._call_mimics_bridge({}, {"action": "x"})
 
+    def test_prewarm_official_model_uses_buffer_export_when_fallback_enabled(self):
+        # Failure path: annotator machines cannot reach the recorded source
+        # share. Prewarming an official model without buffer export forced the
+        # source-image path and raised "points to a missing file" before the
+        # prompt was even captured; with fallback enabled prewarm must use
+        # buffer export so the session starts on the .mcs image.
+        import nninteractive_mimics as module
+
+        captured = {}
+
+        def _fake_get_or_start(config, image, jobs_root, allow_buffer_export=True):
+            captured["allow_buffer_export"] = allow_buffer_export
+            return {"worker_dir": jobs_root}
+
+        with mock.patch.object(
+            module, "_model_profile", return_value={"source": "official"}
+        ), mock.patch.object(
+            module, "_runtime_work_dir", return_value=self.tmp
+        ), mock.patch.object(module, "_cleanup_async_jobs"), mock.patch.object(
+            module, "_mimics_log"
+        ), mock.patch.object(
+            module, "_runtime_paths",
+            return_value=("python", "bridge", "models", {}, ["fold_1"]),
+        ), mock.patch.object(
+            module, "_get_or_start_image_worker", side_effect=_fake_get_or_start
+        ):
+            module._prewarm_async_image_worker(
+                {
+                    "async_reuse_image_worker": True,
+                    "fallback_to_mimics_buffer_when_source_unavailable": True,
+                },
+                object(),
+            )
+        self.assertTrue(captured["allow_buffer_export"])
+
+    def test_prewarm_official_model_keeps_source_path_when_fallback_disabled(self):
+        # Explicitly disabling the buffer fallback keeps the historical
+        # source-fast-path prewarm for machines that do have share access.
+        import nninteractive_mimics as module
+
+        captured = {}
+
+        def _fake_get_or_start(config, image, jobs_root, allow_buffer_export=True):
+            captured["allow_buffer_export"] = allow_buffer_export
+            return {"worker_dir": jobs_root}
+
+        with mock.patch.object(
+            module, "_model_profile", return_value={"source": "official"}
+        ), mock.patch.object(
+            module, "_runtime_work_dir", return_value=self.tmp
+        ), mock.patch.object(module, "_cleanup_async_jobs"), mock.patch.object(
+            module, "_mimics_log"
+        ), mock.patch.object(
+            module, "_runtime_paths",
+            return_value=("python", "bridge", "models", {}, ["fold_1"]),
+        ), mock.patch.object(
+            module, "_get_or_start_image_worker", side_effect=_fake_get_or_start
+        ):
+            module._prewarm_async_image_worker(
+                {
+                    "async_reuse_image_worker": True,
+                    "fallback_to_mimics_buffer_when_source_unavailable": False,
+                },
+                object(),
+            )
+        self.assertFalse(captured["allow_buffer_export"])
+
+    def test_prewarm_task_model_strict_source_keeps_source_path(self):
+        # A task model configured for strict source input must not be
+        # switched to buffer export by the official-model fallback logic.
+        import nninteractive_mimics as module
+
+        captured = {}
+
+        def _fake_get_or_start(config, image, jobs_root, allow_buffer_export=True):
+            captured["allow_buffer_export"] = allow_buffer_export
+            return {"worker_dir": jobs_root}
+
+        with mock.patch.object(
+            module, "_model_profile", return_value={"source": "task_model"}
+        ), mock.patch.object(
+            module, "_runtime_work_dir", return_value=self.tmp
+        ), mock.patch.object(module, "_cleanup_async_jobs"), mock.patch.object(
+            module, "_mimics_log"
+        ), mock.patch.object(
+            module, "_runtime_paths",
+            return_value=("python", "bridge", "models", {}, ["fold_1"]),
+        ), mock.patch.object(
+            module, "_get_or_start_image_worker", side_effect=_fake_get_or_start
+        ):
+            module._prewarm_async_image_worker(
+                {
+                    "async_reuse_image_worker": True,
+                    "task_model_image_input_mode": "source",
+                    "fallback_to_mimics_buffer_when_source_unavailable": True,
+                },
+                object(),
+            )
+        self.assertFalse(captured["allow_buffer_export"])
+
 
 # ============================================================================
 # L13: New features from user's round of changes
