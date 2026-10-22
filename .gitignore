@@ -37,6 +37,7 @@ wheels/
 /output/
 /nninteractive_task_models/
 /flexict_models/
+/slip_models/
 /integrations/nninteractive-finetune/validation/data/
 /integrations/nninteractive-finetune/validation/work/
 /integrations/nninteractive-finetune/validation/outputs/
