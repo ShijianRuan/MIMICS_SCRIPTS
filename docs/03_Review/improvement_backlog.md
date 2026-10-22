@@ -2186,6 +2186,38 @@
 
 ## 进行中
 
+### R87（2026-10-22 用户需求：SLIP 交互分割算法集成）
+
+- [x] **R87-1【P1】新增 SLIP（Segmentation with Low-latency Interactive
+  Prompting，arXiv 2607.22332）作为与 nnInteractive 并列的交互分割算法**
+  〔当轮解决，commits `28e7bdf` + `ab538bb` + 本轮 Mimics 侧 commit〕：
+  用户需求——在 Mimics 内提供 SLIP 单点击交互分割，约束为不改动已有
+  环境（python_env 不动）与其他功能。
+  - 痛点：nnInteractive 每次点击延迟秒级；SLIP 预切 patch 后交互延迟
+    亚秒级，对高频点击标注有实质收益。
+  - 方案（四层，全部为新增文件，零改动已有代码路径）：
+    ① vendored 源码 `integrations/slip/`（上游原样入仓）；
+    ② 桥接层 `slip_bridge.py`（协议 `slip_async_job.v1`：单发
+    stdin/stdout + --async-worker 文件队列双模式，GPU 锁与 nnInteractive
+    互斥）；③ Mimics 侧 `runtime_py35/slip_mimics.py`（会话状态机
+    waiting/applied/ready/restart/ended，影像校验 int8/MR 拒绝，写模式
+    询问 in_place/derived_copy，自动空草稿零交互时删除，与
+    nnInteractive 会话互斥）；④ UI 入口
+    `scripting_library/02_AI/SLIP/01_Annotate.py`。
+  - 验收标准：① 假件失败路径套件 50 项全绿并进 fast 矩阵；② smoke
+    8/8；③ fast 矩阵全绿；④ GPU 实机桥接验收 16 项契约全过（单发 +
+    异步、predict/undo/reset、错误路径不杀 worker、close 释放
+    gpu.lock、dice 0.10–0.45 区间）。
+  - 证据：test_slip_mimics 50/50（3s）；smoke 8/8
+    （`.mimics_runtime/regression/20261022T222605_smoke.json`）；
+    GPU 桥接 16/16（`tests/manual/run_slip_bridge_gpu_acceptance.py`，
+    Totalsegmentator s0000 femur_left，dice≈0.214，数据集只读）；
+    fast 矩阵 31/31（`.mimics_runtime/regression/20261022T223457_fast.json`，
+    含 slip_mimics 2.9s）。
+  - 红线核查：Z 盘数据集全程只读（输出在 `.mimics_runtime/`）；
+    未用远程服务器；python_env 未改动（SLIP 依赖与 torch 2.6.0+cu124
+    兼容，无新增包）。
+
 ### R86（2026-10-21 用户复核轮：GPU 修复入口全面验证 + 证据更正 + R 盘清理）
 
 - [x] **R86-1【P1】restore 在 .bak 备份丢失时会删掉还能用的 torch，环境彻底损坏**

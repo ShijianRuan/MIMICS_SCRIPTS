@@ -8,10 +8,10 @@
 | 层 | 内容 | 规模 | 触发时机 | 执行者 |
 |----|------|------|----------|--------|
 | L1 单元/契约 | `tests/test_all.py`（410+ 项，含全部 Py3.5 语法、entrypoint、错误引导、配置） | ~16 min | 提交前全量；改动小可先跑目标类 | 开发 |
-| L2 集成套件 | 16 个 `tests/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
+| L2 集成套件 | 17 个 `tests/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/SLIP/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
 | L3 冒烟流（fake mimics） | `tests/fake_mimics_flow_test.py`（imports/append/entrypoint/window/export/nninteractive/taskmodels/stop 8 组，27 个 runtime 模块导入 + 6 类记录聚合） | ~1 min | 改 runtime_py35/ 或桥接层后立刻跑 | 开发 |
 | L4 离线压测 | `tests/offline_stress_test.py`（资源锁竞争、取消、坐标映射、增量重放） | ~1 min | 改锁/并发/映射代码后 | 开发 |
-| L5 GPU 人工验收 | 训练冒烟、pair→AL→overlay 端到端、AI Model Manager GUI、远程 FlexiCT 实机 | 按清单 | 发版前 | 标注者/开发 |
+| L5 GPU 人工验收 | 训练冒烟、pair→AL→overlay 端到端、AI Model Manager GUI、远程 FlexiCT 实机、SLIP/nnInteractive 实机 | 按清单 | 发版前 | 标注者/开发 |
 
 ## 一键矩阵
 
@@ -54,6 +54,11 @@ python_env/python.exe tools/run_regression_matrix.py --list
 - `test_nninteractive_task_integration.py` / `test_mimics_nnint_deep.py` /
   `test_mimics_nnint_functional.py` — nnInteractive 三套：任务路由/边界/功能
 - `test_remote_training.py` — SSH/Docker 远程训练契约（不连真实服务器）
+- `test_slip_mimics.py` — SLIP Mimics 侧会话失败路径（50 项）：影像校验
+  （int8/MR 拒绝）、mask 缓冲区/gpu.lock 拒绝、异步结果状态机（waiting/
+  applied/restart/ended 全分支，含 worker 死亡、半写结果、身份不匹配、
+  手动改 mask）、命令入队、会话关闭清理（空草稿删除）、监控超时、
+  会话目标选择（自动草稿/多选拒绝/写模式对话/与 nnInteractive 互斥）
 - `test_interactive_algorithms.py`、`test_model_portability.py`、
   `test_collect_diagnostics.py`、`test_geometry_manifest_regressions.py`、
   `test_migrate_root.py`、`test_ui_preferences.py`、
@@ -80,6 +85,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 | AI Model Manager | 导入三类模型包各一，切换默认，回滚 | 默认模型切换生效，失效模型可清理 |
 | 远程 FlexiCT | 选远程 profile 训练 1 例 + 推理 | 产物带远程 provenance 下载注册 |
 | nnInteractive 实机 | 官方模型 + 自定义模型各跑 1 例交互 | 预测 mask 应用无仿射告警 |
+| SLIP 实机 | `python_env/python.exe tests/manual/run_slip_bridge_gpu_acceptance.py`（Totalsegmentator s0000，需 slip_models 权重） | 16 项契约全过（单发+异步、predict/undo/reset、错误路径、close、gpu.lock 互斥与释放），dice 在 0.10–0.45 区间 |
 
 ## 资源清单（运行测试需要什么）
 
