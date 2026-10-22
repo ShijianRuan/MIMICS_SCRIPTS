@@ -1,5 +1,11 @@
 **MIMICS_SCRIPTS 跨职能评审与开发测试交接**
 
+## 🆕 2026-10-22 · eee725b 新改动与 SLIP 专项复审
+
+[报告](2026-10-22-eee725b-revalidation.md) · [结构化记录](2026-10-22-eee725b-revalidation.json) · [证据](2026-10-22-eee725b-evidence/README.md) · [可编辑会话图](2026-10-22-eee725b-evidence/slip-session-contract.mmd)
+
+审查 `e33dc74..eee725b` 的 23 个新增提交；新增 8 项（SLIP 6 项、其他 2 项，P1 五项/P2 三项），保留旧 5 项而不重复累计。269 次选定回归执行：265 通过、1 POSIX 夹具失败、3 Windows 跳过；真实模型/Windows/Mimics/GPU 未验收。详见报告中的合成复现与源码风险划分。
+
 ## 🆕 2026-10-18 · e325e3a 第三轮修复复审
 
 [报告](2026-10-18-e325e3a-revalidation.md) · [结构化记录](2026-10-18-e325e3a-revalidation.json) · [证据](2026-10-18-e325e3a-evidence/README.md)。新增10提交、19文件；上轮8卡中4项关键离线反例已解决、4项部分解决；5张开放卡（4项延续、1项恢复关窗回归）。698次方法执行693通过、2断言失败、3 Windows 跳过；只提交审查文档与合成证据。

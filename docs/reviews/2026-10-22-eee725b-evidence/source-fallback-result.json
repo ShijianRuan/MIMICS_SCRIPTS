@@ -1,0 +1,12 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "suite": "source-fallback",
+  "selections": [
+    "test_all.TestSourceImagePathEquivalence"
+  ],
+  "executed": 31,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 31
+}

@@ -1,0 +1,149 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "checked_at_utc": "2026-10-22T15:38:43.453878+00:00",
+  "all_checks_passed": true,
+  "checks": [
+    {
+      "name": "source_identity",
+      "passed": true,
+      "detail": "Report, scope and manifest fixed to one source/baseline"
+    },
+    {
+      "name": "range",
+      "passed": true,
+      "detail": "23 actual commits and 42 actual changed paths; no author/email inference"
+    },
+    {
+      "name": "source_hashes",
+      "passed": true,
+      "detail": {
+        "checked": 50,
+        "mismatches": []
+      }
+    },
+    {
+      "name": "artifact_hashes",
+      "passed": true,
+      "detail": {
+        "checked": 34,
+        "mismatches": []
+      }
+    },
+    {
+      "name": "finding_counts",
+      "passed": true,
+      "detail": {
+        "new_in_increment": 8,
+        "slip": 6,
+        "other": 2,
+        "P1": 5,
+        "P2": 3,
+        "reproduced_synthetic": 7,
+        "source_risk": 1,
+        "previous_retained": 5
+      }
+    },
+    {
+      "name": "finding_references",
+      "passed": true,
+      "detail": {
+        "bad": [],
+        "meaning": "Every observation key and source function/line exists"
+      }
+    },
+    {
+      "name": "synthetic_contract_observations",
+      "passed": true,
+      "detail": "SL01/02/03 real consumer + FakeMimics; SL04 real bridge + deterministic predictor"
+    },
+    {
+      "name": "synthetic_distribution_and_restore",
+      "passed": true,
+      "detail": "Tiny real zip builds and real restore logic in temporary directory only"
+    },
+    {
+      "name": "coordinate_scope",
+      "passed": true,
+      "detail": "Two AST-extracted original methods; no physical/Mimics/model acceptance"
+    },
+    {
+      "name": "cpu_risk_source",
+      "passed": true,
+      "detail": "Device selection is observed; full CPU failure/inference not executed"
+    },
+    {
+      "name": "qt_observations",
+      "passed": true,
+      "detail": "Actual offscreen Qt and synthetic state; no actual environment repair"
+    },
+    {
+      "name": "regression_counts",
+      "passed": true,
+      "detail": {
+        "executed": 269,
+        "passed": 265,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 3
+      }
+    },
+    {
+      "name": "regression_logs",
+      "passed": true,
+      "detail": "Primary failure and skip records retained, not reclassified as passes"
+    },
+    {
+      "name": "diagnostic_source",
+      "passed": true,
+      "detail": "Detector AST unchanged; full baseline suite was not rerun"
+    },
+    {
+      "name": "old_findings_not_recounted",
+      "passed": true,
+      "detail": {
+        "previous_ids": [
+          "S01",
+          "S02",
+          "S06",
+          "T04",
+          "V01"
+        ],
+        "unchanged_files": [
+          "mimics_bridge.py",
+          "runtime_py35/create_mcs_batch.py",
+          "tools/flexict_active_learning_ui.py",
+          "tools/flexict_status_viewer.py",
+          "tools/nnunet_common.py",
+          "tools/nnunet_jobs.py",
+          "tools/nnunet_pipeline.py",
+          "tools/nnunet_status_viewer.py"
+        ]
+      }
+    },
+    {
+      "name": "upstream_source_identity",
+      "passed": true,
+      "detail": "Recorded primary-source comparison verified against local bytes; no network rerun"
+    },
+    {
+      "name": "document_links",
+      "passed": true,
+      "detail": {
+        "missing": []
+      }
+    },
+    {
+      "name": "claims_and_limits",
+      "passed": true,
+      "detail": "Report explicitly separates probes, source risk, design and unverified deployment"
+    },
+    {
+      "name": "publication_scope",
+      "passed": true,
+      "detail": [
+        "docs/reviews/README.md"
+      ]
+    }
+  ],
+  "limitations": "Static evidence audit, not an independent model/Windows/Mimics rerun; external source bodies not re-fetched in this pass"
+}

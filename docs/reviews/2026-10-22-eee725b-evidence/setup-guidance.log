@@ -1,0 +1,58 @@
+test_cuda_available_state_has_no_gpu_issue (test_all.TestEnvGuidance.test_cuda_available_state_has_no_gpu_issue) ... ok
+test_cuda_unavailable_state_points_at_double_click_repair (test_all.TestEnvGuidance.test_cuda_unavailable_state_points_at_double_click_repair) ... ok
+test_cuda_unavailable_without_launcher_reports_missing_kit (test_all.TestEnvGuidance.test_cuda_unavailable_without_launcher_reports_missing_kit) ... ok
+test_failed_setup_state_is_reported (test_all.TestEnvGuidance.test_failed_setup_state_is_reported) ... ok
+test_flexict_config_override_silences_weights_issue (test_all.TestEnvGuidance.test_flexict_config_override_silences_weights_issue) ... ok
+test_flexict_missing_weights_is_informational (test_all.TestEnvGuidance.test_flexict_missing_weights_is_informational) ... ok
+test_incomplete_setup_lists_failed_packages (test_all.TestEnvGuidance.test_incomplete_setup_lists_failed_packages) ... ok
+test_installed_official_model_silences_issue (test_all.TestEnvGuidance.test_installed_official_model_silences_issue) ... ok
+test_live_and_relative_paths_are_not_migration_issues (test_all.TestEnvGuidance.test_live_and_relative_paths_are_not_migration_issues) ... ok
+test_missing_official_model_is_reported_bad (test_all.TestEnvGuidance.test_missing_official_model_is_reported_bad) ... ok
+test_missing_python_reports_setup_action (test_all.TestEnvGuidance.test_missing_python_reports_setup_action) ... ok
+test_moved_checkout_detected_with_old_root (test_all.TestEnvGuidance.test_moved_checkout_detected_with_old_root) ... FAIL
+test_official_model_config_key_override (test_all.TestEnvGuidance.test_official_model_config_key_override) ... ok
+test_official_model_env_var_override (test_all.TestEnvGuidance.test_official_model_env_var_override) ... ok
+test_scribbleprompt_default_checkpoint_is_checked_without_config (test_all.TestEnvGuidance.test_scribbleprompt_default_checkpoint_is_checked_without_config)
+B regression (R66 audit P1): the shipped JSON no longer carries ... ok
+test_scribbleprompt_missing_checkpoint_is_reported (test_all.TestEnvGuidance.test_scribbleprompt_missing_checkpoint_is_reported) ... ok
+test_scribbleprompt_present_checkpoint_silences_issue (test_all.TestEnvGuidance.test_scribbleprompt_present_checkpoint_silences_issue) ... ok
+test_scribbleprompt_relative_path_is_anchored_at_root (test_all.TestEnvGuidance.test_scribbleprompt_relative_path_is_anchored_at_root) ... ok
+test_scribbleprompt_unconfigured_is_not_an_issue (test_all.TestEnvGuidance.test_scribbleprompt_unconfigured_is_not_an_issue) ... ok
+test_stale_cuda_unavailable_state_does_not_nag (test_all.TestEnvGuidance.test_stale_cuda_unavailable_state_does_not_nag) ... ok
+test_stale_setup_state_ignored (test_all.TestEnvGuidance.test_stale_setup_state_ignored) ... ok
+test_launchers_are_ascii_and_target_the_repair_script (test_all.TestGpuRepairLauncher.test_launchers_are_ascii_and_target_the_repair_script) ... ok
+test_restore_on_default_is_idempotent (test_all.TestGpuRepairLauncher.test_restore_on_default_is_idempotent)
+R85-2: 在已是默认 cu124 的环境上运行 restore 必须是无操作—— ... ok
+test_restore_removes_variant_and_restores_default (test_all.TestGpuRepairLauncher.test_restore_removes_variant_and_restores_default)
+R85-2: cu118/cu128 活动状态 + cu124 备份时，restore 清掉变体、 ... ok
+test_restore_without_backup_keeps_working_variant (test_all.TestGpuRepairLauncher.test_restore_without_backup_keeps_working_variant)
+变体活动但 .bak 备份丢失（部署目录被外部回退/覆盖）时，restore ... ok
+test_switch_script_matches_repo_layout (test_all.TestGpuRepairLauncher.test_switch_script_matches_repo_layout) ... ok
+
+======================================================================
+FAIL: test_moved_checkout_detected_with_old_root (test_all.TestEnvGuidance.test_moved_checkout_detected_with_old_root)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 15408, in test_moved_checkout_detected_with_old_root
+    self.assertEqual(old_root, detected)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+AssertionError: '<synthetic-dir>/oldmachine/MIMICS_SCRIPTS' != ''
+- <synthetic-dir>/oldmachine/MIMICS_SCRIPTS
+
+
+----------------------------------------------------------------------
+Ran 26 tests in 0.352s
+
+FAILED (failures=1)
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu124', 'torchvision': 'cu124'}
+当前已是默认版本（cu124），无需恢复。
+当前 GPU 状态: {"avail": true, "torch": "test"}
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+已移除 cu118/cu128（4 项）并恢复默认: ['<synthetic-dir>/torchvision', '<synthetic-dir>/torch', '<synthetic-dir>/torch-2.6.0+cu124.dist-info', '<synthetic-dir>/torchvision-0.21.0+cu124.dist-info']
+恢复后检查: {"avail": true, "torch": "test"}
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份 .bak 丢失，无法恢复默认。为避免删坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。

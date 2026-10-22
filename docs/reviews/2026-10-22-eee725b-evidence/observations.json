@@ -1,0 +1,100 @@
+{
+  "reset_after_manual_edit": {
+    "outcome": "applied",
+    "manual_preserved": false,
+    "before_voxels": 12,
+    "after_voxels": 12,
+    "questions": 0
+  },
+  "resume_own_gpu_lock": {
+    "code": 1,
+    "resume_called": false,
+    "own_session_metadata": true,
+    "question_count": 0,
+    "messages": [
+      {
+        "title": "SLIP 交互标注",
+        "message": "GPU 当前正被 SLIP worker (pid 25470) (PID 25470) 占用。\n\nSLIP 未启动，因此未更改任何提示或 Mask 状态。请等待该任务完成或结束其会话，然后再运行 SLIP。",
+        "ui_blocking": false
+      }
+    ]
+  },
+  "undo_first_prompt_existing_base": {
+    "outcome": "applied",
+    "base_voxels": 12,
+    "actual_voxels": 0,
+    "restored_base": false,
+    "questions": 0
+  },
+  "predict_retry_after_output_failure": {
+    "history_after_failed_write": 1,
+    "history_after_retry": 2,
+    "result_history": 2,
+    "published_bytes": 24,
+    "same_click_submitted_twice": true
+  },
+  "portable_slip_membership": {
+    "bridge_listed": false,
+    "model_assets_listed": false,
+    "runtime_covered": true,
+    "entry_covered": true,
+    "vendor_covered": true
+  },
+  "actual_synthetic_archives": [
+    {
+      "with_env": false,
+      "exit": 0,
+      "members": [
+        "scripting_library/02_AI/SLIP/01_Annotate.py",
+        "runtime_py35/slip_mimics.py",
+        "integrations/slip/README.md"
+      ],
+      "has_bridge": false,
+      "has_checkpoint": false
+    },
+    {
+      "with_env": true,
+      "exit": 0,
+      "members": [
+        "scripting_library/02_AI/SLIP/01_Annotate.py",
+        "runtime_py35/slip_mimics.py",
+        "integrations/slip/README.md"
+      ],
+      "has_bridge": false,
+      "has_checkpoint": false
+    }
+  ],
+  "restore_partial_backup": {
+    "has_any_backup": true,
+    "exit": 0,
+    "torch_survived": false,
+    "process_holder_check_called": false,
+    "remaining": [
+      "torch-2.6.0+cu124.dist-info"
+    ]
+  },
+  "vendored_axis_roundtrip": {
+    "mapped_click": [
+      [
+        1.0,
+        3.0,
+        2.0
+      ]
+    ],
+    "shape": [
+      1,
+      1,
+      4,
+      2,
+      3
+    ],
+    "original_point_true": true,
+    "voxel_count": 1
+  },
+  "cpu_path_source_risk": {
+    "auto_resolved_device": "cpu",
+    "vendored_forced_cuda_line": 298,
+    "cupy_import_required": true,
+    "real_model_run": false
+  }
+}

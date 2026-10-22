@@ -1,0 +1,36 @@
+test_single_case_worker_canonicalizes_project_root_to_cli_root (test_all.TestMimicsBridgeNiftiNormalization.test_single_case_worker_canonicalizes_project_root_to_cli_root) ... ok
+test_lung_preset_negative_hu_not_wrapped_to_huge_gv (test_all.TestWindowLevel.test_lung_preset_negative_hu_not_wrapped_to_huge_gv)
+Regression (2026-10-20): Mimics HU2GV returns GV values below 0 ... ok
+test_prewarm_official_model_uses_buffer_export_when_fallback_enabled (test_all.TestSourceImagePathEquivalence.test_prewarm_official_model_uses_buffer_export_when_fallback_enabled) ... ok
+test_prewarm_official_model_keeps_source_path_when_fallback_disabled (test_all.TestSourceImagePathEquivalence.test_prewarm_official_model_keeps_source_path_when_fallback_disabled) ... ok
+test_prewarm_task_model_strict_source_keeps_source_path (test_all.TestSourceImagePathEquivalence.test_prewarm_task_model_strict_source_keeps_source_path) ... ok
+test_root_form_matches_background_launcher_root (test_all.TestImportDropWindow.test_root_form_matches_background_launcher_root) ... ok
+test_cuda_unavailable_state_points_at_double_click_repair (test_all.TestEnvGuidance.test_cuda_unavailable_state_points_at_double_click_repair) ... ok
+test_cuda_unavailable_without_launcher_reports_missing_kit (test_all.TestEnvGuidance.test_cuda_unavailable_without_launcher_reports_missing_kit) ... ok
+test_cuda_available_state_has_no_gpu_issue (test_all.TestEnvGuidance.test_cuda_available_state_has_no_gpu_issue) ... ok
+test_stale_cuda_unavailable_state_does_not_nag (test_all.TestEnvGuidance.test_stale_cuda_unavailable_state_does_not_nag) ... ok
+test_launchers_are_ascii_and_target_the_repair_script (test_all.TestGpuRepairLauncher.test_launchers_are_ascii_and_target_the_repair_script) ... ok
+test_switch_script_matches_repo_layout (test_all.TestGpuRepairLauncher.test_switch_script_matches_repo_layout) ... ok
+test_restore_on_default_is_idempotent (test_all.TestGpuRepairLauncher.test_restore_on_default_is_idempotent)
+R85-2: 在已是默认 cu124 的环境上运行 restore 必须是无操作—— ... ok
+test_restore_without_backup_keeps_working_variant (test_all.TestGpuRepairLauncher.test_restore_without_backup_keeps_working_variant)
+变体活动但 .bak 备份丢失（部署目录被外部回退/覆盖）时，restore ... ok
+test_restore_removes_variant_and_restores_default (test_all.TestGpuRepairLauncher.test_restore_removes_variant_and_restores_default)
+R85-2: cu118/cu128 活动状态 + cu124 备份时，restore 清掉变体、 ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.352s
+
+OK
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu124', 'torchvision': 'cu124'}
+当前已是默认版本（cu124），无需恢复。
+当前 GPU 状态: {"avail": true, "torch": "test"}
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份 .bak 丢失，无法恢复默认。为避免删坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-dir>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+已移除 cu118/cu128（4 项）并恢复默认: ['<synthetic-dir>/torchvision', '<synthetic-dir>/torch', '<synthetic-dir>/torch-2.6.0+cu124.dist-info', '<synthetic-dir>/torchvision-0.21.0+cu124.dist-info']
+恢复后检查: {"avail": true, "torch": "test"}

@@ -1,0 +1,51 @@
+test_analyze_defers_classification_to_scan_worker (test_all.TestImportDropWindow.test_analyze_defers_classification_to_scan_worker)
+R76 P1: analyze() must not run classify_payload on the GUI ... ok
+test_batch_drop_status_stays_importing_while_queue_running (test_all.TestImportDropWindow.test_batch_drop_status_stays_importing_while_queue_running) ... ok
+test_batch_drop_status_unfreezes_from_queue_done_marker (test_all.TestImportDropWindow.test_batch_drop_status_unfreezes_from_queue_done_marker) ... ok
+test_batch_drop_status_unfreezes_on_failure_with_reason (test_all.TestImportDropWindow.test_batch_drop_status_unfreezes_on_failure_with_reason) ... ok
+test_browse_source_buttons_use_async_helpers (test_all.TestImportDropWindow.test_browse_source_buttons_use_async_helpers) ... ok
+test_browse_source_files_feeds_multi_single_pipeline (test_all.TestImportDropWindow.test_browse_source_files_feeds_multi_single_pipeline) ... ok
+test_cases_missing_selected_masks_names_the_offending_cases (test_all.TestImportDropWindow.test_cases_missing_selected_masks_names_the_offending_cases) ... ok
+test_classify_case_folder (test_all.TestImportDropWindow.test_classify_case_folder) ... ok
+test_classify_dataset_root (test_all.TestImportDropWindow.test_classify_dataset_root) ... ok
+test_classify_multi_select_deduplicates_paths (test_all.TestImportDropWindow.test_classify_multi_select_deduplicates_paths) ... ok
+test_classify_multi_select_stays_the_exact_case_list (test_all.TestImportDropWindow.test_classify_multi_select_stays_the_exact_case_list) ... ok
+test_classify_paths_from_different_roots_are_single_imports (test_all.TestImportDropWindow.test_classify_paths_from_different_roots_are_single_imports) ... ok
+test_classify_single_file (test_all.TestImportDropWindow.test_classify_single_file) ... ok
+test_collect_recent_drops_handles_missing_dir (test_all.TestImportDropWindow.test_collect_recent_drops_handles_missing_dir) ... ok
+test_collect_recent_drops_strips_run_id_timestamp (test_all.TestImportDropWindow.test_collect_recent_drops_strips_run_id_timestamp) ... ok
+test_collect_recent_drops_summarizes_status_files (test_all.TestImportDropWindow.test_collect_recent_drops_summarizes_status_files) ... ok
+test_drop_window_exposes_mask_escape_hatch_texts (test_all.TestImportDropWindow.test_drop_window_exposes_mask_escape_hatch_texts) ... ok
+test_empty_output_path_blocks_submit (test_all.TestImportDropWindow.test_empty_output_path_blocks_submit) ... ok
+test_excluded_dirs_are_not_treated_as_cases (test_all.TestImportDropWindow.test_excluded_dirs_are_not_treated_as_cases) ... ok
+test_expand_mask_paths_files_folders_and_invalid (test_all.TestImportDropWindow.test_expand_mask_paths_files_folders_and_invalid) ... ok
+test_format_recent_drop_line_is_annotator_readable (test_all.TestImportDropWindow.test_format_recent_drop_line_is_annotator_readable) ... ok
+test_invalid_pasted_paths_are_reported_not_silent (test_all.TestImportDropWindow.test_invalid_pasted_paths_are_reported_not_silent) ... ok
+test_mask_pick_narrows_selection_for_worker (test_all.TestImportDropWindow.test_mask_pick_narrows_selection_for_worker) ... ok
+test_offscreen_window_renders_and_registers (test_all.TestImportDropWindow.test_offscreen_window_renders_and_registers) ... qt.qpa.fonts: Populating font family aliases took 267 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+This plugin does not support raise()
+ok
+test_partial_mask_report_covers_maskless_and_partial_cases (test_all.TestImportDropWindow.test_partial_mask_report_covers_maskless_and_partial_cases) ... ok
+test_partial_mask_report_matches_worker_filter_rule (test_all.TestImportDropWindow.test_partial_mask_report_matches_worker_filter_rule) ... ok
+test_popen_failure_marks_status_failed_not_running (test_all.TestImportDropWindow.test_popen_failure_marks_status_failed_not_running)
+F35: the status file is pre-written as running before the worker ... ok
+test_root_form_matches_background_launcher_root (test_all.TestImportDropWindow.test_root_form_matches_background_launcher_root) ... ok
+test_same_second_submissions_get_distinct_control_files (test_all.TestImportDropWindow.test_same_second_submissions_get_distinct_control_files)
+F35: two submissions in the same second used to share one ... ok
+test_single_case_status_is_not_touched_by_batch_derivation (test_all.TestImportDropWindow.test_single_case_status_is_not_touched_by_batch_derivation) ... ok
+test_single_case_worker_errors_are_chinese (test_all.TestImportDropWindow.test_single_case_worker_errors_are_chinese) ... ok
+test_submit_batch_invokes_prepare_import (test_all.TestImportDropWindow.test_submit_batch_invokes_prepare_import) ... ok
+test_submit_multi_single_ignores_explicit_mask_paths (test_all.TestImportDropWindow.test_submit_multi_single_ignores_explicit_mask_paths) ... ok
+test_submit_multi_single_imports_each_dropped_case_only (test_all.TestImportDropWindow.test_submit_multi_single_imports_each_dropped_case_only) ... ok
+test_submit_single_explicit_mask_paths_override_discovery (test_all.TestImportDropWindow.test_submit_single_explicit_mask_paths_override_discovery) ... ok
+test_submit_single_invalid_mask_path_fails_closed (test_all.TestImportDropWindow.test_submit_single_invalid_mask_path_fails_closed) ... ok
+test_submit_single_invokes_single_case_worker (test_all.TestImportDropWindow.test_submit_single_invokes_single_case_worker) ... ok
+test_summarize_dataset_keeps_maskless_cases_in_the_map (test_all.TestImportDropWindow.test_summarize_dataset_keeps_maskless_cases_in_the_map) ... ok
+test_summarize_dataset_reports_per_case_mask_names (test_all.TestImportDropWindow.test_summarize_dataset_reports_per_case_mask_names) ... ok
+test_viewer_log_tail_is_read_on_worker_thread (test_all.TestImportDropWindow.test_viewer_log_tail_is_read_on_worker_thread)
+R76: the 512 KiB log tail must be read on the collect worker ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 1.268s
+
+OK
