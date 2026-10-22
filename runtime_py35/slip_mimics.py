@@ -66,8 +66,38 @@ _project_root = nnm._project_root
 
 
 # ---------------------------------------------------------------------------
-# 影像导出（GV 缓冲区 -> HU）
+# 影像导出（GV 缓冲区 -> SLIP 强度空间）
 # ---------------------------------------------------------------------------
+
+def _buffer_intensity_transform(image):
+    """决定 GV 缓冲区 -> SLIP 强度空间的线性变换。
+
+    SLIP 论文 Table 4：所有模态（CT/MRI/PET/US/Microscopy）共用同一强度
+    管线（Clamp [-1000,1000] + z-score），模型本身不限模态。因此按模态
+    导出与 nnInteractive 相同依据的强度：CT 恢复 HU（GV = slope*HU +
+    intercept 的逆变换）；MR 尽量恢复 DICOM 存储值（复用
+    nnm._source_intensity_mapping）；其余模态 GV 直通——z-score 对 clamp
+    边界内的线性缩放不变，直通不改变推理结果。
+
+    返回 (slope, intercept, basis, modality)；CT 无法恢复 HU 时 slope 为
+    None（调用方负责拒绝）。
+    """
+    modality = nnm._image_modality(image)
+    kind = nnm._metadata_get(image, nnm.SOURCE_IMAGE_KIND_METADATA, "")
+    if nnm._source_uses_hu_to_gv(kind, modality):
+        transform = nnm._hu_to_mimics_gv_transform()
+        if transform is None:
+            return (None, None, "mimics_hu_gv", modality)
+        slope, intercept = transform
+        return (1.0 / float(slope), -float(intercept) / float(slope),
+                "mimics_hu_gv", modality)
+    if modality == "MR":
+        mapping = nnm._source_intensity_mapping(image, modality=modality)
+        if mapping is not None:
+            return (float(mapping["slope"]), float(mapping["intercept"]),
+                    mapping["basis"], modality)
+    return (1.0, 0.0, "gv_passthrough", modality)
+
 
 def _validate_image(image):
     """Fail fast on inputs SLIP cannot process, before any state is created."""
@@ -77,44 +107,44 @@ def _validate_image(image):
         raise RuntimeError(
             "当前影像缓冲区的数据类型（{0}）不被 SLIP 支持（支持：{1}）。".format(
                 dtype, ", ".join(SUPPORTED_DTYPES)))
-    modality = nnm._image_modality(image)
-    if modality and modality != "CT":
+    slope, _intercept, _basis, _modality = _buffer_intensity_transform(image)
+    if slope is None:
         raise RuntimeError(
-            "SLIP 当前发布的模型仅支持 CT 影像；当前影像模态为 {0}。"
-            "其他模态请使用 nnInteractive。".format(modality))
-    if nnm._hu_to_mimics_gv_transform() is None:
-        raise RuntimeError(
-            "无法从 Mimics 获取 HU 灰度映射（HU2GV）。SLIP 需要 HU 值进行"
-            "推理；请检查影像是否为 CT。")
+            "无法从 Mimics 获取 HU 灰度映射（HU2GV）。SLIP 处理 CT 影像需要"
+            " HU 值进行推理；请检查影像是否为 CT。")
 
 
 def _export_image(image, path):
-    """Write the GV voxel buffer and return the buffer/HU export dict.
+    """Write the GV voxel buffer and return the buffer/intensity export dict.
 
-    SLIP 在 HU 空间推理。Mimics 缓冲区存 GV：GV = slope*HU + intercept，
-    因此 HU = GV/slope - intercept/slope（与 nnm._export_image 相同的
-    逆变换，日志以 SLIP 名义输出）。
+    to_hu_slope/to_hu_intercept 是 slip_async_job.v1 协议的历史键名，
+    语义为"缓冲区 -> 模型原生强度"（CT 即 HU 逆变换，其余模态见
+    _buffer_intensity_transform；桥接层对直通值 1.0/0.0 零成本直通）。
     """
     started = time.time()
     view = image.get_voxel_buffer()
     with open(path, "wb") as handle:
         nnm._stream_buffer(
             nnm._buffer_byte_view(view), compute_sha=False, handle=handle)
-    slope, intercept = nnm._hu_to_mimics_gv_transform()
+    to_model_slope, to_model_intercept, basis, modality = (
+        _buffer_intensity_transform(image))
     result = {
         "path": path,
         "shape": [int(value) for value in view.shape],
         "dtype": nnm._buffer_dtype(view),
-        "to_hu_slope": 1.0 / float(slope),
-        "to_hu_intercept": -float(intercept) / float(slope),
+        "to_hu_slope": to_model_slope,
+        "to_hu_intercept": to_model_intercept,
     }
     _log(
         logging.INFO,
-        "SLIP image buffer exported in {0:.1f}s ({1} {2}, GV->HU slope "
-        "{3:.6g}, intercept {4:.6g}).".format(
+        "SLIP image buffer exported in {0:.1f}s ({1} {2}, modality {3}, "
+        "intensity basis {4}, buffer->model slope {5:.6g}, intercept "
+        "{6:.6g}).".format(
             time.time() - started,
             "x".join(str(v) for v in result["shape"]),
             result["dtype"],
+            modality or "unknown",
+            basis,
             result["to_hu_slope"],
             result["to_hu_intercept"],
         ),
@@ -538,6 +568,10 @@ def _continue_prompt(image, target, state):
                     "当前没有可撤销的提示。", title=TITLE, ui_blocking=False)
                 continue
             sequence = _enqueue_command(state, {"action": "undo"})
+            mimics.dialogs.message_box(
+                "正在撤销上一次提示。撤销需在后台重新组合 Mask（约需数秒），"
+                "完成后结果会自动应用；期间 Mimics 可正常操作。",
+                title=TITLE, ui_blocking=False)
             _log(logging.INFO,
                  "SLIP undo enqueued (sequence {0}).".format(sequence))
             break
@@ -545,7 +579,8 @@ def _continue_prompt(image, target, state):
             answer = mimics.dialogs.question_box(
                 message=(
                     "重置将丢弃本 AI 会话中的全部 {0} 个提示，并把 Mask 恢复"
-                    "到会话开始时的状态。该操作无法撤销。是否重置？"
+                    "到会话开始时的状态。该操作无法撤销，需在后台重新组合 Mask"
+                    "（约需数秒）。是否重置？"
                 ).format(int(state.get("action_history_len") or 0)),
                 buttons=BUTTON_RESET + ";" + BUTTON_CANCEL,
                 title=TITLE,
@@ -726,13 +761,22 @@ def _handle_result(image, target, state, interactive=True):
     action = str(result.get("action") or "predict")
     if voxels <= 0 and action == "predict":
         answer = mimics.dialogs.question_box(
-            message="本次预测返回了空结果（0 个体素）。\n\n是否仍将所选 Mask 清空为该空结果？",
+            message=(
+                "本次预测返回了空结果（0 个体素）。\n\n"
+                "是否仍将所选 Mask 清空为该空结果？\n\n"
+                "提示：选择“不应用”不会移除该次点击——它仍计入撤销历史，"
+                "下次撤销将先移除它。"
+            ),
             buttons=BUTTON_APPLY_EMPTY + ";" + BUTTON_KEEP,
             title=TITLE,
             ui_blocking=True,
         )
         if answer != BUTTON_APPLY_EMPTY:
             state["pending_sequence"] = None
+            # 该点击仍留在 worker 的撤销历史中，本地计数与其保持一致，
+            # 否则菜单不会给出撤销入口。
+            state["action_history_len"] = int(
+                result.get("action_history_len") or 0)
             state["status"] = "ready"
             state["updated_at_epoch"] = time.time()
             _save_job(state)
@@ -1037,9 +1081,12 @@ def run():
     if gpu_holder:
         mimics.dialogs.message_box(
             message=(
-                "GPU 当前正被 {0} 占用。\n\nSLIP 未启动，因此未更改任何提示"
-                "或 Mask 状态。请等待该任务完成或结束其会话，然后再运行"
-                " SLIP。"
+                "GPU 当前正被 {0} 占用。\n\n"
+                "SLIP 未启动，因此未更改任何提示或 Mask 状态。请等待该任务"
+                "完成、在其任务窗口中停止它，或使用管理菜单 > 停止所有自有"
+                "服务。\n\n"
+                "若是遗留的交互会话（SLIP/nnInteractive），也可等待其无操作"
+                "超时后自动退出。"
             ).format(runtime_common.resource_lock_summary(gpu_holder)),
             title=TITLE,
             ui_blocking=False,

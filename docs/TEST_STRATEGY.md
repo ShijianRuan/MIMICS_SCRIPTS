@@ -54,10 +54,12 @@ python_env/python.exe tools/run_regression_matrix.py --list
 - `test_nninteractive_task_integration.py` / `test_mimics_nnint_deep.py` /
   `test_mimics_nnint_functional.py` — nnInteractive 三套：任务路由/边界/功能
 - `test_remote_training.py` — SSH/Docker 远程训练契约（不连真实服务器）
-- `test_slip_mimics.py` — SLIP Mimics 侧会话失败路径（50 项）：影像校验
-  （int8/MR 拒绝）、mask 缓冲区/gpu.lock 拒绝、异步结果状态机（waiting/
-  applied/restart/ended 全分支，含 worker 死亡、半写结果、身份不匹配、
-  手动改 mask）、命令入队、会话关闭清理（空草稿删除）、监控超时、
+- `test_slip_mimics.py` — SLIP Mimics 侧会话失败路径（54 项）：影像校验
+  （int8 拒绝、CT 缺 HU 映射拒绝、MR/其他模态接受及其强度导出——
+  MR 映射/直通、CT HU 逆变换）、mask 缓冲区/gpu.lock 拒绝、异步结果
+  状态机（waiting/applied/restart/ended 全分支，含 worker 死亡、半写
+  结果、身份不匹配、手动改 mask、空预测拒绝后撤销计数同步）、命令入队、
+  会话关闭清理（空草稿删除）、监控超时、
   会话目标选择（自动草稿/多选拒绝/写模式对话/与 nnInteractive 互斥）
 - `test_interactive_algorithms.py`、`test_model_portability.py`、
   `test_collect_diagnostics.py`、`test_geometry_manifest_regressions.py`、
@@ -85,7 +87,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 | AI Model Manager | 导入三类模型包各一，切换默认，回滚 | 默认模型切换生效，失效模型可清理 |
 | 远程 FlexiCT | 选远程 profile 训练 1 例 + 推理 | 产物带远程 provenance 下载注册 |
 | nnInteractive 实机 | 官方模型 + 自定义模型各跑 1 例交互 | 预测 mask 应用无仿射告警 |
-| SLIP 实机 | `python_env/python.exe tests/manual/run_slip_bridge_gpu_acceptance.py`（Totalsegmentator s0000，需 slip_models 权重） | 16 项契约全过（单发+异步、predict/undo/reset、错误路径、close、gpu.lock 互斥与释放），dice 在 0.10–0.45 区间 |
+| SLIP 实机 | `python_env/python.exe tests/manual/run_slip_bridge_gpu_acceptance.py`（Totalsegmentator s0000，需 slip_models 权重） | 16 项契约全过（单发+异步、predict/undo/reset、错误路径、close、gpu.lock 互斥与释放），dice 在 0.10–0.45 区间。模型本身不限模态（论文 Table 4），但实机验收目前仅在 CT 上执行过；MR 等其他模态的实机验收待补 |
 
 ## 资源清单（运行测试需要什么）
 

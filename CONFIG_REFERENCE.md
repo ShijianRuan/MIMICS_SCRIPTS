@@ -204,6 +204,10 @@ Internal keys (code defaults; add to the file only as an escape hatch):
 `async_job_max_terminal` (20), `source_cache_retention_days` (7),
 `source_cache_max_entries` (12).
 
+SLIP（`02_AI/SLIP/01_Annotate.py`）不读取本文件：它的写入方式（更新所选
+Mask / 派生草稿 / 新空草稿）在每次会话开始时询问，等价于固定 `ask`，
+不受 `existing_mask_result_mode` 影响。
+
 ## `nninteractive_finetune_config.json`
 
 Controls the nnInteractive task fine-tuning pipeline (Model Center, label

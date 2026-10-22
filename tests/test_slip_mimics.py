@@ -170,7 +170,7 @@ class SlipMimicsTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# (a) 影像校验：dtype / 模态 / HU 映射
+# (a) 影像校验：dtype / 模态 / 强度映射
 # ---------------------------------------------------------------------------
 
 class SlipValidationTests(SlipMimicsTests):
@@ -179,14 +179,15 @@ class SlipValidationTests(SlipMimicsTests):
         with self.assertRaisesRegex(RuntimeError, "不被 SLIP 支持"):
             self.runtime._validate_image(image)
 
-    def test_non_ct_modality_is_rejected(self):
+    def test_mr_modality_is_accepted_without_hu_mapping(self):
+        # SLIP 论文 Table 4 对所有模态共用同一强度管线：MR 不再被拒绝，
+        # 也不要求 HU2GV（MR 无法恢复 HU 时按 GV 直通导出）。
         image = self.make_image()
         image.metadata.set(
             self.nnm.SOURCE_IMAGE_MODALITY_METADATA, "MR")
-        with self.assertRaisesRegex(RuntimeError, "仅支持 CT"):
-            self.runtime._validate_image(image)
+        self.assertIsNone(self.runtime._validate_image(image))
 
-    def test_missing_hu_mapping_is_rejected(self):
+    def test_missing_hu_mapping_is_rejected_for_ct(self):
         image = self.make_image()
         original = self.nnm._hu_to_mimics_gv_transform
         self.nnm._hu_to_mimics_gv_transform = lambda: None
@@ -199,6 +200,50 @@ class SlipValidationTests(SlipMimicsTests):
     def test_valid_ct_image_passes(self):
         image = self.make_image()
         self.assertIsNone(self.runtime._validate_image(image))
+
+    def test_ct_export_uses_hu_inverse(self):
+        image = self.make_image()
+        path = os.path.join(self.tmp, "ct_export.raw")
+        result = self.runtime._export_image(image, path)
+        slope, intercept = self.nnm._hu_to_mimics_gv_transform()
+        self.assertEqual(
+            result["to_hu_slope"], 1.0 / float(slope))
+        self.assertEqual(
+            result["to_hu_intercept"], -float(intercept) / float(slope))
+
+    def test_mr_export_uses_source_intensity_mapping(self):
+        image = self.make_image()
+        image.metadata.set(
+            self.nnm.SOURCE_IMAGE_MODALITY_METADATA, "MR")
+        image.metadata.set(
+            self.nnm.SOURCE_INTENSITY_RESCALE_SLOPE_METADATA, 2.5)
+        image.metadata.set(
+            self.nnm.SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA, -1024.0)
+        path = os.path.join(self.tmp, "mr_export.raw")
+        result = self.runtime._export_image(image, path)
+        self.assertEqual(result["to_hu_slope"], 2.5)
+        self.assertEqual(result["to_hu_intercept"], -1024.0)
+
+    def test_mr_export_without_mapping_passes_gv_through(self):
+        # 旧工程可能丢失 MR 强度映射：GV 直通（z-score 对 clamp 边界内的
+        # 线性缩放不变），而不是拒绝会话。
+        image = self.make_image()
+        image.metadata.set(
+            self.nnm.SOURCE_IMAGE_MODALITY_METADATA, "MR")
+        path = os.path.join(self.tmp, "mr_passthrough.raw")
+        result = self.runtime._export_image(image, path)
+        self.assertEqual(result["to_hu_slope"], 1.0)
+        self.assertEqual(result["to_hu_intercept"], 0.0)
+
+    def test_other_modality_export_passes_gv_through(self):
+        # PT 等其余模态：不做 HU 逆变换（HU 语义对它们不成立）。
+        image = self.make_image()
+        image.metadata.set(
+            self.nnm.SOURCE_IMAGE_MODALITY_METADATA, "PT")
+        path = os.path.join(self.tmp, "pt_export.raw")
+        result = self.runtime._export_image(image, path)
+        self.assertEqual(result["to_hu_slope"], 1.0)
+        self.assertEqual(result["to_hu_intercept"], 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +612,10 @@ class SlipHandleResultTests(SlipMimicsTests):
             self.runtime._handle_result(self.image, self.target, state),
             "ready")
         self.assertEqual(self.target.number_of_pixels, pattern.tobytes().count(1))
+        # 被拒绝的点击仍留在 worker 撤销历史中：本地计数必须同步，
+        # 否则菜单不会给出撤销入口（R88-5）。
+        self.assertEqual(state["action_history_len"], 1)
+        self.assertIn("撤销历史", self.last_question()["message"])
 
     def test_empty_prediction_applied_clears_mask(self):
         state = self.make_state(self.job_dir, self.image, self.target)
