@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<repo>/docs/reviews/2026-10-22-eee725b-evidence/slip_probes.py", line 112, in <module>
+    exec(compile(ast.Module(body=[ast.ClassDef(name='Methods',bases=[],keywords=[],body=selected,decorator_list=[])],type_ignores=[]),'<vendored-methods>','exec'),namespace)
+         ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: required field "lineno" missing from stmt

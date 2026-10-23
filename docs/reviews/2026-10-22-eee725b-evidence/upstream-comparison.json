@@ -1,0 +1,113 @@
+{
+  "upstream": "https://github.com/IRCAD/SLIP",
+  "commit": "d22df6e5acf5469808392333f68197e0d43d7ad0",
+  "files": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/LICENSE",
+      "identical": true,
+      "local_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "upstream_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "README.md",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/README.md",
+      "identical": true,
+      "local_sha256": "fdab03dc0943bca879e9534ce99a57194c1063f3fbd73be53c0a51ae761bbc38",
+      "upstream_sha256": "fdab03dc0943bca879e9534ce99a57194c1063f3fbd73be53c0a51ae761bbc38"
+    },
+    {
+      "path": "LICENSE_sam2",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/LICENSE_sam2",
+      "identical": true,
+      "local_sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1",
+      "upstream_sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+    },
+    {
+      "path": "SLIP_model/build_SLIP.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/build_SLIP.py",
+      "identical": true,
+      "local_sha256": "afe4766690beafc345fc18674187b159c172507dfe03149eef6cb611648dc071",
+      "upstream_sha256": "afe4766690beafc345fc18674187b159c172507dfe03149eef6cb611648dc071"
+    },
+    {
+      "path": "SLIP_model/inference_module.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/inference_module.py",
+      "identical": true,
+      "local_sha256": "81f44506f9ad266978acb7c8b68a892d8e77ff0c5152d9e572af840ac4e697df",
+      "upstream_sha256": "81f44506f9ad266978acb7c8b68a892d8e77ff0c5152d9e572af840ac4e697df"
+    },
+    {
+      "path": "SLIP_model/utils.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/utils.py",
+      "identical": true,
+      "local_sha256": "e90026e9e6af0aa737eb0264b98973d263b9f20e63e78aa8a939a91a93646db3",
+      "upstream_sha256": "e90026e9e6af0aa737eb0264b98973d263b9f20e63e78aa8a939a91a93646db3"
+    },
+    {
+      "path": "SLIP_model/seg_combiner.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/seg_combiner.py",
+      "identical": true,
+      "local_sha256": "99578c5eca73e42a1c023fb209a37c11bdafff97a9addcfa8f771727c3bf6a9c",
+      "upstream_sha256": "99578c5eca73e42a1c023fb209a37c11bdafff97a9addcfa8f771727c3bf6a9c"
+    },
+    {
+      "path": "SLIP_model/modeling/patch_encoder.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/patch_encoder.py",
+      "identical": true,
+      "local_sha256": "731917a239deeca4626420aca4a5063706c51ce15958704caba59c22e6b4ad37",
+      "upstream_sha256": "731917a239deeca4626420aca4a5063706c51ce15958704caba59c22e6b4ad37"
+    },
+    {
+      "path": "SLIP_model/modeling/SLIP.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/SLIP.py",
+      "identical": true,
+      "local_sha256": "24686ed7943565962538d78bb9146b0dd72cfc223d0dda4d755af03fe98b5189",
+      "upstream_sha256": "24686ed7943565962538d78bb9146b0dd72cfc223d0dda4d755af03fe98b5189"
+    },
+    {
+      "path": "SLIP_model/modeling/cnn.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/cnn.py",
+      "identical": true,
+      "local_sha256": "ad1a33ad9dde01470e684867841bd6131ae4b295859a5b0aee184372f31e8635",
+      "upstream_sha256": "ad1a33ad9dde01470e684867841bd6131ae4b295859a5b0aee184372f31e8635"
+    },
+    {
+      "path": "SLIP_model/modeling/transformer.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/transformer.py",
+      "identical": false,
+      "local_sha256": "3ca16ea830b0ca579475032c1c1bf64b9b2e5c88dfe2e81572b7d586ef956ef9",
+      "upstream_sha256": "babedf9b73b3b4ed0ba3cd4c297e5fa6c6d2a2cc2f6040ff8f9e33e494630610",
+      "normalized_text_identical": true
+    },
+    {
+      "path": "SLIP_model/modeling/patch_attention.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/patch_attention.py",
+      "identical": true,
+      "local_sha256": "464aa6224e30f06c1be61a50ad17929133a4a5bc168fc1563ed9ba7d604af8a5",
+      "upstream_sha256": "464aa6224e30f06c1be61a50ad17929133a4a5bc168fc1563ed9ba7d604af8a5"
+    },
+    {
+      "path": "SLIP_model/modeling/mask_decoder3D.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/mask_decoder3D.py",
+      "identical": true,
+      "local_sha256": "0f745b8643b7a4d02293df5e70c48c25da73741262a59d74b6d6dfdd74d410cd",
+      "upstream_sha256": "0f745b8643b7a4d02293df5e70c48c25da73741262a59d74b6d6dfdd74d410cd"
+    },
+    {
+      "path": "SLIP_model/modeling/prompt_encoder3D.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/prompt_encoder3D.py",
+      "identical": true,
+      "local_sha256": "1080702d7142135bb2ddfd12e895ff3977e47875ccf64e128a60344c050c9cce",
+      "upstream_sha256": "1080702d7142135bb2ddfd12e895ff3977e47875ccf64e128a60344c050c9cce"
+    },
+    {
+      "path": "SLIP_model/modeling/volume_encoder.py",
+      "url": "https://raw.githubusercontent.com/IRCAD/SLIP/d22df6e5acf5469808392333f68197e0d43d7ad0/SLIP_model/modeling/volume_encoder.py",
+      "identical": true,
+      "local_sha256": "ab91c508ffab005801fb24d889d28b4ad429089062094b0dd4d8f46f3efb1e93",
+      "upstream_sha256": "ab91c508ffab005801fb24d889d28b4ad429089062094b0dd4d8f46f3efb1e93"
+    }
+  ],
+  "conclusion": "15 files text-identical at pinned upstream; transformer.py differs only in LF/CRLF bytes, not logic"
+}

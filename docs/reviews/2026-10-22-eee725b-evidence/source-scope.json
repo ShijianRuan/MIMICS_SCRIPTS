@@ -1,0 +1,144 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "baseline": "e33dc74b93cb57b83f9fc863dc6da018a9cecafd",
+  "commits": [
+    {
+      "sha": "1ece3fb9e9946f786cda7c840bdda81d8df5b42f",
+      "subject": "登记 P2：拖拽导入窗口无单实例保护，重复启动累积残留进程"
+    },
+    {
+      "sha": "3dc8b0cb1b1748bf8efd8e7d0aae7cfbfd6bacf3",
+      "subject": "修复肺窗预设二值化 (P1)：HU2GV 负 GV 无符号回绕撤销"
+    },
+    {
+      "sha": "9a3db32b9d4f0c2c357ccd6bc2e169b276b3919b",
+      "subject": "docs: R82-4 飞书手册重写收尾——补授权后 8 张截图全部恢复"
+    },
+    {
+      "sha": "d69681006855c226e7b20888174a732459ba0cbc",
+      "subject": "docs: 飞书手册安装段改指 MIMICS_SCRIPTS 新分发目录"
+    },
+    {
+      "sha": "307a7cdc77fc14e79513fb7f7ac4b97ed7508e2d",
+      "subject": "docs: 飞书手册补验证/修复指引并去术语化；登记 R82-5 环境检查慢"
+    },
+    {
+      "sha": "d5b66a46bff6f24449bd1dbb20572982260d8580",
+      "subject": "修复网络盘单病例导入必现失败 (P1)：project_root 盘符/UNC 双队列目录"
+    },
+    {
+      "sha": "b0718380944a6b20e3fec6f0b047b263be7a66c2",
+      "subject": "docs: R83-1 入账 + 单实例 P2 按用户定界重写 + D11 onnxruntime 死依赖"
+    },
+    {
+      "sha": "a85c89f359572930b08e49ac20f838c6d25617e8",
+      "subject": "docs: R83-1 标记已解决（R 盘端到端重放通过，两病例 mcs 补齐）"
+    },
+    {
+      "sha": "408d4ee366c380454020ed7d981f5c677e0bfe8d",
+      "subject": "docs: R82-5 定位完成——R盘=网络盘映射致检查 13 分半；网络盘早提示入 D12"
+    },
+    {
+      "sha": "7deff4e3779192c904c5e2ab4a6db632e175c75b",
+      "subject": "feat: 新增 RTX 50 系（cu128）GPU 修复套件；修复 restore 误删默认 torch"
+    },
+    {
+      "sha": "a4d27a23e22923d07e201f117f9734f4ffe51870",
+      "subject": "feat: Setup/Repair 检查增加实时进度窗口与网络盘/新显卡提示"
+    },
+    {
+      "sha": "1ada8dec1e24fd5a279f2b2fde17366a856932df",
+      "subject": "docs: 修正 R85 条目 commit 引用为实际哈希"
+    },
+    {
+      "sha": "595e14a367751de6a22f62f0c584151ef96f49e8",
+      "subject": "fix: 打包清单补上 RTX50系列GPU修复.bat（7deff4e 遗漏，否则免安装包缺该文件）"
+    },
+    {
+      "sha": "9d8ae85e40cde46b4c2012e35de0139e9e9bf28c",
+      "subject": "docs: 补 R84/R85 复杂度账目与证据修正；package_portable 收录 RTX50 修复 bat"
+    },
+    {
+      "sha": "07f62bd8eb74fcf4eece93051a3b0dcd5d61bb9b",
+      "subject": "docs: R85-2 补 fast 门禁与 R 盘部署包同步证据"
+    },
+    {
+      "sha": "d080f0601da525a0a71852935913b1d92846507c",
+      "subject": "fix: restore 在 .bak 备份丢失时拒绝执行，防止删坏还能用的 torch"
+    },
+    {
+      "sha": "5c2ce4467b1e2f1c59a21e84751e1bedc272977b",
+      "subject": "docs: R86 复核轮入账——防误删守卫证据、R 盘清理、RTX 3060 证据更正"
+    },
+    {
+      "sha": "ac0cb96a09ba4e8e3590ca3e679e50a0c8c88fd8",
+      "subject": "config: nnInteractive 部署配置显式启用源不可达时的 Mimics 缓冲回退"
+    },
+    {
+      "sha": "79c98466f6dac1d0ed1a22b81f199d023848ff98",
+      "subject": "fix: nnInteractive prewarm 对官方模型在源不可达时改走 Mimics 缓冲"
+    },
+    {
+      "sha": "28e7bdf3133c14588248dc639e54994d09ab577f",
+      "subject": "vendor: SLIP 源码原样入仓 integrations/slip（不修改上游）"
+    },
+    {
+      "sha": "ab538bb9d589d6cb3a835aa48b8836cb85e11ede",
+      "subject": "feat: slip_bridge.py 桥接层——单发/异步双模式，GPU 锁与 nnInteractive 互斥"
+    },
+    {
+      "sha": "b84499dd85da9dee91e574b5b6db25ecf7eff4e1",
+      "subject": "feat: SLIP Mimics 侧会话管理 + 失败路径测试套件"
+    },
+    {
+      "sha": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+      "subject": "docs: R87 SLIP 集成入账——测试策略、迭代账本、复杂度账本"
+    }
+  ],
+  "changed_files": [
+    ".gitignore",
+    "CONFIG_REFERENCE.md",
+    "RTX50系列GPU修复.bat",
+    "docs/03_Review/complexity_ledger.md",
+    "docs/03_Review/improvement_backlog.md",
+    "docs/TEST_STRATEGY.md",
+    "integrations/slip/LICENSE",
+    "integrations/slip/LICENSE_sam2",
+    "integrations/slip/README.md",
+    "integrations/slip/SLIP_model/build_SLIP.py",
+    "integrations/slip/SLIP_model/inference_module.py",
+    "integrations/slip/SLIP_model/modeling/SLIP.py",
+    "integrations/slip/SLIP_model/modeling/cnn.py",
+    "integrations/slip/SLIP_model/modeling/mask_decoder3D.py",
+    "integrations/slip/SLIP_model/modeling/patch_attention.py",
+    "integrations/slip/SLIP_model/modeling/patch_encoder.py",
+    "integrations/slip/SLIP_model/modeling/prompt_encoder3D.py",
+    "integrations/slip/SLIP_model/modeling/transformer.py",
+    "integrations/slip/SLIP_model/modeling/volume_encoder.py",
+    "integrations/slip/SLIP_model/seg_combiner.py",
+    "integrations/slip/SLIP_model/utils.py",
+    "nninteractive_config.json",
+    "repair/cu118/switch_gpu_torch.py",
+    "runtime_py35/nninteractive_mimics.py",
+    "runtime_py35/setup_environment.py",
+    "runtime_py35/slip_mimics.py",
+    "runtime_py35/window_level_mimics.py",
+    "scripting_library/02_AI/SLIP/01_Annotate.py",
+    "slip_bridge.py",
+    "tests/manual/run_slip_bridge_gpu_acceptance.py",
+    "tests/test_all.py",
+    "tests/test_slip_mimics.py",
+    "tools/env_guidance.py",
+    "tools/import_drop_window.py",
+    "tools/package_portable.py",
+    "tools/run_regression_matrix.py",
+    "tools/setup_env.py",
+    "tools/setup_progress_window.py",
+    "tools/single_case_import_worker.py",
+    "修复GPU加速.bat",
+    "切回默认GPU.bat",
+    "安装说明.md"
+  ],
+  "prior_open_card_production_files_unchanged": true,
+  "provenance": "Observed via fetch after known report push e33dc74; physical author/pusher not inferred from shared identity; no new SHA is in self-push state"
+}

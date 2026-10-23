@@ -1,0 +1,21 @@
+qt.qpa.fonts: Populating font family aliases took 159 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+This plugin does not support propagateSizeHints()
+{
+  "stale_previous_state": {
+    "progress_range": [
+      0,
+      1
+    ],
+    "progress_value": 1,
+    "message": "本次正在检查 GPU",
+    "elapsed": "已用时 1:00:00",
+    "network_warning_visible": false,
+    "baseline_age_seconds": 3600
+  },
+  "slow_state_read": {
+    "injected_seconds": 0.15,
+    "callback_seconds": 0.15539812500355765,
+    "timer_callbacks_during_read": 0,
+    "timer_callbacks_after_events": 1
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "suite": "import",
+  "selections": [
+    "test_all.TestImportDropWindow"
+  ],
+  "executed": 40,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 40
+}

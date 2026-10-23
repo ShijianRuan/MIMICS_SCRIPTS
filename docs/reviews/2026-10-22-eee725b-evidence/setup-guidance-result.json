@@ -1,0 +1,13 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "suite": "setup-guidance",
+  "selections": [
+    "test_all.TestEnvGuidance",
+    "test_all.TestGpuRepairLauncher"
+  ],
+  "executed": 26,
+  "failures": 1,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 25
+}

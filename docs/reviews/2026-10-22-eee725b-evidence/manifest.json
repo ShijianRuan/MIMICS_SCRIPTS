@@ -1,0 +1,348 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "baseline": "e33dc74b93cb57b83f9fc863dc6da018a9cecafd",
+  "source_files": [
+    {
+      "path": ".gitignore",
+      "sha256": "7ef481408988ac6dc221ee8677d8762013146131db5a2d544c47c268e08d0fd9"
+    },
+    {
+      "path": "CONFIG_REFERENCE.md",
+      "sha256": "a3d771aa77bd9bfd55faecdb035f31446554f1e262cbf1ef05dc38c7b7442621"
+    },
+    {
+      "path": "RTX50系列GPU修复.bat",
+      "sha256": "56810e24019c5cf37151878fa3aee3835a402d68c9e8b74783a5da9a1958295a"
+    },
+    {
+      "path": "docs/03_Review/complexity_ledger.md",
+      "sha256": "1c6aed606ba0830d75d0941c84aea2374e91a8fa8c743e458d01fb258e9e0ab9"
+    },
+    {
+      "path": "docs/03_Review/improvement_backlog.md",
+      "sha256": "3908fa3a8859d60995ad90fbc672cff4c68b2167e139b59877cccef4c89d9694"
+    },
+    {
+      "path": "docs/TEST_STRATEGY.md",
+      "sha256": "65c44e859c85a129551bbcaa364d359559c2ffb9e4c891fd68bfb11ca0d1944e"
+    },
+    {
+      "path": "integrations/slip/LICENSE",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "integrations/slip/LICENSE_sam2",
+      "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+    },
+    {
+      "path": "integrations/slip/README.md",
+      "sha256": "fdab03dc0943bca879e9534ce99a57194c1063f3fbd73be53c0a51ae761bbc38"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/build_SLIP.py",
+      "sha256": "afe4766690beafc345fc18674187b159c172507dfe03149eef6cb611648dc071"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/inference_module.py",
+      "sha256": "81f44506f9ad266978acb7c8b68a892d8e77ff0c5152d9e572af840ac4e697df"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/SLIP.py",
+      "sha256": "24686ed7943565962538d78bb9146b0dd72cfc223d0dda4d755af03fe98b5189"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/cnn.py",
+      "sha256": "ad1a33ad9dde01470e684867841bd6131ae4b295859a5b0aee184372f31e8635"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/mask_decoder3D.py",
+      "sha256": "0f745b8643b7a4d02293df5e70c48c25da73741262a59d74b6d6dfdd74d410cd"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/patch_attention.py",
+      "sha256": "464aa6224e30f06c1be61a50ad17929133a4a5bc168fc1563ed9ba7d604af8a5"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/patch_encoder.py",
+      "sha256": "731917a239deeca4626420aca4a5063706c51ce15958704caba59c22e6b4ad37"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/prompt_encoder3D.py",
+      "sha256": "1080702d7142135bb2ddfd12e895ff3977e47875ccf64e128a60344c050c9cce"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/transformer.py",
+      "sha256": "3ca16ea830b0ca579475032c1c1bf64b9b2e5c88dfe2e81572b7d586ef956ef9"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/modeling/volume_encoder.py",
+      "sha256": "ab91c508ffab005801fb24d889d28b4ad429089062094b0dd4d8f46f3efb1e93"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/seg_combiner.py",
+      "sha256": "99578c5eca73e42a1c023fb209a37c11bdafff97a9addcfa8f771727c3bf6a9c"
+    },
+    {
+      "path": "integrations/slip/SLIP_model/utils.py",
+      "sha256": "e90026e9e6af0aa737eb0264b98973d263b9f20e63e78aa8a939a91a93646db3"
+    },
+    {
+      "path": "mimics_bridge.py",
+      "sha256": "b8fc8a85b323f09156a470a022077db20a120d2be495d79844c1cae349212a42"
+    },
+    {
+      "path": "nninteractive_config.json",
+      "sha256": "cae16ecb5c74e0efe7713d7978b4545987522327728a8754b30d46faaaf547fb"
+    },
+    {
+      "path": "repair/cu118/switch_gpu_torch.py",
+      "sha256": "ac49a92e1c04e8ff81bc2753659588271f556e872f954e89b7cd6ba1facdf1e1"
+    },
+    {
+      "path": "runtime_py35/create_mcs_batch.py",
+      "sha256": "9677c545f3d750a5bc199893f16bb0f0d0a9bc164240dab4762d8fe7519f29f7"
+    },
+    {
+      "path": "runtime_py35/nninteractive_mimics.py",
+      "sha256": "b45fe24632f09e55776901b4160d70a3b74224e600be0ea3260b45e7641eef65"
+    },
+    {
+      "path": "runtime_py35/setup_environment.py",
+      "sha256": "46c6660416c7b907fa225bd28b0d38f1c33dfeb7aff8b3bfcbd11992fdb6d88e"
+    },
+    {
+      "path": "runtime_py35/slip_mimics.py",
+      "sha256": "ddfdd7e5237aad70a18b0d88f718f2280eb9dab228280c8e08ba7efa8617964d"
+    },
+    {
+      "path": "runtime_py35/window_level_mimics.py",
+      "sha256": "a05c1e09786a0f365a102c4716bea802bd07bfb06d51fe626f4bbc214475b8ad"
+    },
+    {
+      "path": "scripting_library/02_AI/SLIP/01_Annotate.py",
+      "sha256": "d1f7520f76e08e4e03339221750a351e0fb1b5ec09c76242f4c02cc46ee4a052"
+    },
+    {
+      "path": "slip_bridge.py",
+      "sha256": "85a53ea413ac6c26cc49e8ef3d898ed7f01d6ae2a63da3a3c6b10ba3f8a11987"
+    },
+    {
+      "path": "tests/manual/run_slip_bridge_gpu_acceptance.py",
+      "sha256": "10b6f99e5de50707c860d0db4a3a8beecdc4254b9c113df0ca8580f41fd7c366"
+    },
+    {
+      "path": "tests/test_all.py",
+      "sha256": "be128e55568a7e1a7d390a42dc18c9a3904ccd4140d810b36f687b11a3fc82dd"
+    },
+    {
+      "path": "tests/test_slip_mimics.py",
+      "sha256": "9b92173fbd56f94b928d6cf436c5c7e5cca486490427e9a2d043cce0e5b06f97"
+    },
+    {
+      "path": "tools/env_guidance.py",
+      "sha256": "820ac26d2ad1941674686c0284dd1a272697d322c3a89ec62d162f2d48cfdf4f"
+    },
+    {
+      "path": "tools/flexict_active_learning_ui.py",
+      "sha256": "0970404e4cbd9bdbad4ef341831cea359298074bde36377c97803959c052a3fb"
+    },
+    {
+      "path": "tools/flexict_status_viewer.py",
+      "sha256": "b1a0bf31662d80baa6d3b722116aedbaaa128a23c3057a8a9b7b4b8ae0c0ce2a"
+    },
+    {
+      "path": "tools/import_drop_window.py",
+      "sha256": "0f65d7ac9696a11c0fa334dcbd86b12346295f18e77be083b834a949ebdb96d5"
+    },
+    {
+      "path": "tools/nnunet_common.py",
+      "sha256": "db623701d1ad0dd32824152cc520c1868628ba00c8f368e2f9690fa2e51a8a47"
+    },
+    {
+      "path": "tools/nnunet_jobs.py",
+      "sha256": "ad680d54e81ccd5fee7dab6a4427d4c98b1203ad0784c809bf42a4020cfd377a"
+    },
+    {
+      "path": "tools/nnunet_pipeline.py",
+      "sha256": "cfcae4bfa173ff0b857b3e1e2c5bd2ecaa73701df8dd9475aac1ac4731186840"
+    },
+    {
+      "path": "tools/nnunet_status_viewer.py",
+      "sha256": "59ad41c0777b9082af19e8a5fd14b8095dceb2ca74fe977f2070b9ae3bfa9e67"
+    },
+    {
+      "path": "tools/package_portable.py",
+      "sha256": "d757b5e58a3e05cc6c746305e388704edc73ea8948371989082e2d1c516719ce"
+    },
+    {
+      "path": "tools/run_regression_matrix.py",
+      "sha256": "99dcb3c70a7a2d01239c3ee9b24d63b54e0b4c92161d2bffd94dfa1760942281"
+    },
+    {
+      "path": "tools/setup_env.py",
+      "sha256": "3c17a09c5a6336aa26960add8d01507a397c36124720737619bce6606bc278bc"
+    },
+    {
+      "path": "tools/setup_progress_window.py",
+      "sha256": "955caeb007150a6e1a24077d5832faa940203f8c05a17a067bc82762f48b7cda"
+    },
+    {
+      "path": "tools/single_case_import_worker.py",
+      "sha256": "75f7e08ea8c59cadcc4c6c05d0213c536cc8ba073b90be03027396e81ad485e2"
+    },
+    {
+      "path": "修复GPU加速.bat",
+      "sha256": "5022da2949267570a495ce37456bf001d4bd88f5186a14d4ca3ae240f6f5b28c"
+    },
+    {
+      "path": "切回默认GPU.bat",
+      "sha256": "24ed58de3d361eb7af147d547ea4a70938375572a53cbd816998be912da8e37b"
+    },
+    {
+      "path": "安装说明.md",
+      "sha256": "f35a5494f58b6e068c2589d053f6dd0c1f088d06c8a3d2e25da1f497e9b4bedd"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-revalidation.md",
+      "sha256": "b9dc2ce0378bf4d78fd3a233fccd162690b615921b39bcee8f7621fcf4ccc490"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-revalidation.json",
+      "sha256": "8966fa63616505cf650ebee238f6c672cd43066ac70e0b8480666b5a38a941f3"
+    },
+    {
+      "path": "docs/reviews/README.md",
+      "sha256": "5337dffa14f19452378d790b6901e694e7fbb5c82d57416b5dd6f4da4233918f"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/README.md",
+      "sha256": "edd3af6d527f96b54b5da3264baa7b9db7dad9400716c95e90cd79a02973e097"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/added-runtime-result.json",
+      "sha256": "b452e616e2fbae531a278680599c394e83947fdb7a5d7176c5fd6a8dfb49895f"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/added-runtime.log",
+      "sha256": "fa6a6a1f10b0c724e91d39817857f70f7d6c6b7d2e10b2df3994317c648103bb"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/audit-environment.json",
+      "sha256": "8f85ae3879a34a1ac06d2eb65e5a1f35717ec6c148b4a537fa512e67f24ca188"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/gui-result.json",
+      "sha256": "99b729c761fb7900996b92f2435f2fdd293e3e4abf9209b67b913dad32a072a1"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/gui.log",
+      "sha256": "9ceb11bc4d85a71cd974544047dbc01d2fc557b1ea077c29142dffc9f96bc243"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/image-window-result.json",
+      "sha256": "bb1cd845839acb65168a6d0f184db9c17f219a724c52ea13eb37c4e8e0bfff88"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/image-window.log",
+      "sha256": "3477c48d68021065d734962c7c76775b20689567ec3db21170a112d253d5c539"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/import-result.json",
+      "sha256": "f60913fa9562d432058f0749ca78494cfdf1a6a90cf444d534ee65aac850218b"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/import.log",
+      "sha256": "cb670073ff0e53c5954c742f68b3ebfaf7a9c03a93de8b22faff10e2e3549ad1"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/observations.json",
+      "sha256": "385c415a0d7eaf18c4058e1ef254cd99ab20855f591456d3676d225987fcddb2"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/probe-harness-initial.log",
+      "sha256": "8b0b43214c3756375362d50765079665c1db52d986b902da9e3781f5650e5286"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/probes.log",
+      "sha256": "385c415a0d7eaf18c4058e1ef254cd99ab20855f591456d3676d225987fcddb2"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/regression-diagnostics.json",
+      "sha256": "4829bf032e179b31bfaee18c3e82c2c0209490cc79b6a011f3af8f1b2179928b"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/regression-results.json",
+      "sha256": "e22fd774beee7b02aabcda477b7c1a37d013d0fdd23733340496ef98717fe70d"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/regression_runner.py",
+      "sha256": "49d13049ab36d55c492076fd13c5036cafd9453df394b8ab9ec5766d84d9a1cd"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/setup-guidance-result.json",
+      "sha256": "4685b4eba638d28318429bea3323ac5721dc73e64482eeaf5f2e9777fa404211"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/setup-guidance.log",
+      "sha256": "f92952ffa9d042f0d1517bf31ae438cb5855fccb3b9890b6de0c2bc1e3874829"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/setup-progress-new-check.png",
+      "sha256": "d10ce9cb964f9262c31fa228921921594d3aa624c4dfb4b6852f2feb69ce7de3"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/slip-runtime-result.json",
+      "sha256": "79b583f6283db85ba844f46c672d1fafd8d3018262cd2e719eed05fc388e2545"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/slip-runtime.log",
+      "sha256": "2e1fb9d9a1bbf8bc59c2ce53d31dd694d1b66bd925801135785e53dc9b35bd7c"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/slip-session-contract.mmd",
+      "sha256": "e43c86e9c793a43f86fff7b3d050c07ee40762e0323590837d7ffeb098630140"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/slip_probes.py",
+      "sha256": "aaf07153a3c3cd113505e87221e97d9c12b81ed23cca8017707217240522ffc4"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/source-fallback-result.json",
+      "sha256": "7d63f4a8da99e4aab6de4f25faa4bcf2aa3ce7f00e115cdd54a9a5afaee0b89d"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/source-fallback.log",
+      "sha256": "a9b15c7d67e2bb5325aa26376cd97000474584dde99f52b6cb3737a5ecf8aa59"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/source-scope.json",
+      "sha256": "11a00f88c08f21429ad16014d7f6a2d0f378ac5206a50c2d5ae183befe2ecb88"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/ui-observations.json",
+      "sha256": "d86ae87aaf0b530f85e73a6121ad89a7ba2cac1d7b002c9ad88b8cdada9d8cda"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/ui.log",
+      "sha256": "d105db9b00159abc590f69d1fb339a86a72e7eaa88d492a08f4655eeba547d9c"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/ui_probe.py",
+      "sha256": "e400601bf6dd039293e79f960bd1ef03f6b61ae86d90e9451791bfd09244dfbf"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/upstream-comparison.json",
+      "sha256": "4fec31daaa392130d17e6539862d56aeed27b5311b26501d083ee97f1b86bd26"
+    },
+    {
+      "path": "docs/reviews/2026-10-22-eee725b-evidence/verify_evidence.py",
+      "sha256": "9de62ed0d2be4d105f1f67a57686f1bcdc63e37e263a456775b3b96ea3bc281c"
+    }
+  ],
+  "exclusions": [
+    "manifest.json and fact-check.json excluded from artifact hashes to avoid cycles"
+  ],
+  "note": "Source hashes are from git show at the fixed SHA; all working source bytes match."
+}

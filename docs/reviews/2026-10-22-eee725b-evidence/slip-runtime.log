@@ -1,0 +1,55 @@
+test_auto_created_draft_with_interactions_is_kept (test_slip_mimics.SlipCloseJobTests.test_auto_created_draft_with_interactions_is_kept) ... ok
+test_auto_created_empty_draft_deleted_on_user_finish (test_slip_mimics.SlipCloseJobTests.test_auto_created_empty_draft_deleted_on_user_finish) ... ok
+test_close_writes_close_json_and_clears_metadata (test_slip_mimics.SlipCloseJobTests.test_close_writes_close_json_and_clears_metadata) ... ok
+test_manual_target_is_never_deleted (test_slip_mimics.SlipCloseJobTests.test_manual_target_is_never_deleted) ... ok
+test_predict_then_undo_command_sequence (test_slip_mimics.SlipEnqueueCommandTests.test_predict_then_undo_command_sequence) ... ok
+test_dead_worker_interactive_cancel_keeps_waiting (test_slip_mimics.SlipHandleResultTests.test_dead_worker_interactive_cancel_keeps_waiting) ... ok
+test_dead_worker_non_interactive_raises (test_slip_mimics.SlipHandleResultTests.test_dead_worker_non_interactive_raises) ... ok
+test_dead_worker_restart_closes_job (test_slip_mimics.SlipHandleResultTests.test_dead_worker_restart_closes_job) ... ok
+test_empty_prediction_applied_clears_mask (test_slip_mimics.SlipHandleResultTests.test_empty_prediction_applied_clears_mask) ... ok
+test_empty_prediction_kept_leaves_mask_unchanged (test_slip_mimics.SlipHandleResultTests.test_empty_prediction_kept_leaves_mask_unchanged) ... ok
+test_error_cancel_returns_ready (test_slip_mimics.SlipHandleResultTests.test_error_cancel_returns_ready) ... ok
+test_error_discard_ends_session (test_slip_mimics.SlipHandleResultTests.test_error_discard_ends_session) ... ok
+test_error_retry_reenqueues_last_predict (test_slip_mimics.SlipHandleResultTests.test_error_retry_reenqueues_last_predict) ... ok
+test_error_retry_without_predict_is_soft (test_slip_mimics.SlipHandleResultTests.test_error_retry_without_predict_is_soft) ... ok
+test_half_written_result_waits (test_slip_mimics.SlipHandleResultTests.test_half_written_result_waits) ... ok
+test_identity_mismatch_raises (test_slip_mimics.SlipHandleResultTests.test_identity_mismatch_raises) ... ok
+test_manual_mask_change_cancel_ends_session (test_slip_mimics.SlipHandleResultTests.test_manual_mask_change_cancel_ends_session) ... ok
+test_manual_mask_change_restart_closes_job (test_slip_mimics.SlipHandleResultTests.test_manual_mask_change_restart_closes_job) ... ok
+test_missing_output_file_raises (test_slip_mimics.SlipHandleResultTests.test_missing_output_file_raises) ... ok
+test_missing_result_with_live_worker_waits (test_slip_mimics.SlipHandleResultTests.test_missing_result_with_live_worker_waits) ... ok
+test_no_pending_command_returns_ready (test_slip_mimics.SlipHandleResultTests.test_no_pending_command_returns_ready) ... ok
+test_nothing_to_undo_error_is_soft (test_slip_mimics.SlipHandleResultTests.test_nothing_to_undo_error_is_soft) ... ok
+test_project_change_closes_session (test_slip_mimics.SlipHandleResultTests.test_project_change_closes_session) ... ok
+test_refined_result_is_applied_to_target (test_slip_mimics.SlipHandleResultTests.test_refined_result_is_applied_to_target) ... ok
+test_reset_result_restores_base_mask (test_slip_mimics.SlipHandleResultTests.test_reset_result_restores_base_mask) ... ok
+test_undo_result_pops_last_interaction (test_slip_mimics.SlipHandleResultTests.test_undo_result_pops_last_interaction) ... ok
+test_unexpected_result_status_raises (test_slip_mimics.SlipHandleResultTests.test_unexpected_result_status_raises) ... ok
+test_load_job_ignores_closed_worker (test_slip_mimics.SlipJobStateTests.test_load_job_ignores_closed_worker) ... ok
+test_load_job_ignores_terminal_state (test_slip_mimics.SlipJobStateTests.test_load_job_ignores_terminal_state) ... ok
+test_load_job_resumes_active_state (test_slip_mimics.SlipJobStateTests.test_load_job_resumes_active_state) ... ok
+test_save_job_strips_private_keys (test_slip_mimics.SlipJobStateTests.test_save_job_strips_private_keys) ... ok
+test_busy_monitor_is_skipped (test_slip_mimics.SlipMonitorTickTests.test_busy_monitor_is_skipped) ... ok
+test_timeout_marks_done_and_shows_failure (test_slip_mimics.SlipMonitorTickTests.test_timeout_marks_done_and_shows_failure) ... ok
+test_main_without_active_image_shows_error (test_slip_mimics.SlipRunRefusalTests.test_main_without_active_image_shows_error) ... ok
+test_run_refused_while_gpu_lock_is_held (test_slip_mimics.SlipRunRefusalTests.test_run_refused_while_gpu_lock_is_held) ... ok
+test_run_refused_while_mask_buffer_is_busy (test_slip_mimics.SlipRunRefusalTests.test_run_refused_while_mask_buffer_is_busy) ... ok
+test_ai_draft_source_is_used_in_place_without_asking (test_slip_mimics.SlipSelectTargetTests.test_ai_draft_source_is_used_in_place_without_asking) ... ok
+test_empty_source_is_used_in_place_without_asking (test_slip_mimics.SlipSelectTargetTests.test_empty_source_is_used_in_place_without_asking) ... ok
+test_existing_slip_session_resumes_in_place (test_slip_mimics.SlipSelectTargetTests.test_existing_slip_session_resumes_in_place) ... ok
+test_manual_mask_creates_derived_draft (test_slip_mimics.SlipSelectTargetTests.test_manual_mask_creates_derived_draft) ... ok
+test_manual_mask_update_in_place (test_slip_mimics.SlipSelectTargetTests.test_manual_mask_update_in_place) ... ok
+test_mask_from_another_image_is_rejected (test_slip_mimics.SlipSelectTargetTests.test_mask_from_another_image_is_rejected) ... ok
+test_multiple_selections_are_rejected (test_slip_mimics.SlipSelectTargetTests.test_multiple_selections_are_rejected) ... ok
+test_nninteractive_session_conflict_is_rejected (test_slip_mimics.SlipSelectTargetTests.test_nninteractive_session_conflict_is_rejected) ... ok
+test_no_selection_auto_creates_draft (test_slip_mimics.SlipSelectTargetTests.test_no_selection_auto_creates_draft) ... ok
+test_missing_external_python_fails_before_any_directory (test_slip_mimics.SlipStartJobFailureTests.test_missing_external_python_fails_before_any_directory) ... ok
+test_int8_buffer_is_rejected (test_slip_mimics.SlipValidationTests.test_int8_buffer_is_rejected) ... ok
+test_missing_hu_mapping_is_rejected (test_slip_mimics.SlipValidationTests.test_missing_hu_mapping_is_rejected) ... ok
+test_non_ct_modality_is_rejected (test_slip_mimics.SlipValidationTests.test_non_ct_modality_is_rejected) ... ok
+test_valid_ct_image_passes (test_slip_mimics.SlipValidationTests.test_valid_ct_image_passes) ... ok
+
+----------------------------------------------------------------------
+Ran 50 tests in 3.545s
+
+OK

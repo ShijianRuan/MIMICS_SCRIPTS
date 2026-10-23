@@ -1,0 +1,6 @@
+{
+  "detector_ast_unchanged": true,
+  "baseline": "e33dc74b93cb57b83f9fc863dc6da018a9cecafd",
+  "failure": "test_moved_checkout_detected_with_old_root",
+  "limitation": "POSIX fixture asks Windows-drive-only detector to detect /private/tmp path; primary failure retained, no test altered"
+}

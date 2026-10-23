@@ -1,0 +1,26 @@
+{
+  "source_commit": "eee725b45ec42b7c045def95e4682089a3ea13a2",
+  "suite": "added-runtime",
+  "selections": [
+    "test_all.TestMimicsBridgeNiftiNormalization.test_single_case_worker_canonicalizes_project_root_to_cli_root",
+    "test_all.TestWindowLevel.test_lung_preset_negative_hu_not_wrapped_to_huge_gv",
+    "test_all.TestSourceImagePathEquivalence.test_prewarm_official_model_uses_buffer_export_when_fallback_enabled",
+    "test_all.TestSourceImagePathEquivalence.test_prewarm_official_model_keeps_source_path_when_fallback_disabled",
+    "test_all.TestSourceImagePathEquivalence.test_prewarm_task_model_strict_source_keeps_source_path",
+    "test_all.TestImportDropWindow.test_root_form_matches_background_launcher_root",
+    "test_all.TestEnvGuidance.test_cuda_unavailable_state_points_at_double_click_repair",
+    "test_all.TestEnvGuidance.test_cuda_unavailable_without_launcher_reports_missing_kit",
+    "test_all.TestEnvGuidance.test_cuda_available_state_has_no_gpu_issue",
+    "test_all.TestEnvGuidance.test_stale_cuda_unavailable_state_does_not_nag",
+    "test_all.TestGpuRepairLauncher.test_launchers_are_ascii_and_target_the_repair_script",
+    "test_all.TestGpuRepairLauncher.test_switch_script_matches_repo_layout",
+    "test_all.TestGpuRepairLauncher.test_restore_on_default_is_idempotent",
+    "test_all.TestGpuRepairLauncher.test_restore_without_backup_keeps_working_variant",
+    "test_all.TestGpuRepairLauncher.test_restore_removes_variant_and_restores_default"
+  ],
+  "executed": 15,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 15
+}
