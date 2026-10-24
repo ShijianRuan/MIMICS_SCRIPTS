@@ -19,7 +19,10 @@ they need no GPU and never touch the vendored tree.  Covered failure paths
   predict/undo/reset commands are refused instead of building on state
   that cannot be trusted;
 - reset absorbs any half-published change;
-- a publish that fails twice keeps the pending state consistent.
+- a publish that fails twice keeps the pending state consistent;
+- open() refuses a resolved CPU device up front: the upstream model
+  pipeline is CUDA-only, so a CPU session must fail with a clear message
+  before any checkpoint/lock/file work (review a621093 / R91-6 / SL06).
 """
 
 from __future__ import annotations
@@ -289,6 +292,18 @@ class SlipBridgeReconcileTests(unittest.TestCase):
             [("predict", [0, 1, 2], 0), ("undo",), ("reset",),
              ("predict", [0, 1, 2], 0), ("predict", [2, 0, 1], 1)])
         self.assertEqual(module.action_history[0]["type"], "exclude")
+
+    # -- device gate (SL06) ---------------------------------------------------
+
+    def test_open_rejects_cpu_device_before_any_setup(self):
+        # device=auto can resolve to cpu on a machine without CUDA, but the
+        # upstream pipeline hardcodes CUDA: refuse before the checkpoint,
+        # GPU lock, or model load is ever touched.
+        session = slip_bridge._SlipSession({"device": "cpu"})
+        with self.assertRaises(RuntimeError) as caught:
+            session.open()
+        self.assertIn("requires a CUDA GPU", str(caught.exception))
+        self.assertIn("cpu", str(caught.exception))
 
     # -- poisoning -------------------------------------------------------------
 

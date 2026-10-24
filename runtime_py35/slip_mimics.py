@@ -21,6 +21,8 @@ from __future__ import print_function
 import logging
 import os
 import shutil
+import subprocess
+import threading
 import time
 import traceback
 import uuid
@@ -286,6 +288,59 @@ def _delete_visual_objects(state):
         return
     for obj in _ASYNC_VISUAL_OBJECTS.pop(job_dir, []):
         nnm._delete_mimics_object(obj)
+
+
+# CUDA 能力探测结果按进程缓存：探测要拉起外部 Python 并 import torch
+# （冷启动可达数十秒），同一 Mimics 会话内不重复付费。只缓存确证结果。
+_CUDA_PROBE_CACHE = {}
+
+
+def _external_cuda_available(root):
+    """用外部 Python 探测 CUDA 是否可用（结果按进程缓存）。
+
+    SLIP 的上游模型管线强制 CUDA（process_image 硬编码 .to(cuda)，
+    combiner 依赖 CuPy），无 GPU 的机器走到 worker 里才失败，代价是
+    已经导出了大体积图像缓冲区。这里在创建草稿/导出缓冲之前先问清楚。
+
+    返回 True/False 表示探测确证；None 表示探测无法进行（找不到外部
+    Python、import 失败、超时）——不确定时不拦启动，让 worker 报出
+    真实错误，避免误伤能跑的环境。
+    """
+    if "available" in _CUDA_PROBE_CACHE:
+        return _CUDA_PROBE_CACHE["available"]
+    python_exe = runtime_common.find_external_python(root)
+    available = None
+    if python_exe:
+        outcome = {}
+
+        def _probe():
+            try:
+                process = subprocess.Popen(
+                    [python_exe, "-c",
+                     "import torch; print(1 if torch.cuda.is_available() "
+                     "else 0)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    **nnm._background_process_kwargs())
+                out, _ = process.communicate(timeout=90)
+                outcome["returncode"] = process.returncode
+                outcome["stdout"] = out
+            except Exception:
+                outcome["returncode"] = None
+
+        # 探测期间持续泵 GUI 消息循环，绝不冻结 Mimics（铁律 1）。
+        waiter = threading.Thread(target=_probe)
+        waiter.daemon = True
+        waiter.start()
+        while waiter.is_alive():
+            nnm._update_gui()
+            waiter.join(0.05)
+        if outcome.get("returncode") == 0:
+            available = outcome.get("stdout", b"").strip() == b"1"
+    if available is not None:
+        _CUDA_PROBE_CACHE["available"] = available
+    return available
 
 
 def _start_job(image, target, source=None, write_mode="in_place",
@@ -1202,6 +1257,21 @@ def run():
             image, target, target,
             auto_created=bool(own_state.get("auto_created")),
             write_mode=str(own_state.get("write_mode") or "in_place"))
+    if _external_cuda_available(_project_root()) is False:
+        # SL06：无 CUDA 的机器在创建草稿/导出大缓冲区之前明确拒绝，
+        # 不让用户走完选目标流程后在 worker 里撞上必失败的模型加载。
+        mimics.dialogs.message_box(
+            message=(
+                "当前外部 Python 环境没有可用的 CUDA GPU。\n\n"
+                "SLIP 的模型管线只在 GPU 上运行，本次未创建草稿、"
+                "未导出任何数据。\n\n"
+                "请确认显卡驱动与 CUDA 环境可用，或换用有 GPU 的机器"
+                "运行 SLIP。"
+            ),
+            title=TITLE,
+            ui_blocking=False,
+        )
+        return 1
     session = _select_session_target(image)
     source = session["source"]
     target = session["target"]

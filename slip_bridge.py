@@ -423,6 +423,18 @@ class _SlipSession:
     def open(self) -> None:
         import torch  # fail fast with a clear error if python_env lacks it
 
+        # The upstream model pipeline is CUDA-only (process_image hardcodes
+        # .to(cuda) and the combiner needs CuPy), so a resolved CPU device
+        # must fail here with a clear message instead of dying later inside
+        # the model load with an opaque CuPy/torch error (SL06).
+        if not str(self.device).lower().startswith("cuda"):
+            raise RuntimeError(
+                "SLIP requires a CUDA GPU (resolved device: {0}); the "
+                "upstream model pipeline does not run on CPU. Start the "
+                "session on a machine with a working CUDA setup.".format(
+                    self.device)
+            )
+
         checkpoint = Path(self.checkpoint)
         if not checkpoint.is_file():
             raise RuntimeError(

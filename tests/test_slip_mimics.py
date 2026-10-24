@@ -8,6 +8,10 @@ never spawning the external worker.  Covered failure paths:
 
 - image validation (dtype / modality / HU mapping),
 - run() refusals while another task holds the mask buffer or gpu.lock,
+- run() refusal when the external Python reports no CUDA (before any
+  draft is created or buffer exported, SL06), plus the probe semantics:
+  conclusive results are cached per process, inconclusive probes never
+  block a start,
 - run() resumes its own live session when its own worker holds gpu.lock
   (monitor-timer-loss recovery: prompt history kept, or pointed refusal
   when the session's result Mask is not on the active image),
@@ -355,6 +359,21 @@ class SlipRunRefusalTests(SlipMimicsTests):
         finally:
             self.runtime_common.release_resource_lock(lock_path, token)
 
+    def test_run_refused_without_cuda_before_any_draft_or_export(self):
+        # SL06：无 CUDA 的机器在创建草稿/导出缓冲之前明确拒绝，不进入
+        # 必失败的模型加载。
+        image = self.make_image()
+        self.patch_jobs_root()
+        self.runtime._external_cuda_available = lambda root: False
+        self.assertEqual(self.runtime.run(), 1)
+        self.assertEqual(len(self.fake.dialogs.messages), 1)
+        message = self.fake.dialogs.messages[0]["message"]
+        self.assertIn("没有可用的 CUDA GPU", message)
+        self.assertNoDialogsExceptRefusal()
+        self.assertEqual(list(self.fake.data.masks), [])
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.tmp, "slip_jobs")))
+
     def test_run_refused_when_own_session_target_not_on_image(self):
         # 自己的 worker 活着但结果 Mask 不在当前影像上：给出指向该会话
         # 的提示（含 Mask 名），且不误关后台会话。
@@ -381,6 +400,58 @@ class SlipRunRefusalTests(SlipMimicsTests):
                 os.path.isfile(os.path.join(job_dir, "close.json")))
         finally:
             self.runtime_common.release_resource_lock(lock_path, token)
+
+
+# ---------------------------------------------------------------------------
+# (b2) CUDA 能力预检：确证结果缓存、探测失败不拦启动（SL06）
+# ---------------------------------------------------------------------------
+
+class SlipCudaProbeTests(SlipMimicsTests):
+    """_external_cuda_available 的探测语义，不拉起真实子进程。"""
+
+    def run_probe(self, returncode, stdout):
+        calls = []
+
+        class FakeProcess(object):
+            def communicate(self, timeout=None):
+                return (stdout, b"")
+
+        FakeProcess.returncode = returncode
+        original_popen = self.runtime.subprocess.Popen
+        original_python = self.runtime_common.find_external_python
+        self.runtime.subprocess.Popen = lambda command, **kw: (
+            calls.append(command), FakeProcess())[1]
+        self.runtime_common.find_external_python = lambda *a, **k: sys.executable
+        try:
+            result = self.runtime._external_cuda_available("fake_root")
+        finally:
+            self.runtime.subprocess.Popen = original_popen
+            self.runtime_common.find_external_python = original_python
+        return result, calls
+
+    def test_probe_reports_no_cuda_and_caches_result(self):
+        result, calls = self.run_probe(0, b"0\n")
+        self.assertIs(result, False)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("torch.cuda.is_available", calls[0][2])
+        # 确证结果按进程缓存：第二次探测不再拉起子进程。
+        result_again, calls_again = self.run_probe(0, b"1\n")
+        self.assertIs(result_again, False)
+        self.assertEqual(calls_again, [])
+
+    def test_probe_reports_cuda_available(self):
+        result, calls = self.run_probe(0, b"1\n")
+        self.assertIs(result, True)
+        self.assertEqual(len(calls), 1)
+
+    def test_probe_failure_is_inconclusive_and_not_cached(self):
+        # 探测本身失败（如 import torch 崩溃）返回 None：不确定时绝不
+        # 拦启动，让 worker 报出真实错误；None 也不缓存。
+        result, _ = self.run_probe(1, b"")
+        self.assertIsNone(result)
+        result_again, calls_again = self.run_probe(0, b"0\n")
+        self.assertIs(result_again, False)
+        self.assertEqual(len(calls_again), 1)
 
 
 # ---------------------------------------------------------------------------
