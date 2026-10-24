@@ -795,6 +795,25 @@ def _handle_result(image, target, state, interactive=True):
             _save_job(state)
             return "ready"
 
+    if action == "undo" and int(result.get("action_history_len") or 0) <= 0:
+        # 上游把“撤销第一个提示”实现为回到空模型状态，其输出是空 Mask；
+        # 本会话的基线是会话开始时的 Mask 内容——非空基线不能被一次撤销
+        # 清空，退到零条提示时恢复基线而不是应用空输出。
+        nnm._restore_base(target, state.get("base_path"), state.get("shape"))
+        _delete_visual_objects(state)
+        state["pending_sequence"] = None
+        state["applied_sequence"] = int(sequence)
+        state["interactions"] = []
+        state["action_history_len"] = 0
+        state["expected_target_sha256"] = nnm._mask_sha256(
+            target, state.get("shape"))
+        state["status"] = "ready"
+        state["updated_at_epoch"] = time.time()
+        _save_job(state)
+        _log(logging.INFO,
+             "SLIP undo to zero prompts; session base Mask restored.")
+        return "applied"
+
     nnm._set_mask_from_u8(target, output_path, state.get("shape"))
     nnm._make_mask_visible(target)
     _delete_visual_objects(state)

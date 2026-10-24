@@ -729,6 +729,56 @@ class SlipHandleResultTests(SlipMimicsTests):
             state["interactions"], [{"click": [0, 0, 0], "label": 1}])
         self.assertEqual(state["action_history_len"], 1)
 
+    def test_undo_to_zero_with_nonempty_base_restores_base(self):
+        # SL03：上游把"撤销第一个提示"实现为回到空模型状态（空输出），
+        # 但本会话的基线是会话开始时的 Mask 内容——非空基线不能被一次
+        # 撤销清空，结果必须逐体素等于基线而不是模型的空输出。
+        base_pattern = _u8_pattern_buffer(SHAPE, lambda x, y, z: x == 0)
+        base_path = os.path.join(self.tmp, "base.u8")
+        with open(base_path, "wb") as handle:
+            handle.write(base_pattern.tobytes())
+        state = self.make_state(
+            self.job_dir, self.image, self.target,
+            base_path=base_path,
+            interactions=[{"click": [0, 0, 0], "label": 1}],
+            action_history_len=1)
+        empty_output = self.write_output(bytes(_voxel_count(SHAPE)))
+        self.write_result(self.job_dir, 1, {
+            "status": "refined", "output_path": empty_output, "voxels": 0,
+            "action": "undo", "action_history_len": 0})
+        self.assertEqual(
+            self.runtime._handle_result(self.image, self.target, state),
+            "applied")
+        self.assertEqual(
+            self.target.get_voxel_buffer().tobytes(), base_pattern.tobytes())
+        self.assertEqual(state["interactions"], [])
+        self.assertEqual(state["action_history_len"], 0)
+        self.assertIsNone(state["pending_sequence"])
+        self.assertEqual(
+            state["expected_target_sha256"],
+            self.nnm._mask_sha256(self.target, list(SHAPE)))
+
+    def test_undo_to_zero_with_empty_base_empties_mask(self):
+        # 空基线的同一流程才应为空（与上游语义一致，不引入额外对话框）。
+        base_path = os.path.join(self.tmp, "base.u8")
+        with open(base_path, "wb") as handle:
+            handle.write(bytes(_voxel_count(SHAPE)))
+        state = self.make_state(
+            self.job_dir, self.image, self.target,
+            base_path=base_path,
+            interactions=[{"click": [0, 0, 0], "label": 1}],
+            action_history_len=1)
+        empty_output = self.write_output(bytes(_voxel_count(SHAPE)))
+        self.write_result(self.job_dir, 1, {
+            "status": "refined", "output_path": empty_output, "voxels": 0,
+            "action": "undo", "action_history_len": 0})
+        self.assertEqual(
+            self.runtime._handle_result(self.image, self.target, state),
+            "applied")
+        self.assertEqual(self.target.number_of_pixels, 0)
+        self.assertEqual(state["interactions"], [])
+        self.assertEqual(state["action_history_len"], 0)
+
     def test_missing_output_file_raises(self):
         state = self.make_state(self.job_dir, self.image, self.target)
         self.write_result(self.job_dir, 1, {
