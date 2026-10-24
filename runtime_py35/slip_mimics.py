@@ -210,6 +210,57 @@ def _state_worker_alive(state):
         "closing", "closed", "failed", "expired")
 
 
+def _find_own_slip_job(gpu_holder):
+    """gpu.lock 持有者是本项目的 SLIP worker 时返回其 job 状态。
+
+    监控定时器失效（脚本错误停止、Mimics 窗口关闭重开）后，用户重新
+    运行 SLIP 入口是取回会话的唯一途径。这里用 gpu.lock 载荷里的 pid
+    与 job.json 里记录的 worker pid 匹配来识别“自己的”会话。
+    """
+    if not gpu_holder:
+        return None
+    try:
+        holder_pid = int(gpu_holder.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if holder_pid <= 0:
+        return None
+    jobs_root = _jobs_root()
+    if not os.path.isdir(jobs_root):
+        return None
+    for child in sorted(os.listdir(jobs_root)):
+        job_dir = os.path.join(jobs_root, child)
+        if os.path.isfile(os.path.join(job_dir, "close.json")):
+            continue
+        state = runtime_common.read_json(_job_state_path(job_dir))
+        if not state:
+            continue
+        if state.get("status") in (
+                "closing", "closed", "discarded", "failed", "expired"):
+            continue
+        try:
+            if int(state.get("pid") or 0) != holder_pid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        state["_job_dir"] = job_dir
+        if _state_worker_alive(state):
+            return state
+    return None
+
+
+def _session_target_mask(image, state):
+    """按 target_guid + 会话元数据找到当前影像上该会话的结果 Mask。"""
+    for mask in nnm._masks_for_image(image):
+        if nnm._object_id(mask) != state.get("target_guid"):
+            continue
+        if nnm._metadata_get(
+                mask, ASYNC_JOB_METADATA, "") != state.get("_job_dir"):
+            continue
+        return mask
+    return None
+
+
 def _enqueue_command(state, payload):
     sequence = nnm._next_async_sequence(state["_job_dir"])
     command = dict(payload)
@@ -1110,7 +1161,8 @@ def run():
         return 1
     gpu_holder = runtime_common.active_resource_lock(
         _project_root(), "gpu.lock")
-    if gpu_holder:
+    own_state = _find_own_slip_job(gpu_holder)
+    if gpu_holder and own_state is None:
         mimics.dialogs.message_box(
             message=(
                 "GPU 当前正被 {0} 占用。\n\n"
@@ -1124,6 +1176,26 @@ def run():
             ui_blocking=False,
         )
         return 1
+    if own_state is not None:
+        # 自己的 SLIP worker 持有 gpu.lock：监控定时器失效后的恢复入口。
+        # 只允许取回该会话（继续提示或结束并释放资源），不新建会话。
+        target = _session_target_mask(image, own_state)
+        if target is None:
+            mimics.dialogs.message_box(
+                message=(
+                    "SLIP 已有一个进行中的会话（结果 Mask：{0}），GPU 正由"
+                    "其后台进程占用。\n\n请切换到该会话所在的影像序列后重新"
+                    "运行 SLIP 以继续或结束它；或在管理菜单 > 停止所有自有"
+                    "服务中停止它。"
+                ).format(str(own_state.get("target_name") or "")),
+                title=TITLE,
+                ui_blocking=False,
+            )
+            return 1
+        return _run_session(
+            image, target, target,
+            auto_created=bool(own_state.get("auto_created")),
+            write_mode=str(own_state.get("write_mode") or "in_place"))
     session = _select_session_target(image)
     source = session["source"]
     target = session["target"]

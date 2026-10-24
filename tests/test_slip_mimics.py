@@ -8,6 +8,9 @@ never spawning the external worker.  Covered failure paths:
 
 - image validation (dtype / modality / HU mapping),
 - run() refusals while another task holds the mask buffer or gpu.lock,
+- run() resumes its own live session when its own worker holds gpu.lock
+  (monitor-timer-loss recovery: prompt history kept, or pointed refusal
+  when the session's result Mask is not on the active image),
 - job state load/save (terminal jobs are not resumed),
 - result handling: dead worker, worker errors, project switch, identity
   mismatch, manual mask change, empty prediction, unexpected statuses,
@@ -280,8 +283,24 @@ class SlipRunRefusalTests(SlipMimicsTests):
         # boxes (write mode / prompts) may have appeared.
         self.assertEqual(self.fake.dialogs.questions, [])
 
+    def patch_jobs_root(self):
+        """把 job 扫描限制在本测试的临时目录内（hermeticity）。"""
+        jobs_root = os.path.join(self.tmp, "slip_jobs")
+        self.runtime._jobs_root = lambda root=None: jobs_root
+        return jobs_root
+
+    def acquire_gpu_lock_as_own_worker(self):
+        # 模拟 SLIP worker 自己持有 gpu.lock：载荷里的 pid 即本进程。
+        lock_path = self.runtime_common.resource_lock_path(
+            str(self.tmp), "gpu.lock")
+        token = self.runtime_common.acquire_resource_lock(
+            lock_path, "gpu", "SLIP worker (pid {0})".format(os.getpid()))
+        self.assertTrue(token)
+        return lock_path, token
+
     def test_run_refused_while_gpu_lock_is_held(self):
         image = self.make_image()
+        self.patch_jobs_root()
         lock_path = self.runtime_common.resource_lock_path(
             str(self.tmp), "gpu.lock")
         token = self.runtime_common.acquire_resource_lock(
@@ -295,6 +314,71 @@ class SlipRunRefusalTests(SlipMimicsTests):
             self.assertIn("nnInteractive session", message)
             self.assertEqual(self.fake.dialogs.questions, [])
             self.assertEqual(list(self.fake.data.masks), [])
+        finally:
+            self.runtime_common.release_resource_lock(lock_path, token)
+
+    def test_run_resumes_own_session_when_own_worker_holds_gpu_lock(self):
+        # 监控定时器失效后重新运行 SLIP 入口：自己的 worker 持有 gpu.lock
+        # 时必须能取回会话——提示历史保留（撤销/重置入口仍在），完成时
+        # 正常关闭，而不是被“GPU 被占用”拒之门外。
+        image = self.make_image()
+        target = self.make_target(image)
+        jobs_root = self.patch_jobs_root()
+        job_dir = os.path.join(jobs_root, "job_own")
+        for sub in ("inputs", "commands", "results"):
+            os.makedirs(os.path.join(job_dir, sub))
+        state = self.make_state(
+            job_dir, image, target,
+            status="ready", pending_sequence=None, applied_sequence=1,
+            pid=os.getpid(),
+            interactions=[[1, 1, 1]], action_history_len=1)
+        self.runtime._save_job(state)
+        self.nnm._metadata_set(
+            target, self.runtime.ASYNC_JOB_METADATA, job_dir)
+        lock_path, token = self.acquire_gpu_lock_as_own_worker()
+        try:
+            self.answer(self.runtime.BUTTON_FINISH)
+            self.assertEqual(self.runtime.run(), 0)
+            menu = self.fake.dialogs.questions[0]
+            buttons = menu["buttons"].split(";")
+            self.assertIn(self.runtime.BUTTON_UNDO, buttons)
+            self.assertIn(self.runtime.BUTTON_RESET, buttons)
+            with open(os.path.join(job_dir, "close.json"),
+                      encoding="utf-8") as handle:
+                self.assertEqual(
+                    json.load(handle)["reason"], "user_finished")
+            # 会话被取回而不是另起炉灶。
+            self.assertEqual(os.listdir(jobs_root), ["job_own"])
+            self.assertEqual(
+                self.nnm._metadata_get(
+                    target, self.runtime.ASYNC_JOB_METADATA, ""), "")
+        finally:
+            self.runtime_common.release_resource_lock(lock_path, token)
+
+    def test_run_refused_when_own_session_target_not_on_image(self):
+        # 自己的 worker 活着但结果 Mask 不在当前影像上：给出指向该会话
+        # 的提示（含 Mask 名），且不误关后台会话。
+        image = self.make_image()
+        other = self.make_target(image)
+        jobs_root = self.patch_jobs_root()
+        job_dir = os.path.join(jobs_root, "job_elsewhere")
+        for sub in ("inputs", "commands", "results"):
+            os.makedirs(os.path.join(job_dir, sub))
+        state = self.make_state(
+            job_dir, image, other,
+            status="ready", pending_sequence=None, pid=os.getpid(),
+            target_guid="bogus-guid", target_name="另一个序列的 AI 草稿")
+        self.runtime._save_job(state)
+        lock_path, token = self.acquire_gpu_lock_as_own_worker()
+        try:
+            self.assertEqual(self.runtime.run(), 1)
+            self.assertEqual(len(self.fake.dialogs.messages), 1)
+            message = self.fake.dialogs.messages[0]["message"]
+            self.assertIn("进行中的会话", message)
+            self.assertIn("另一个序列的 AI 草稿", message)
+            self.assertEqual(self.fake.dialogs.questions, [])
+            self.assertFalse(
+                os.path.isfile(os.path.join(job_dir, "close.json")))
         finally:
             self.runtime_common.release_resource_lock(lock_path, token)
 
