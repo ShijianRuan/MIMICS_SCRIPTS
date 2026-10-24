@@ -11,7 +11,9 @@
    （torch 2.7.1+cu128，支持到 sm_120）即可（使用「RTX50系列GPU修复.bat」）。
 
 本脚本负责替换与回滚，替换时把当前 torch/torchvision 目录改名为 .bak
-保留（不复制，不占双倍空间），随时可恢复默认状态。
+保留（不复制，不占双倍空间），随时可恢复默认状态。恢复前会校验备份
+完整性（torch/torchvision 包目录与元数据成套且内容在）和进程占用：
+备份不完整或有进程占用时拒绝改动，绝不先删除当前可用的安装。
 
 用法：
   python switch_gpu_torch.py           检查并切换到 cu118（旧驱动）
@@ -187,55 +189,107 @@ def backup_current(name):
     return renamed
 
 
-def restore_backups():
-    """把本脚本创建的 .bak 备份改回原名（其他来源的 .bak 不动）。"""
-    restored = []
-    for entry in os.listdir(ENV_SITE):
-        if not entry.endswith(".bak"):
-            continue
-        base = entry[:-4]  # 去掉 .bak
-        if not (base == "torch" or base == "torchvision"
-                or (base.startswith("torch-") and not base.startswith("torchvision"))
-                or base.startswith("torchvision-")):
-            continue
-        src = os.path.join(ENV_SITE, entry)
-        dst = os.path.join(ENV_SITE, base)
-        if os.path.exists(dst):
-            _remove(dst)
-        os.rename(src, dst)
-        restored.append(dst)
-    return restored
+# 恢复过程中暂存当前安装的后缀（换回备份成功、探测跑完后再清理）
+STAGING_SUFFIX = ".restore-staging"
 
 
-def has_pending_backup():
-    """有尚未恢复的 .bak（上次切换后没 restore），此时不能再次切换。"""
-    if not os.path.isdir(ENV_SITE):
+def _is_active_torch_entry(name):
+    """torch/torchvision 的活动条目（包目录或 dist-info，不含备份/暂存）。"""
+    if name.endswith(".bak") or name.endswith(STAGING_SUFFIX):
         return False
+    return (name in ("torch", "torchvision")
+            or (name.startswith("torch-") and not name.startswith("torchvision"))
+            or name.startswith("torchvision-"))
+
+
+def _is_backup_entry(name):
+    """本脚本产生的 .bak 备份条目（其他来源的 .bak 不动）。"""
+    if not name.endswith(".bak"):
+        return False
+    base = name[:-4]  # 去掉 .bak
+    return (base in ("torch", "torchvision")
+            or (base.startswith("torch-") and not base.startswith("torchvision"))
+            or base.startswith("torchvision-"))
+
+
+def backup_inventory():
+    """检查 .bak 备份是否构成一套完整可恢复的默认安装，返回缺失项列表。
+
+    空列表 = 完整。旧检查只看"存在任意 .bak"：外部复制/中途断电留下的
+    部分备份（只剩 dist-info、缺 torchvision、目录被掏空）同样放行，
+    restore 却先把当前可用的安装删掉——备份不完整时等于毁环境
+    （R91-7 / N01）。只有元数据备份不能证明二进制模块还在。
+    """
+    entries = os.listdir(ENV_SITE) if os.path.isdir(ENV_SITE) else []
+    backups = set(entry[:-4] for entry in entries if _is_backup_entry(entry))
+    missing = []
+    for pkg in ("torch", "torchvision"):
+        if pkg not in backups:
+            missing.append(pkg + "/ 目录备份")
+        else:
+            pkg_dir = os.path.join(ENV_SITE, pkg + ".bak")
+            if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
+                missing.append(pkg + "/ 备份目录损坏（缺 __init__.py）")
+            elif pkg == "torch" and not os.path.isdir(os.path.join(pkg_dir, "lib")):
+                missing.append("torch/ 备份目录损坏（缺 lib/，CUDA DLL 所在）")
+        if not any(b.startswith(pkg + "-") and b.endswith(".dist-info")
+                   for b in backups):
+            missing.append(pkg + " 的 dist-info 元数据备份")
+    return missing
+
+
+def swap_backups_in():
+    """暂存当前安装、把 .bak 备份换回原名；绝不先删除任何文件。
+
+    旧流程先删当前安装再恢复备份，一旦恢复中途失败或备份残缺，可用的
+    安装已删、环境彻底损坏。这里先把当前条目改名进暂存区，再把备份换
+    回原名；任一步失败按相反顺序回滚，保证操作前在场的一套文件操作后
+    仍在场（R91-7 / N01）。返回 (restored_paths, error)。
+    """
+    staged = []
+    restored = []
+    try:
+        for entry in sorted(os.listdir(ENV_SITE)):
+            if not _is_active_torch_entry(entry):
+                continue
+            src = os.path.join(ENV_SITE, entry)
+            dst = src + STAGING_SUFFIX
+            if os.path.exists(dst):
+                _remove(dst)
+            os.rename(src, dst)
+            staged.append((dst, src))
+        for entry in sorted(os.listdir(ENV_SITE)):
+            if not _is_backup_entry(entry):
+                continue
+            src = os.path.join(ENV_SITE, entry)
+            dst = os.path.join(ENV_SITE, entry[:-4])
+            os.rename(src, dst)
+            restored.append((dst, src))
+    except OSError as exc:
+        # 回滚：已换回的备份收回去，已暂存的当前版本放回来。
+        for dst, src in reversed(restored):
+            try:
+                if not os.path.exists(src):
+                    os.rename(dst, src)
+            except OSError:
+                _log("!! 回滚失败，请勿运行 Mimics 并检查: {0}".format(dst))
+        for dst, src in reversed(staged):
+            try:
+                if not os.path.exists(src):
+                    os.rename(dst, src)
+            except OSError:
+                _log("!! 回滚失败，请勿运行 Mimics 并检查: {0}".format(dst))
+        return [], "恢复备份失败（{0}），已回滚，环境保持原状".format(exc)
+    return [dst for dst, _src in restored], None
+
+
+def cleanup_staging():
+    """清掉暂存条目——仅在换回的安装已就位、探测已跑之后调用。"""
+    if not os.path.isdir(ENV_SITE):
+        return
     for entry in os.listdir(ENV_SITE):
-        if not entry.endswith(".bak"):
-            continue
-        base = entry[:-4]  # 去掉 .bak
-        if (base == "torch" or base == "torchvision"
-                or (base.startswith("torch-") and not base.startswith("torchvision"))
-                or base.startswith("torchvision-")):
-            return True
-    return False
-
-
-def remove_variant_files():
-    """切回默认时清掉已装的 cu118/cu128 torch/torchvision（.bak 备份保留）。"""
-    removed = []
-    for entry in list(os.listdir(ENV_SITE)):
-        if entry.endswith(".bak"):
-            continue  # 备份由 restore_backups() 恢复，这里绝不能删
-        if entry in ("torch", "torchvision"):
+        if entry.endswith(STAGING_SUFFIX):
             _remove(os.path.join(ENV_SITE, entry))
-            removed.append(entry)
-        elif (entry.startswith("torch-") and not entry.startswith("torchvision")) \
-                or entry.startswith("torchvision-"):
-            _remove(os.path.join(ENV_SITE, entry))
-            removed.append(entry)
-    return removed
 
 
 def pip_install_torch(wheels_dir, pins):
@@ -303,22 +357,31 @@ def _switch(variant):
     if current_torch in ("cu118", "cu128"):
         # 另一个变体处于活动状态：先恢复默认 cu124，再执行本次切换，
         # 保证 .bak 里备份的始终是默认版本，restore 后回到 cu124。
-        if has_pending_backup():
-            _log("检测到当前使用 {0}，先恢复默认 cu124 再切换…".format(current_torch))
-            remove_variant_files()
-            restore_backups()
-        else:
-            _log("!! 当前是非默认版本（{0}）但没有可恢复的备份，环境状态异常；"
-                 "请先运行「切回默认GPU.bat」，若仍异常请重新解压部署包。".format(current_torch))
+        missing = backup_inventory()
+        if missing:
+            _log("!! 当前是非默认版本（{0}），但默认版本的备份不完整（缺: {1}），"
+                 "环境状态异常。为避免毁坏环境，本次不做任何改动。".format(
+                     current_torch, "、".join(missing)))
+            _log("   请重新拷贝/解压一份完整部署包覆盖本目录后再试。")
             return 1
+        _log("检测到当前使用 {0}，先恢复默认 cu124 再切换…".format(current_torch))
+        restored, error = swap_backups_in()
+        if error:
+            _log("!! " + error)
+            return 1
+        cleanup_staging()
 
     _log("=> 切换中...")
     backup_current("torch")
     backup_current("torchvision")
     if not pip_install_torch(wheels_dir, pins):
         _log("!! 安装失败，尝试回滚...")
-        remove_variant_files()
-        restore_backups()
+        restored, error = swap_backups_in()
+        if error:
+            _log("!! " + error)
+        else:
+            cleanup_staging()
+            _log("已回滚到默认 cu124。")
         return 1
     probe2 = cuda_probe()
     _log("切换后 GPU 状态: {0}".format(json.dumps(probe2, ensure_ascii=False)))
@@ -347,26 +410,50 @@ def main():
     _log("当前 torch 版本: {0}".format(versions or "未找到"))
 
     if args.action == "restore":
+        # 与 switch 相同的占用预检：被进程锁住的 DLL 会让改名中途失败，
+        # 留下残缺目录（N01）。
+        holders, err = check_no_env_users()
+        if err:
+            _log("!! " + err)
+            return 1
+        if holders:
+            _log("!! 以下进程正在使用本环境，请先全部关闭（Mimics、拖拽导入小窗口等）再运行：")
+            for pid, cmd in holders:
+                _log("   PID {0}: {1}".format(pid, cmd))
+            return 1
         current_torch = (versions or {}).get("torch")
-        if current_torch not in ("cu118", "cu128") and not has_pending_backup():
+        missing = backup_inventory()
+        if current_torch in ("cu118", "cu128"):
+            if missing:
+                # 备份不完整或丢失（部署目录被外部工具回退/覆盖、上次切换
+                # 中途断电等）时绝不能把还能用的 torch 删掉——删了环境就
+                # 彻底坏了（R91-7 / N01）。
+                _log("!! 当前使用 {0}，但默认版本（cu124）的备份不完整（缺: {1}），"
+                     "无法恢复默认。为避免毁坏环境，本次不做任何改动。".format(
+                         current_torch, "、".join(missing)))
+                _log("   请重新拷贝/解压一份完整部署包覆盖本目录，"
+                     "或先用对应修复 bat 重装后再运行本脚本 restore。")
+                return 1
+        elif missing:
+            if not os.path.isdir(os.path.join(ENV_SITE, "torch")):
+                _log("!! 当前没有可用的 torch，也没有完整备份，环境状态异常。")
+                _log("   请重新拷贝/解压一份完整部署包覆盖本目录。")
+                return 1
+            # 当前已是默认版本：无事可做。残留的不完整 .bak 只能是外部
+            # 复制/中断留下的垃圾，绝不能像旧逻辑那样触发"删除当前安装"。
             _log("当前已是默认版本（cu124），无需恢复。")
             probe = cuda_probe()
             _log("当前 GPU 状态: " + json.dumps(probe, ensure_ascii=False))
+            cleanup_staging()
             return 0
-        if current_torch in ("cu118", "cu128") and not has_pending_backup():
-            # .bak 丢失（如部署目录被外部工具回退/覆盖）时绝不能把还能用的
-            # torch 删掉——删了环境就彻底坏了。保留现状并指路重装。
-            _log("!! 当前使用 {0}，但默认版本（cu124）的备份 .bak 丢失，"
-                 "无法恢复默认。为避免删坏环境，本次不做任何改动。".format(current_torch))
-            _log("   请重新拷贝/解压一份完整部署包覆盖本目录，"
-                 "或先用对应修复 bat 重装后再运行本脚本 restore。")
+        restored, error = swap_backups_in()
+        if error:
+            _log("!! " + error)
             return 1
-        removed = remove_variant_files()
-        restored = restore_backups()
-        _log("已移除 cu118/cu128（{0} 项）并恢复默认: {1}".format(
-            len(removed), restored or "无备份可恢复"))
+        _log("已恢复默认 cu124: {0}".format(restored or "无备份可恢复"))
         probe = cuda_probe()
         _log("恢复后检查: " + json.dumps(probe, ensure_ascii=False))
+        cleanup_staging()
         return 0
 
     if not os.path.isdir(os.path.join(ENV_SITE, "torch")):

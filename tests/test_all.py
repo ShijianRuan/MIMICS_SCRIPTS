@@ -15743,79 +15743,197 @@ class TestGpuRepairLauncher(unittest.TestCase):
         finally:
             sys.argv = old_argv
 
+    def _make_active_install(self, tmp, variant):
+        """一套活动的 torch/torchvision 安装（变体或默认 cu124）。
+
+        __init__.py 里写入版本标记，断言时可以区分"在场的是哪一套文件"。"""
+        (tmp / "torch" / "lib").mkdir(parents=True)
+        (tmp / "torch" / "__init__.py").write_text(variant, encoding="ascii")
+        (tmp / "torchvision").mkdir()
+        (tmp / "torchvision" / "__init__.py").write_text(variant, encoding="ascii")
+        (tmp / "torch-2.6.0+{0}.dist-info".format(variant)).mkdir()
+        (tmp / "torchvision-0.21.0+{0}.dist-info".format(variant)).mkdir()
+
+    def _make_backup_set(self, tmp):
+        """一套完整可恢复的默认（cu124）备份：包目录内容 + 元数据成套。"""
+        (tmp / "torch.bak" / "lib").mkdir(parents=True)
+        (tmp / "torch.bak" / "__init__.py").write_text("cu124", encoding="ascii")
+        (tmp / "torchvision.bak").mkdir()
+        (tmp / "torchvision.bak" / "__init__.py").write_text("cu124", encoding="ascii")
+        (tmp / "torch-2.6.0+cu124.dist-info.bak").mkdir()
+        (tmp / "torchvision-0.21.0+cu124.dist-info.bak").mkdir()
+
+    def _run_main_on(self, tmp, action, probe=None, users=None, extra=None):
+        """加载脚本模块、把 ENV_SITE 指到 tmp 后运行 main(action)。
+
+        cuda_probe / check_no_env_users 必须打桩：前者会真启动 python_env，
+        后者会真跑 PowerShell，且回归矩阵父进程的命令行里就含项目路径，
+        会被误报成环境占用者。"""
+        module = self._load_switch_module()
+        saved = {"ENV_SITE": module.ENV_SITE,
+                 "cuda_probe": module.cuda_probe,
+                 "check_no_env_users": module.check_no_env_users}
+        for key, value in (extra or {}).items():
+            saved[key] = getattr(module, key)
+            setattr(module, key, value)
+        module.ENV_SITE = str(tmp)
+        module.cuda_probe = probe or (lambda: {"avail": True, "torch": "test"})
+        module.check_no_env_users = users or (lambda: ([], None))
+        try:
+            return self._run_switch_main(module, action)
+        finally:
+            for key, value in saved.items():
+                setattr(module, key, value)
+
+    def _active_marker(self, tmp):
+        return (tmp / "torch" / "__init__.py").read_text(
+            encoding="ascii").strip()
+
+    def _assert_no_swap_leftovers(self, tmp):
+        for suffix in (".bak", ".restore-staging"):
+            self.assertFalse(
+                any(p.name.endswith(suffix) for p in tmp.iterdir()),
+                "意外的 {0} 残留".format(suffix))
+
     def test_restore_on_default_is_idempotent(self):
         """R85-2: 在已是默认 cu124 的环境上运行 restore 必须是无操作——
         曾把 torch 整个删掉（真机复现：连续两次 restore 删光 torch）。"""
-        module = self._load_switch_module()
         tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_idem_"))
-        for name in ("torch", "torch-2.6.0+cu124.dist-info",
-                     "torchvision", "torchvision-0.21.0+cu124.dist-info"):
-            (tmp / name).mkdir()
-        old_site = module.ENV_SITE
-        old_probe = module.cuda_probe
-        module.ENV_SITE = str(tmp)
-        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
         try:
-            rc = self._run_switch_main(module, "restore")
+            self._make_active_install(tmp, "cu124")
+            rc = self._run_main_on(tmp, "restore")
             self.assertEqual(0, rc)
             # 环境保持原样：torch/torchvision 目录仍在，没产生 .bak
-            self.assertTrue((tmp / "torch").is_dir())
+            self.assertEqual("cu124", self._active_marker(tmp))
             self.assertTrue((tmp / "torchvision").is_dir())
             self.assertTrue((tmp / "torch-2.6.0+cu124.dist-info").is_dir())
-            self.assertFalse(any(p.name.endswith(".bak") for p in tmp.iterdir()))
+            self._assert_no_swap_leftovers(tmp)
         finally:
-            module.ENV_SITE = old_site
-            module.cuda_probe = old_probe
             shutil.rmtree(str(tmp), ignore_errors=True)
 
     def test_restore_without_backup_keeps_working_variant(self):
         """变体活动但 .bak 备份丢失（部署目录被外部回退/覆盖）时，restore
         必须拒绝而不是把还能用的 torch 删掉——删了环境就彻底坏了。"""
-        module = self._load_switch_module()
         tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_nobak_"))
-        for name in ("torch", "torch-2.6.0+cu118.dist-info",
-                     "torchvision", "torchvision-0.21.0+cu118.dist-info"):
-            (tmp / name).mkdir()
-        old_site = module.ENV_SITE
-        old_probe = module.cuda_probe
-        module.ENV_SITE = str(tmp)
-        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
         try:
-            rc = self._run_switch_main(module, "restore")
+            self._make_active_install(tmp, "cu118")
+            rc = self._run_main_on(tmp, "restore")
             self.assertEqual(1, rc)
             # 环境原样保留：可用的 cu118 torch 没被删除
-            self.assertTrue((tmp / "torch").is_dir())
+            self.assertEqual("cu118", self._active_marker(tmp))
             self.assertTrue((tmp / "torchvision").is_dir())
             self.assertTrue((tmp / "torch-2.6.0+cu118.dist-info").is_dir())
+            self._assert_no_swap_leftovers(tmp)
         finally:
-            module.ENV_SITE = old_site
-            module.cuda_probe = old_probe
             shutil.rmtree(str(tmp), ignore_errors=True)
 
+    def test_restore_rejects_partial_backup_and_keeps_working_variant(self):
+        """R91-7: 部分备份（只剩元数据/仅 torch/缺 torchvision 元数据/目录
+        被掏空）时必须拒绝恢复且当前可用的变体原样保留——旧逻辑见任意
+        .bak 就先把当前安装删掉，等于毁环境。"""
+
+        def drop(*paths):
+            def mutate(tmp):
+                for path in paths:
+                    shutil.rmtree(str(tmp / path))
+            return mutate
+
+        def gut_torch_bak(tmp):
+            shutil.rmtree(str(tmp / "torch.bak"))
+            (tmp / "torch.bak").mkdir()  # 目录在、内容空
+
+        cases = {
+            "只剩 dist-info 元数据备份": drop("torch.bak", "torchvision.bak"),
+            "仅 torch 备份（缺 torchvision 全套）": drop(
+                "torchvision.bak",
+                "torchvision-0.21.0+cu124.dist-info.bak"),
+            "缺 torchvision 的 dist-info 备份": drop(
+                "torchvision-0.21.0+cu124.dist-info.bak"),
+            "torch.bak 目录被掏空": gut_torch_bak,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_partial_"))
+                try:
+                    self._make_active_install(tmp, "cu118")
+                    self._make_backup_set(tmp)
+                    mutate(tmp)
+                    rc = self._run_main_on(tmp, "restore")
+                    self.assertEqual(1, rc)
+                    # 拒绝时当前可用的 cu118 原样在场，默认版未被换入
+                    self.assertEqual("cu118", self._active_marker(tmp))
+                    self.assertTrue(
+                        (tmp / "torch-2.6.0+cu118.dist-info").is_dir())
+                    self.assertFalse(
+                        (tmp / "torch-2.6.0+cu124.dist-info").exists())
+                    self.assertFalse(any(
+                        p.name.endswith(".restore-staging")
+                        for p in tmp.iterdir()))
+                finally:
+                    shutil.rmtree(str(tmp), ignore_errors=True)
+
+    def test_restore_refuses_while_env_in_use(self):
+        """R91-7: restore 与 switch 使用相同占用预检——被进程锁住的 DLL
+        会让改名中途失败留下残缺目录，占用/检查失败时不得进入改动步骤。"""
+        for label, users in (
+            ("进程占用中", lambda: ([("4242", "python.exe ...MIMICS_SCRIPTS...")],
+                                    None)),
+            ("占用检查失败", lambda: (None, "无法检查进程占用")),
+        ):
+            with self.subTest(case=label):
+                tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_inuse_"))
+                try:
+                    self._make_active_install(tmp, "cu118")
+                    self._make_backup_set(tmp)
+                    rc = self._run_main_on(tmp, "restore", users=users)
+                    self.assertEqual(1, rc)
+                    # 一步都没动：变体在场、备份仍在
+                    self.assertEqual("cu118", self._active_marker(tmp))
+                    self.assertTrue((tmp / "torch.bak").is_dir())
+                    self.assertFalse(any(
+                        p.name.endswith(".restore-staging")
+                        for p in tmp.iterdir()))
+                finally:
+                    shutil.rmtree(str(tmp), ignore_errors=True)
+
     def test_restore_removes_variant_and_restores_default(self):
-        """R85-2: cu118/cu128 活动状态 + cu124 备份时，restore 清掉变体、
-        恢复默认 cu124，且 .bak 不再残留。"""
-        module = self._load_switch_module()
+        """R85-2: cu118/cu128 活动状态 + 完整 cu124 备份时，restore 换回
+        默认安装（暂存式换回，不先删除），变体清掉且无 .bak/暂存残留。"""
         tmp = Path(tempfile.mkdtemp(prefix="gpu_restore_var_"))
-        for name in ("torch", "torch-2.6.0+cu118.dist-info",
-                     "torchvision", "torchvision-0.21.0+cu118.dist-info",
-                     "torch.bak", "torch-2.6.0+cu124.dist-info.bak",
-                     "torchvision.bak", "torchvision-0.21.0+cu124.dist-info.bak"):
-            (tmp / name).mkdir()
-        old_site = module.ENV_SITE
-        old_probe = module.cuda_probe
-        module.ENV_SITE = str(tmp)
-        module.cuda_probe = lambda: {"avail": True, "torch": "test"}
         try:
-            rc = self._run_switch_main(module, "restore")
+            self._make_active_install(tmp, "cu118")
+            self._make_backup_set(tmp)
+            rc = self._run_main_on(tmp, "restore")
             self.assertEqual(0, rc)
+            # 换回来的是备份那套文件（标记 cu124），变体条目已清
+            self.assertEqual("cu124", self._active_marker(tmp))
+            self.assertEqual(
+                "cu124",
+                (tmp / "torchvision" / "__init__.py").read_text(
+                    encoding="ascii").strip())
             self.assertTrue((tmp / "torch-2.6.0+cu124.dist-info").is_dir())
-            self.assertTrue((tmp / "torchvision-0.21.0+cu124.dist-info").is_dir())
             self.assertFalse((tmp / "torch-2.6.0+cu118.dist-info").exists())
-            self.assertFalse(any(p.name.endswith(".bak") for p in tmp.iterdir()))
+            self._assert_no_swap_leftovers(tmp)
         finally:
-            module.ENV_SITE = old_site
-            module.cuda_probe = old_probe
+            shutil.rmtree(str(tmp), ignore_errors=True)
+
+    def test_switch_pip_failure_rolls_back_to_default(self):
+        """R91-7: 切换中途 pip 安装失败必须回滚到默认 cu124——旧流程先删
+        当前安装，失败后环境里就什么都不剩了。"""
+        tmp = Path(tempfile.mkdtemp(prefix="gpu_switch_rollback_"))
+        try:
+            self._make_active_install(tmp, "cu124")
+            rc = self._run_main_on(
+                tmp, "switch",
+                probe=lambda: {"avail": False},
+                extra={"pip_install_torch":
+                       lambda wheels_dir, pins: False})
+            self.assertEqual(1, rc)
+            # 默认 cu124 回到活动位置，无任何残留
+            self.assertEqual("cu124", self._active_marker(tmp))
+            self.assertTrue((tmp / "torch-2.6.0+cu124.dist-info").is_dir())
+            self._assert_no_swap_leftovers(tmp)
+        finally:
             shutil.rmtree(str(tmp), ignore_errors=True)
 
 
