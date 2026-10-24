@@ -561,6 +561,58 @@ class SlipHandleResultTests(SlipMimicsTests):
         self.assertEqual(state["action_history_len"], 0)
         self.assertIsNone(state["pending_sequence"])
 
+    def test_reset_with_equal_volume_edit_shows_conflict_restart(self):
+        # SL01：等体素数的边界移动不改变 number_of_pixels，只有内容哈希
+        # 能发现它——reset 回执到达时不得把它静默覆盖回基线。
+        before_edit = _u8_pattern_buffer(
+            SHAPE, lambda x, y, z: (x + y + z) % 2 == 0)
+        self.target.set_voxel_buffer(before_edit)
+        base_path = os.path.join(self.tmp, "base.u8")
+        with open(base_path, "wb") as handle:
+            handle.write(before_edit.tobytes())
+        state = self.make_state(
+            self.job_dir, self.image, self.target,
+            base_path=base_path,
+            interactions=[{"click": [0, 0, 0], "label": 1}],
+            action_history_len=1)
+        # 会话外的人工编辑：体素数相同、位置互补。
+        edited = _u8_pattern_buffer(
+            SHAPE, lambda x, y, z: (x + y + z) % 2 == 1)
+        self.target.set_voxel_buffer(edited)
+        self.assertEqual(
+            self.target.number_of_pixels, before_edit.tobytes().count(1))
+        self.write_result(self.job_dir, 1, {"status": "reset"})
+        self.answer(self.runtime.BUTTON_START_CURRENT)
+        self.assertEqual(
+            self.runtime._handle_result(self.image, self.target, state),
+            "restart")
+        # 人工编辑被保留，没有被 reset 覆盖回基线。
+        self.assertEqual(
+            self.target.get_voxel_buffer().tobytes(), edited.tobytes())
+        with open(os.path.join(self.job_dir, "close.json"),
+                  encoding="utf-8") as handle:
+            close = json.load(handle)
+        self.assertEqual(close["reason"], "manual_mask_change")
+
+    def test_reset_with_equal_volume_edit_cancel_ends_session(self):
+        before_edit = _u8_pattern_buffer(
+            SHAPE, lambda x, y, z: (x + y + z) % 2 == 0)
+        self.target.set_voxel_buffer(before_edit)
+        state = self.make_state(
+            self.job_dir, self.image, self.target,
+            interactions=[{"click": [0, 0, 0], "label": 1}],
+            action_history_len=1)
+        edited = _u8_pattern_buffer(
+            SHAPE, lambda x, y, z: (x + y + z) % 2 == 1)
+        self.target.set_voxel_buffer(edited)
+        self.write_result(self.job_dir, 1, {"status": "reset"})
+        self.answer(self.runtime.BUTTON_CANCEL)
+        self.assertEqual(
+            self.runtime._handle_result(self.image, self.target, state),
+            "ended")
+        self.assertEqual(
+            self.target.get_voxel_buffer().tobytes(), edited.tobytes())
+
     def test_unexpected_result_status_raises(self):
         state = self.make_state(self.job_dir, self.image, self.target)
         self.write_result(self.job_dir, 1, {"status": "weird"})

@@ -656,6 +656,27 @@ def _handle_error_result(target, state, result):
     return "ready"
 
 
+def _manual_mask_change_dialog(target, state):
+    """Mask 在会话外被修改：询问是否从当前 Mask 重启会话。
+
+    返回 restart/ended；两种选择下会话都已关闭、当前 Mask 内容保留。
+    """
+    answer = mimics.dialogs.question_box(
+        message=(
+            "所选 Mask 在 AI 会话之外被修改过（手动编辑或被其他操作"
+            "改变）。\n\n继续应用 AI 结果会覆盖这些修改。\n\n"
+            "是否从当前 Mask 启动新的 AI 会话？"
+        ),
+        buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
+        title=TITLE,
+        ui_blocking=True,
+    )
+    _close_job(target, state, "manual_mask_change")
+    if answer == BUTTON_START_CURRENT:
+        return "restart"
+    return "ended"
+
+
 def _handle_result(image, target, state, interactive=True):
     """消费 pending 结果。返回 waiting/applied/ready/restart/ended。
 
@@ -720,6 +741,11 @@ def _handle_result(image, target, state, interactive=True):
             "SLIP 会话与当前影像/Mask 不匹配；请重新运行 SLIP。")
 
     if status == "reset":
+        # 与 refined 分支共用同一道内容校验关口：用户同意重置的是提交时
+        # 的版本，reset 回执到达前产生的人工编辑同样不能被静默覆盖。
+        current_hash = nnm._mask_sha256(target, state.get("shape"))
+        if current_hash != state.get("expected_target_sha256"):
+            return _manual_mask_change_dialog(target, state)
         nnm._restore_base(target, state.get("base_path"), state.get("shape"))
         _delete_visual_objects(state)
         state["interactions"] = []
@@ -739,20 +765,7 @@ def _handle_result(image, target, state, interactive=True):
 
     current_hash = nnm._mask_sha256(target, state.get("shape"))
     if current_hash != state.get("expected_target_sha256"):
-        answer = mimics.dialogs.question_box(
-            message=(
-                "所选 Mask 在 AI 会话之外被修改过（手动编辑或被其他操作"
-                "改变）。\n\n继续应用 AI 结果会覆盖这些修改。\n\n"
-                "是否从当前 Mask 启动新的 AI 会话？"
-            ),
-            buttons=BUTTON_START_CURRENT + ";" + BUTTON_CANCEL,
-            title=TITLE,
-            ui_blocking=True,
-        )
-        _close_job(target, state, "manual_mask_change")
-        if answer == BUTTON_START_CURRENT:
-            return "restart"
-        return "ended"
+        return _manual_mask_change_dialog(target, state)
 
     output_path = result.get("output_path")
     if not output_path or not os.path.isfile(output_path):
