@@ -38,6 +38,7 @@ INCLUDE_DIRS = [
 INCLUDE_FILES = [
     "mimics_bridge.py",
     "nninteractive_bridge.py",
+    "slip_bridge.py",
     "resource_locks.py",
     "nninteractive_config.json",
     "nninteractive_finetune_config.json",
@@ -79,6 +80,7 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "tools/interactive_algorithms_worker.py",
     "tools/verify_medical_geometry.py",
     "runtime_py35/interactive_algorithms_mimics.py",
+    "runtime_py35/slip_mimics.py",
     "runtime_py35/nnunet_mimics.py",
     "runtime_py35/flexict_mimics.py",
     "runtime_py35/mimics_mask_apply.py",
@@ -263,6 +265,28 @@ def check():
                 _yellow("[--]")
             )
         )
+    # SLIP ships as a pair: the checkpoint is useless without its vendored
+    # dependency directory (slip_models/deps) and vice versa. Both missing
+    # means the deployment simply has no SLIP; exactly one is a broken
+    # half-copy that would only fail at first use on the target machine.
+    slip_checkpoint = PROJECT_ROOT / "slip_models" / "SLIP_ckpt.pth"
+    slip_deps = PROJECT_ROOT / "slip_models" / "deps"
+    if slip_checkpoint.is_file() and slip_deps.is_dir():
+        print("  {} SLIP checkpoint + deps (slip_models/)".format(_green("[OK]")))
+    elif not slip_checkpoint.exists() and not slip_deps.exists():
+        print(
+            "  {} SLIP model resources -- optional entry unavailable".format(
+                _yellow("[--]")
+            )
+        )
+    else:
+        missing = "deps" if not slip_deps.is_dir() else "SLIP_ckpt.pth"
+        print(
+            "  {} slip_models/ incomplete ({} missing) -- checkpoint and deps must ship together".format(
+                _red("[!!]"), missing
+            )
+        )
+        ok = False
     print("\n  {}".format(_green("All checks passed.") if ok else _red("Some checks failed.")))
     return 0 if ok else 1
 
@@ -348,6 +372,31 @@ def pack(output_dir=None, with_env=False):
 
     # Build the list of directories to include
     dirs_to_pack = list(INCLUDE_DIRS)
+    # SLIP model resources (checkpoint + vendored deps, ~1 GB total) are
+    # optional per deployment: pack them when present so the SLIP entry
+    # works out of the box, and say so explicitly when not.
+    slip_models_dir = PROJECT_ROOT / "slip_models"
+    if slip_models_dir.is_dir():
+        has_ckpt = (slip_models_dir / "SLIP_ckpt.pth").is_file()
+        has_deps = (slip_models_dir / "deps").is_dir()
+        if has_ckpt != has_deps:
+            missing = "deps" if not has_deps else "SLIP_ckpt.pth"
+            print(
+                _red(
+                    "slip_models/ is incomplete ({} missing) -- checkpoint and "
+                    "deps must ship together.".format(missing)
+                )
+            )
+            return 1
+        dirs_to_pack.append("slip_models")
+        print(_green("Including slip_models/ (SLIP checkpoint + deps)."))
+    else:
+        print(
+            _yellow(
+                "slip_models/ not found -- the target SLIP entry will report "
+                "missing model weights until it is copied separately."
+            )
+        )
     if with_env:
         dirs_to_pack.append(env_dir_name())
         # Exclude the Python interpreter's own cache and compiled bytecode
@@ -378,6 +427,23 @@ def pack(output_dir=None, with_env=False):
                 p = PROJECT_ROOT / name
                 if p.is_file():
                     zf.write(str(p), name)
+
+        # A silently-skipped file would ship a broken bundle that only fails
+        # on the target machine, so verify every required file made it in.
+        with zipfile.ZipFile(archive, "r") as zf:
+            archived = set(zf.namelist())
+        missing_files = [name for name in INCLUDE_FILES if name not in archived]
+        if missing_files:
+            print(
+                _red("Archive is incomplete -- required files were not packed:")
+            )
+            for name in missing_files:
+                print("    - {}".format(name))
+            try:
+                os.remove(archive)
+            except OSError:
+                pass
+            return 1
 
         size_mb = os.path.getsize(archive) / (1024 * 1024)
         print(_green("Done: {} ({:.0f} MB)".format(archive, size_mb)))
@@ -931,13 +997,28 @@ def offline_bundle():
             shutil.copy2(str(src), str(bundle_dir / name))
             print("  {} {}".format(_green("[+]"), name))
 
-    missing_ui_files = [
-        name for name in REQUIRED_EXTERNAL_UI_FILES
+    slip_models_src = PROJECT_ROOT / "slip_models"
+    if slip_models_src.is_dir():
+        shutil.copytree(
+            str(slip_models_src), str(bundle_dir / "slip_models"),
+            ignore=shutil.ignore_patterns("__pycache__", ".pyc", ".pyo"),
+        )
+        print("  {} slip_models/ (SLIP checkpoint + deps)".format(_green("[+]")))
+    else:
+        print(
+            "  {} slip_models/ not bundled -- the target SLIP entry will "
+            "report missing model weights until it is copied separately.".format(
+                _yellow("[--]")
+            )
+        )
+
+    missing_files = [
+        name for name in list(INCLUDE_FILES) + REQUIRED_EXTERNAL_UI_FILES
         if not (bundle_dir / name).is_file()
     ]
-    if missing_ui_files:
-        print("  {} Offline bundle is missing required UI files:".format(_red("[!!]")))
-        for name in missing_ui_files:
+    if missing_files:
+        print("  {} Offline bundle is missing required files:".format(_red("[!!]")))
+        for name in missing_files:
             print("    - {}".format(name))
         return 1
 

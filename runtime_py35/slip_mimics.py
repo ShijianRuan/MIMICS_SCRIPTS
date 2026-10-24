@@ -310,6 +310,12 @@ def _start_job(image, target, source=None, write_mode="in_place",
         raise RuntimeError(
             "未找到 SLIP 模型文件：{0}\n"
             "请先按部署说明放置 SLIP_ckpt.pth。".format(checkpoint))
+    deps_dir = os.path.join(root, "slip_models", "deps")
+    if not os.path.isdir(deps_dir):
+        raise RuntimeError(
+            "未找到 SLIP 依赖目录：{0}\n"
+            "请按部署说明将 slip_models/deps 与 SLIP_ckpt.pth 一并拷贝。".format(
+                deps_dir))
 
     jobs_root = _jobs_root(root)
     if not os.path.isdir(jobs_root):

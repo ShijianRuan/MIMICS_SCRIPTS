@@ -1036,6 +1036,41 @@ class SlipStartJobFailureTests(SlipMimicsTests):
             self.nnm._metadata_get(
                 target, self.runtime.ASYNC_JOB_METADATA, ""), "")
 
+    def test_missing_deps_dir_fails_before_any_directory(self):
+        """A half-copied deployment (checkpoint without deps) fails fast.
+
+        slip_models/deps carries the vendored dependencies the worker needs
+        at import time; without it the worker would die after the job
+        directory, input snapshot, and GPU lock are already in play. The
+        preflight must reject before any of that state exists (SL05).
+        """
+        image = self.make_image()
+        target = self.make_target(image)
+        fake_root = os.path.join(self.tmp, "half_deployed_root")
+        os.makedirs(os.path.join(fake_root, "slip_models"))
+        with open(os.path.join(fake_root, "slip_bridge.py"), "w") as handle:
+            handle.write("# stub\n")
+        with open(
+                os.path.join(fake_root, "slip_models", "SLIP_ckpt.pth"),
+                "w") as handle:
+            handle.write("stub")
+        original_python = self.runtime_common.find_external_python
+        original_root = self.runtime._project_root
+        self.runtime_common.find_external_python = lambda *a, **k: "python.exe"
+        self.runtime._project_root = lambda: fake_root
+        try:
+            with self.assertRaisesRegex(RuntimeError, "未找到 SLIP 依赖目录"):
+                self.runtime._start_job(image, target)
+        finally:
+            self.runtime_common.find_external_python = original_python
+            self.runtime._project_root = original_root
+        # The deps check happens before the job directory is created.
+        self.assertFalse(os.path.isdir(os.path.join(
+            fake_root, ".mimics_runtime", "slip", "async_jobs")))
+        self.assertEqual(
+            self.nnm._metadata_get(
+                target, self.runtime.ASYNC_JOB_METADATA, ""), "")
+
 
 # ---------------------------------------------------------------------------
 # (i) 目标 Mask 选择：自动草稿 / 多选 / 写入方式 / 会话冲突

@@ -11126,8 +11126,105 @@ class TestNewFeatures(unittest.TestCase):
         self.assertIn("tools/io_path_setup_ui.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn("tools/path_dialog_helper.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
         self.assertIn("tools/single_case_import_worker.py", package_portable.REQUIRED_EXTERNAL_UI_FILES)
+        # SLIP must not ship half: the bridge script rides with the other
+        # root-level bridges, and its Mimics entry is verified like the rest.
+        self.assertIn("slip_bridge.py", package_portable.INCLUDE_FILES)
+        self.assertIn(
+            "runtime_py35/slip_mimics.py",
+            package_portable.REQUIRED_EXTERNAL_UI_FILES,
+        )
         for relative in package_portable.REQUIRED_EXTERNAL_UI_FILES:
             self.assertTrue(Path(PROJECT_ROOT, relative).is_file(), relative)
+        for relative in package_portable.INCLUDE_FILES:
+            self.assertTrue(Path(PROJECT_ROOT, relative).is_file(), relative)
+
+    def _make_packable_root(self, include_slip_models=True):
+        """A minimal synthetic project root that satisfies pack()'s contract."""
+        import tools.package_portable as package_portable
+
+        root = Path(self.tmp, "pack_root")
+        for relative in package_portable.INCLUDE_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# synthetic\n", encoding="utf-8")
+        (root / "python_env" / "models").mkdir(parents=True)
+        (root / "python_env" / "models" / "placeholder.pth").write_text(
+            "stub", encoding="utf-8"
+        )
+        (root / "python_env" / "python.exe").write_text("stub", encoding="utf-8")
+        if include_slip_models:
+            deps = root / "slip_models" / "deps" / "cupy"
+            deps.mkdir(parents=True)
+            (deps / "__init__.py").write_text("", encoding="utf-8")
+            (root / "slip_models" / "SLIP_ckpt.pth").write_text(
+                "stub", encoding="utf-8"
+            )
+        return root
+
+    def test_portable_pack_contains_slip_bridge_and_models(self):
+        """Standard and with-env archives both carry the SLIP bridge + resources."""
+        import tools.package_portable as package_portable
+        import zipfile
+
+        root = self._make_packable_root(include_slip_models=True)
+        out_dir = Path(self.tmp, "out")
+        out_dir.mkdir()
+        for kwargs in ({}, {"with_env": True}):
+            with mock.patch.object(package_portable, "PROJECT_ROOT", root):
+                code = package_portable.pack(str(out_dir), **kwargs)
+            self.assertEqual(0, code, "pack failed for kwargs={0!r}".format(kwargs))
+            archive = out_dir / "mimics_script_portable.zip"
+            with zipfile.ZipFile(str(archive)) as zf:
+                names = set(zf.namelist())
+            self.assertIn("slip_bridge.py", names)
+            self.assertIn("slip_models/SLIP_ckpt.pth", names)
+            self.assertIn("slip_models/deps/cupy/__init__.py", names)
+            archive.unlink()
+
+    def test_portable_pack_without_slip_models_still_succeeds(self):
+        """No slip_models/ is a valid deployment, as long as it is absent wholly."""
+        import tools.package_portable as package_portable
+        import zipfile
+
+        root = self._make_packable_root(include_slip_models=False)
+        out_dir = Path(self.tmp, "out")
+        out_dir.mkdir()
+        with mock.patch.object(package_portable, "PROJECT_ROOT", root):
+            code = package_portable.pack(str(out_dir))
+        self.assertEqual(0, code)
+        with zipfile.ZipFile(str(out_dir / "mimics_script_portable.zip")) as zf:
+            names = set(zf.namelist())
+        self.assertIn("slip_bridge.py", names)
+        self.assertFalse(
+            [name for name in names if name.startswith("slip_models/")],
+            "slip_models must not be packed partially",
+        )
+
+    def test_portable_pack_rejects_half_slip_models(self):
+        """A checkpoint without its deps dir is a broken deployment, not a pack."""
+        import tools.package_portable as package_portable
+
+        root = self._make_packable_root(include_slip_models=True)
+        shutil.rmtree(str(root / "slip_models" / "deps"))
+        out_dir = Path(self.tmp, "out")
+        out_dir.mkdir()
+        with mock.patch.object(package_portable, "PROJECT_ROOT", root):
+            code = package_portable.pack(str(out_dir))
+        self.assertEqual(1, code)
+        self.assertFalse((out_dir / "mimics_script_portable.zip").exists())
+
+    def test_portable_pack_rejects_archive_missing_required_files(self):
+        """A source tree missing a required file must not report success (SL05)."""
+        import tools.package_portable as package_portable
+
+        root = self._make_packable_root(include_slip_models=False)
+        (root / "slip_bridge.py").unlink()
+        out_dir = Path(self.tmp, "out")
+        out_dir.mkdir()
+        with mock.patch.object(package_portable, "PROJECT_ROOT", root):
+            code = package_portable.pack(str(out_dir))
+        self.assertEqual(1, code)
+        self.assertFalse((out_dir / "mimics_script_portable.zip").exists())
 
     def test_background_mimics_launch_is_off_the_gui_callback(self):
         import mimics_import
