@@ -132,6 +132,12 @@ class TestSyntax(unittest.TestCase):
         for root, _dirs, files in os.walk(PROJECT_ROOT):
             if "__pycache__" in root or "nninteractive_env" in root:
                 continue
+            # python_env/nninteractive_env 是 vendored 独立环境，不属于本项目
+            # 语法回归范围；编译整个 site-packages 要 ~20 分钟，期间主线程
+            # 不泵消息，PySide6 测试窗口无响应会被 Windows 挂起检测终止
+            # （事件 1002，退出码 0xCFFFFFFF；R92-1）。
+            if "python_env" in root:
+                continue
             if ".git" in root or "venv" in root or ".venv" in root:
                 continue
             for fname in files:
