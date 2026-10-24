@@ -19629,6 +19629,173 @@ class TestBatchPredictCommand(unittest.TestCase):
             cli._predict_cases(str(cases), None)
 
 
+class TestSetupProgressWindow(unittest.TestCase):
+    """进度窗口的陈旧终态与新一次运行处理（R91-8 / N02 失败路径）。
+
+    状态文件跨运行持久：窗口可能先读到上次运行留下的终态，把它错当
+    本次结果展示、或触发 2 秒自动关闭。窗口必须识别新一次运行并重置
+    全部运行期显示。状态读取由后台线程完成，Qt 线程的 _tick 只应用
+    快照，网络盘上的慢读取不得卡住计时器。
+    """
+
+    def setUp(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.tmp = _make_temp_dir()
+        tools_dir = os.path.join(PROJECT_ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import setup_progress_window as ui
+
+        self.ui = ui
+        self.state_path = os.path.join(self.tmp, "setup_env_state.json")
+        self.log_path = os.path.join(self.tmp, "setup_env.log")
+
+    def tearDown(self):
+        _cleanup(self.tmp)
+
+    def _make_window(self):
+        from PySide6 import QtWidgets
+
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
+            ["test"]
+        )
+        for attr, value in (
+            ("STATE_FILE", Path(self.state_path)),
+            ("LOG_FILE", Path(self.log_path)),
+        ):
+            patcher = mock.patch.object(self.ui, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        window = self.ui.ProgressWindow()
+        window._timer.stop()  # 测试手动驱动 _tick
+        self.addCleanup(window.close)
+        self.addCleanup(window._stop_reader.set)
+        return window
+
+    def test_stale_ok_then_new_check_resets_display(self):
+        # 验收主路径：窗口先读到上次运行留下的 ok（一小时前完成），
+        # 不得当作本次结果——不显示完成、不进 2 秒关闭倒计时；随后
+        # 新运行的 checking 到来时，按新起点显示耗时与网络盘提示。
+        window = self._make_window()
+        stale = {
+            "status": "ok",
+            "message": "一切正常",
+            "updated_at_epoch": time.time() - 3600,
+        }
+        with mock.patch.object(window, "close") as close_mock:
+            for _ in range(3):
+                window._tick(stale)
+            close_mock.assert_not_called()
+        self.assertFalse(window._active)
+        self.assertEqual(window.step_label.text(), "正在启动…")
+        self.assertEqual(window.elapsed_label.text(), "已用时 00:00")
+        self.assertEqual(window.bar.maximum(), 0)  # 仍是跑马灯，不是 100%
+        self.assertIsNone(window._terminal_seen_at)
+        self.assertTrue(window.network_warning.isHidden())
+
+        started = time.time() - 30.0
+        running = {
+            "status": "checking",
+            "message": "正在检查 Python…",
+            "started_at_epoch": started,
+            "network_drive": True,
+            "updated_at_epoch": time.time(),
+        }
+        window._tick(running)
+        self.assertTrue(window._active)
+        self.assertFalse(window.network_warning.isHidden())
+        self.assertEqual(window.step_label.text(), "正在检查 Python…")
+        self.assertEqual(window.bar.maximum(), 0)  # 不确定进度
+        self.assertIn("00:3", window.elapsed_label.text())  # 新耗时，非旧值
+        self.assertNotEqual(window.elapsed_label.text(), "检查完成")
+
+        # 本次运行自己的终态照常展示并进入关闭倒计时。
+        window._tick({
+            "status": "incomplete",
+            "message": "缺少依赖",
+            "started_at_epoch": started,
+            "updated_at_epoch": time.time(),
+        })
+        self.assertTrue(window._displaying_terminal)
+        self.assertIn("缺少依赖", window.step_label.text())
+        self.assertEqual(window.elapsed_label.text(), "检查完成")
+        self.assertIsNotNone(window._terminal_seen_at)
+        with mock.patch.object(window, "close") as close_mock:
+            window._tick({
+                "status": "incomplete",
+                "message": "缺少依赖",
+                "started_at_epoch": started,
+                "updated_at_epoch": time.time(),
+            })
+            close_mock.assert_not_called()  # 倒计时刚开始，还不到 2 秒
+
+    def test_new_run_within_close_window_cancels_close(self):
+        # 失败路径交错场景：终态的 2 秒关闭倒计时进行到一半，新的
+        # install 流程开始（终态之后又出现非终态）——倒计时必须取消，
+        # 窗口继续跟随新运行。
+        window = self._make_window()
+        started = time.time() - 10.0
+        window._tick({"status": "checking", "message": "m",
+                      "started_at_epoch": started})
+        window._tick({"status": "ok", "message": "完成",
+                      "started_at_epoch": started})
+        self.assertTrue(window._displaying_terminal)
+        window._terminal_seen_at = time.time() - 1.5  # 倒计时还剩 0.5 秒
+
+        window._tick({"status": "installing", "message": "开始修复依赖…",
+                      "updated_at_epoch": time.time()})
+        self.assertFalse(window._displaying_terminal)
+        self.assertIsNone(window._terminal_seen_at)  # 倒计时已取消
+        self.assertEqual(window.step_label.text(), "开始修复依赖…")
+        self.assertNotEqual(window.elapsed_label.text(), "检查完成")
+
+    def test_install_progress_updates_do_not_reset_run(self):
+        # install/extract 流程的每步写入不带 started_at_epoch 且
+        # updated_at_epoch 每次都在变：这些常规写入不得被误判为新运行
+        # 而反复重置计时。
+        window = self._make_window()
+        window._tick({"status": "installing", "message": "安装依赖 1/3",
+                      "updated_at_epoch": time.time() - 5})
+        baseline = window._baseline_epoch
+        self.assertTrue(window._active)
+        window._tick({"status": "installing", "message": "安装依赖 2/3",
+                      "updated_at_epoch": time.time()})
+        window._tick({"status": "extracting", "message": "解压依赖 3/3",
+                      "updated_at_epoch": time.time()})
+        self.assertEqual(window._baseline_epoch, baseline)
+        self.assertEqual(window.step_label.text(), "解压依赖 3/3")
+        self.assertEqual(window._run_started, None)
+
+    def test_slow_state_read_keeps_ticks_responsive(self):
+        # 验收：慢状态读取时界面计时器持续响应。读线程卡在一次慢
+        # 读取里时，Qt 线程的 _tick 只应用快照，照常更新耗时。
+        window = self._make_window()
+        started = time.time() - 10.0
+        in_read = threading.Event()
+        release_read = threading.Event()
+
+        def slow_read():
+            in_read.set()
+            release_read.wait(2.0)
+            return {"status": "checking", "message": "m",
+                    "started_at_epoch": started}
+
+        window._latest_state = {"status": "checking", "message": "m",
+                                "started_at_epoch": started}
+        window._read_state = slow_read  # 读线程下一次循环进入慢读取
+        try:
+            # 等读线程真的进入慢读取（它可能正在 0.25s 的等待间隔里）。
+            self.assertTrue(in_read.wait(2.0))
+            # 慢读取进行中：_tick 仍立即返回并应用快照，更新耗时。
+            tick_started = time.time()
+            window._tick()
+            self.assertLess(time.time() - tick_started, 0.5)
+            self.assertIn("已用时", window.elapsed_label.text())
+            self.assertNotEqual(window.elapsed_label.text(), "检查完成")
+        finally:
+            release_read.set()
+
+
 if __name__ == "__main__":
     print("Mimics-Script Comprehensive Tests")
     print("=" * 60)

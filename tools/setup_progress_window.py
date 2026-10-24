@@ -7,13 +7,17 @@
 终态（ok / error / incomplete / extracted）后短暂显示结果并自动关闭，Mimics
 端随后会弹出最终结果对话框。
 
+状态文件可能残留上一次运行的终态：worker 在窗口启动前就已先行，且每个流程
+都先写非终态，所以窗口第一个读到的终态必是陈旧的，不能当作本次结果展示或
+触发关闭（R91-8 / N02）。状态读取由后台线程完成、Qt 线程只应用快照，网络盘
+上的慢读取不会卡住计时器。
+
 单独运行时（开发自检）：python tools/setup_progress_window.py
 """
 
-from __future__ import print_function
-
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,25 +29,33 @@ LOG_FILE = ROOT / ".mimics_runtime" / "setup_env.log"
 
 TERMINAL = ("ok", "error", "incomplete", "extracted")
 
-ACTION_TITLES = {
-    "check": "环境检查进行中",
-    "install": "环境修复进行中",
-    "offline-install": "离线安装进行中",
-    "extract": "解压安装包进行中",
-    "setup-from-scratch": "环境设置进行中",
-}
+# 后台读状态文件的节奏；窗口自身 500ms 计时器只应用最新快照。
+READ_INTERVAL = 0.25
 
 
 class ProgressWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
+        # 本次运行的识别与显示状态（见 _begin_run / _apply_state）。
+        self._active = False            # 已见到本次运行的非终态
+        self._displaying_terminal = False
+        self._run_started = None        # 状态里的 started_at_epoch（可无）
         self._baseline_epoch = None
         self._last_message = ""
         self._terminal_seen_at = None
+        self._latest_state = None       # 读线程发布的最近一次快照
+        self._stop_reader = threading.Event()
         self._build_ui()
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(500)
+        self._reader = threading.Thread(target=self._read_loop)
+        self._reader.daemon = True
+        self._reader.start()
+
+    def closeEvent(self, event):
+        self._stop_reader.set()
+        super().closeEvent(event)
 
     def _build_ui(self):
         self.setWindowTitle("环境设置进度")
@@ -104,39 +116,81 @@ class ProgressWindow(QtWidgets.QWidget):
             return "{0}:{1:02d}:{2:02d}".format(hours, minutes, secs)
         return "{0:02d}:{1:02d}".format(minutes, secs)
 
-    def _tick(self):
-        state = self._read_state()
+    def _read_loop(self):
+        """后台线程持续读状态文件，把最新快照发布给 Qt 线程。
+
+        状态文件可能位于网络盘，读取可能很慢；放在这里读，窗口计时器
+        的 _tick 只应用快照，永不被慢读取卡住（R91-8 / N02）。
+        """
+        while not self._stop_reader.is_set():
+            self._latest_state = self._read_state()
+            self._stop_reader.wait(READ_INTERVAL)
+
+    def _tick(self, state=None):
+        """应用最近一次状态快照（QTimer 定时触发；测试可显式传入状态）。"""
+        if state is None:
+            state = self._latest_state
+        if state is None:
+            return  # 还没读到任何状态，继续等
+        self._apply_state(state)
+
+    def _begin_run(self, state, run_started):
+        """开始（或切换到）新的一次运行，全部运行期显示回到初始态。
+
+        上次运行留在状态文件里的终态——100% 进度、旧耗时、2 秒关闭
+        倒计时——不许被带进本次运行（R91-8 / N02）。"""
+        self._active = True
+        self._displaying_terminal = False
+        self._run_started = run_started
+        self._baseline_epoch = float(
+            run_started or state.get("updated_at_epoch") or time.time())
+        self._last_message = ""
+        self._terminal_seen_at = None
+        self.step_label.setText("正在启动…")
+        self.bar.setRange(0, 0)  # 不确定进度（跑马灯）
+        self.elapsed_label.setText("已用时 00:00")
+        if state.get("network_drive"):
+            self.network_warning.show()
+
+    def _apply_state(self, state):
         status = state.get("status", "")
         message = str(state.get("message") or "")
+        terminal = status in TERMINAL
 
-        if self._baseline_epoch is None:
-            baseline = state.get("started_at_epoch") or state.get("updated_at_epoch")
-            if not baseline:
-                return  # 状态文件还没写入，继续等
-            self._baseline_epoch = float(baseline)
-            action = state.get("action")
-            self.title_label.setText(ACTION_TITLES.get(action, "环境检查/设置进行中"))
-            if state.get("network_drive"):
-                self.network_warning.show()
+        if status and not terminal:
+            run_started = state.get("started_at_epoch")
+            # 新一次运行的判定：从未见过运行、刚从终态回到运行态（新
+            # 的 install 流程），或 started_at 变了（新的 check 流程）。
+            # 同一流程内的常规写入（含 install 每步不带 started_at 的
+            # 更新）不触发重置。
+            if (not self._active or self._displaying_terminal
+                    or run_started != self._run_started):
+                self._begin_run(state, run_started)
+        if not self._active:
+            # 窗口先读到的是上次运行留下的终态：worker 启动后总会先写
+            # 非终态，所以它不属于本次运行——显示"正在启动…"继续等，
+            # 不拿旧结果当本次完成、不提前关闭。
+            return
+        self._displaying_terminal = terminal
 
         if message and message != self._last_message:
             self._last_message = message
             self.step_label.setText(message)
 
-        self.elapsed_label.setText(
-            "已用时 {0}".format(self._fmt_elapsed(time.time() - self._baseline_epoch)))
+        if not terminal:
+            self.elapsed_label.setText("已用时 {0}".format(
+                self._fmt_elapsed(time.time() - self._baseline_epoch)))
+            return
 
-        if status in TERMINAL:
-            if message:
-                self.step_label.setText(message)
-            self.bar.setRange(0, 1)
-            self.bar.setValue(1)
-            self.elapsed_label.setText("检查完成")
-            if self._terminal_seen_at is None:
-                self._terminal_seen_at = time.time()
-            if time.time() - self._terminal_seen_at >= 2.0:
-                self.close()
-                return
+        if message:
+            self.step_label.setText(message)
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        self.elapsed_label.setText("检查完成")
+        if self._terminal_seen_at is None:
+            self._terminal_seen_at = time.time()
+        if time.time() - self._terminal_seen_at >= 2.0:
+            self.close()
 
 
 def main():
