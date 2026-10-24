@@ -62,6 +62,7 @@ SUITES = [
     ("remote_training", [sys.executable, "tests/test_remote_training.py"], {"fast", "full"}),
     ("interactive_algorithms", [sys.executable, "tests/test_interactive_algorithms.py"], {"fast", "full"}),
     ("slip_mimics", [sys.executable, "tests/test_slip_mimics.py"], {"fast", "full"}),
+    ("slip_bridge", [sys.executable, "tests/test_slip_bridge_reconcile.py"], {"smoke", "fast", "full"}),
     ("model_portability", [sys.executable, "tests/test_model_portability.py"], {"fast", "full"}),
     ("collect_diagnostics", [sys.executable, "tests/test_collect_diagnostics.py"], {"fast", "full"}),
     ("geometry_manifest_regressions", [sys.executable, "tests/test_geometry_manifest_regressions.py"], {"fast", "full"}),

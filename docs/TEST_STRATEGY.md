@@ -8,7 +8,7 @@
 | 层 | 内容 | 规模 | 触发时机 | 执行者 |
 |----|------|------|----------|--------|
 | L1 单元/契约 | `tests/test_all.py`（410+ 项，含全部 Py3.5 语法、entrypoint、错误引导、配置） | ~16 min | 提交前全量；改动小可先跑目标类 | 开发 |
-| L2 集成套件 | 17 个 `tests/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/SLIP/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
+| L2 集成套件 | 18 个 `tests/test_*.py` + `integrations/flexict-finetune/tests/test_flexict_pkg.py`（各框架独立套件：flexict/nnunet/nninteractive/SLIP/remote/算法/可移植性/诊断/迁移/UI 偏好） | ~10 min | 每次提交 | 开发 |
 | L3 冒烟流（fake mimics） | `tests/fake_mimics_flow_test.py`（imports/append/entrypoint/window/export/nninteractive/taskmodels/stop 8 组，27 个 runtime 模块导入 + 6 类记录聚合） | ~1 min | 改 runtime_py35/ 或桥接层后立刻跑 | 开发 |
 | L4 离线压测 | `tests/offline_stress_test.py`（资源锁竞争、取消、坐标映射、增量重放） | ~1 min | 改锁/并发/映射代码后 | 开发 |
 | L5 GPU 人工验收 | 训练冒烟、pair→AL→overlay 端到端、AI Model Manager GUI、远程 FlexiCT 实机、SLIP/nnInteractive 实机 | 按清单 | 发版前 | 标注者/开发 |
@@ -61,6 +61,10 @@ python_env/python.exe tools/run_regression_matrix.py --list
   结果、身份不匹配、手动改 mask、空预测拒绝后撤销计数同步）、命令入队、
   会话关闭清理（空草稿删除）、监控超时、
   会话目标选择（自动草稿/多选拒绝/写模式对话/与 nnInteractive 互斥）
+- `test_slip_bridge_reconcile.py` — SLIP worker 侧发布失败调和（结果写盘
+  失败后同一提示重试只补发布不重复推理、不同提示先回滚孤儿、撤销失败后
+  重放/补发布、推理中途异常毒化会话拒绝后续命令）；fake 模块直测
+  `_SlipSession`，无需 GPU，已入 smoke/fast
 - `test_interactive_algorithms.py`、`test_model_portability.py`、
   `test_collect_diagnostics.py`、`test_geometry_manifest_regressions.py`、
   `test_migrate_root.py`、`test_ui_preferences.py`、

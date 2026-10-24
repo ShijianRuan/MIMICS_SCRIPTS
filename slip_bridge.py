@@ -317,6 +317,17 @@ class _SlipSession:
         self._registered = False
         self.module = None  # SLIP Inference_module
         self.image_shape: tuple[int, int, int] | None = None
+        # Reconciliation state for failed publishes: the vendored module
+        # commits a click/undo to its action history before the result file
+        # is written. If the write fails, the change is committed on the
+        # worker side but the client never counted it, so the next command
+        # must reconcile instead of applying on top (see predict/undo).
+        self._unpublished: dict[str, Any] | None = None
+        # Set when a module call fails midway: the vendored interaction
+        # mutates state incrementally (patches, click tensors, history), so
+        # a partial failure cannot be rolled back reliably. Further commands
+        # are refused; the client must discard this session.
+        self._poisoned = False
 
     # -- output redirect ----------------------------------------------------
     # SLIP prints progress (with emoji) on every call; a GBK console would
@@ -337,6 +348,75 @@ class _SlipSession:
             self._log_handle.flush()
         else:
             sys.stderr.write(line)
+
+    # -- command plumbing -----------------------------------------------------
+
+    def _check_usable(self) -> None:
+        if self._poisoned:
+            raise RuntimeError(
+                "SLIP inference failed midway and the session state can no "
+                "longer be trusted. Discard this session and start a new "
+                "one."
+            )
+
+    def _run_module(self, fn, *args):
+        """Run a vendored-module call.
+
+        Any exception leaves the module partially mutated (the interaction
+        loop appends history, click tensors and patch bookkeeping as it
+        goes), so the session is poisoned rather than left inconsistent.
+        """
+        try:
+            with self._redirect():
+                return fn(*args)
+        except Exception:
+            self._poisoned = True
+            raise
+
+    def _last_applied_click(self) -> list[int] | None:
+        """Reconstruct the newest prompt as [z, y, x, label] from history."""
+        history = getattr(self.module, "action_history", None) or []
+        if not history:
+            return None
+        entry = history[-1]
+        coords = entry.get("coords") or []
+        if not coords or len(coords[0]) < 3:
+            return None
+        label = 1 if entry.get("type") == "include" else 0
+        return [coords[0][0], coords[0][1], coords[0][2], label]
+
+    def _reconcile_pending(self, click: list[int]) -> dict[str, Any] | None:
+        """Absorb the previous failed publish before a new predict.
+
+        Commands are processed serially, so the orphaned change is always
+        the newest entry in the module's action history:
+
+        - same click retried: the inference is already committed — return
+          the cached mask so the caller republishes it instead of running
+          click_inference again;
+        - different click: undo the orphaned predict (or replay the click
+          of an orphaned undo) so worker history matches what the client
+          has actually seen, then let the caller infer from scratch.
+        """
+        pending = self._unpublished
+        if pending is None:
+            return None
+        if pending["action"] == "predict" and pending["click"] == click:
+            return pending
+        if pending["action"] == "predict":
+            self._run_module(self.module.undo, self.module.action_history)
+        else:
+            if pending["click"] is None:
+                self._poisoned = True
+                raise RuntimeError(
+                    "Cannot reconcile an undo whose prompt is unknown; "
+                    "discard this session and start a new one."
+                )
+            z, y, x, label = pending["click"]
+            self._run_module(
+                self.module.click_inference, [[z, y, x]], [label])
+        self._unpublished = None
+        return None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -446,13 +526,28 @@ class _SlipSession:
     def predict(self, click: Any, label: Any, output_path: str) -> dict[str, Any]:
         if self.module is None or self.image_shape is None:
             raise RuntimeError("SLIP session is not open.")
+        self._check_usable()
         z, y, x, label_value = _validate_click(click, label, self.image_shape)
+        new_click = [z, y, x, label_value]
+        republish = self._reconcile_pending(new_click)
         started = time.time()
-        with self._redirect():
-            mask = self.module.click_inference([[z, y, x]], [label_value])
-        elapsed = time.time() - started
-        binary = mask.squeeze().cpu().numpy().astype(bool)
-        info = _write_mask_u8(binary, output_path)
+        if republish is None:
+            mask = self._run_module(
+                self.module.click_inference, [[z, y, x]], [label_value])
+            elapsed = time.time() - started
+            binary = mask.squeeze().cpu().numpy().astype(bool)
+        else:
+            # Same prompt retried after a failed publish: the inference is
+            # already committed in the module's history — republish only.
+            binary = republish["binary"]
+            elapsed = 0.0
+        try:
+            info = _write_mask_u8(binary, output_path)
+        except Exception:
+            self._unpublished = {
+                "action": "predict", "click": new_click, "binary": binary}
+            raise
+        self._unpublished = None
         return {
             "schema_version": JOB_SCHEMA,
             "status": "refined",
@@ -465,16 +560,42 @@ class _SlipSession:
     def undo(self, output_path: str) -> dict[str, Any]:
         if self.module is None:
             raise RuntimeError("SLIP session is not open.")
-        if len(self.module.action_history) < 1:
-            raise RuntimeError(
-                "Nothing to undo: no click has been applied in this session."
-            )
-        started = time.time()
-        with self._redirect():
-            mask = self.module.undo(self.module.action_history)
-        elapsed = time.time() - started
-        binary = mask.squeeze().cpu().numpy().astype(bool)
-        info = _write_mask_u8(binary, output_path)
+        self._check_usable()
+        republish = None
+        if self._unpublished is not None:
+            pending = self._unpublished
+            if pending["action"] == "undo":
+                # The undo is already applied in worker history (its result
+                # just failed to publish); republish the cached mask.
+                republish = pending
+            else:
+                # An orphaned predict is the newest history entry: drop it
+                # first so this undo targets the last prompt the client
+                # actually saw.
+                self._run_module(self.module.undo, self.module.action_history)
+                self._unpublished = None
+        undone_click = None
+        if republish is None:
+            if len(self.module.action_history) < 1:
+                raise RuntimeError(
+                    "Nothing to undo: no click has been applied in this session."
+                )
+            undone_click = self._last_applied_click()
+            started = time.time()
+            mask = self._run_module(self.module.undo, self.module.action_history)
+            elapsed = time.time() - started
+            binary = mask.squeeze().cpu().numpy().astype(bool)
+        else:
+            binary = republish["binary"]
+            undone_click = republish["click"]
+            elapsed = 0.0
+        try:
+            info = _write_mask_u8(binary, output_path)
+        except Exception:
+            self._unpublished = {
+                "action": "undo", "click": undone_click, "binary": binary}
+            raise
+        self._unpublished = None
         return {
             "schema_version": JOB_SCHEMA,
             "status": "refined",
@@ -487,8 +608,11 @@ class _SlipSession:
     def reset(self) -> dict[str, Any]:
         if self.module is None:
             raise RuntimeError("SLIP session is not open.")
-        with self._redirect():
-            self.module.reset()
+        self._check_usable()
+        # Reset wipes the whole history, so any half-published change is
+        # absorbed with it.
+        self._run_module(self.module.reset)
+        self._unpublished = None
         return {
             "schema_version": JOB_SCHEMA,
             "status": "reset",
