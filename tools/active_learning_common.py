@@ -15,6 +15,7 @@ bodies — the same seam flexict_pipeline already uses.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import uuid
@@ -27,6 +28,21 @@ from nnunet_common import (  # noqa: E402
     update_status,
     write_json_atomic,
 )
+
+
+def al_fold_ids(model_dir: Path) -> list[str]:
+    """Trained 0-4 folds in a model bundle (each with checkpoint_final.pth).
+
+    fold_all (train-on-everything) yields a single model — no k-fold
+    disagreement is possible from it, so it is not listed here.
+    """
+    return sorted(
+        path.name[5:]
+        for path in model_dir.glob("fold_*")
+        if path.is_dir()
+        and re.fullmatch(r"fold_[0-4]", path.name)
+        and (path / "checkpoint_final.pth").is_file()
+    )
 
 
 def case_mcs_path(dataset_root: Path, original_case_name: str) -> str:

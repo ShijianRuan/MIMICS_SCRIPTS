@@ -70,6 +70,7 @@ from resource_locks import (  # noqa: E402
 # is imported BY active_learning_common lazily inside function bodies, so a
 # module-level import here is safe (no cycle at import time).
 from active_learning_common import (  # noqa: E402
+    al_fold_ids,
     materialize_al_pool,
     rank_disagreement,
     write_uncertainty_bands,
@@ -2683,21 +2684,6 @@ def run_inference(job_dir: Path) -> int:
             pass
 
 
-def _al_fold_ids(model_dir: Path) -> list[str]:
-    """Trained 0-4 folds in a model bundle (each with checkpoint_final.pth).
-
-    fold_all (train-on-everything) yields a single model — no k-fold
-    disagreement is possible from it, so it is not listed here.
-    """
-    return sorted(
-        path.name[5:]
-        for path in model_dir.glob("fold_*")
-        if path.is_dir()
-        and re.fullmatch(r"fold_[0-4]", path.name)
-        and (path / "checkpoint_final.pth").is_file()
-    )
-
-
 def _al_predict_fold(job_dir: Path,
                      request: dict[str, Any],
                      roots: dict[str, Path],
@@ -2803,7 +2789,7 @@ def run_active_learning(job_dir: Path) -> int:
     try:
         if not manifest or not model_dir.is_dir():
             raise RuntimeError("Selected nnU-Net model is missing or invalid.")
-        folds = _al_fold_ids(model_dir)
+        folds = al_fold_ids(model_dir)
         if len(folds) < 2:
             raise RuntimeError(
                 "主动学习需要至少 2 个已训练折（各自含 checkpoint_final.pth）的"

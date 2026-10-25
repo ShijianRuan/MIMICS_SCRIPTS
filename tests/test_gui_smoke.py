@@ -2933,7 +2933,7 @@ class TestActiveLearningWindow(unittest.TestCase):
                 (job_dir / "status.json").write_text(
                     json.dumps(status), encoding="utf-8")
 
-                def _fake_find_running(workspace):
+                def _fake_find_running(workspace, list_jobs=None):
                     return json.loads(
                         (job_dir / "status.json").read_text(encoding="utf-8"))
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Active-learning review window: ranked uncertainty over the unlabeled pool.
 
-Reads a completed flexict active_learning job (ranking.csv / status.ranking),
-tracks annotation progress per case (annotation_state.json next to the job),
-and hands the selected case to the Mimics side: opening the case's project
-and overlaying the uncertainty bands / consensus mask run in the foreground
+Serves two backends with identical review artifacts: the FlexiCT 2D+3D pair
+(default) and nnU-Net k-fold bundles (context mode="nnunet"). Reads a
+completed active_learning job (ranking.csv / status.ranking), tracks
+annotation progress per case (annotation_state.json next to the job), and
+hands the selected case to the Mimics side: opening the case's project and
+overlaying the uncertainty bands / consensus mask run in the foreground
 Mimics via the runtime module's apply-request monitor, whose outcomes are
 polled back here so the table and status line stay current.
 """
@@ -61,14 +63,22 @@ def case_state_label(value: str) -> str:
     return _CASE_STATE_LABELS.get(str(value), str(value))
 
 
-def find_al_jobs(workspace: str | Path | None) -> list[dict[str, Any]]:
+def find_al_jobs(workspace: str | Path | None,
+                 list_jobs=None) -> list[dict[str, Any]]:
     """Terminal active_learning jobs, newest first — completed ones first,
     then failed/cancelled ones (R62-10: a failed ranking run must stay
-    visible with its error, not silently disappear from the list)."""
-    from flexict_pipeline import list_flexict_jobs
+    visible with its error, not silently disappear from the list).
+
+    ``list_jobs`` injects the backend's job lister (flexict_pipeline's by
+    default; the nnU-Net mode passes nnunet_jobs.list_jobs).
+    """
+    if list_jobs is None:
+        from flexict_pipeline import list_flexict_jobs
+
+        list_jobs = list_flexict_jobs
 
     rows, failed_rows = [], []
-    for status in list_flexict_jobs(workspace):
+    for status in list_jobs(workspace):
         if str(status.get("kind") or "") != "active_learning":
             continue
         state = str(status.get("status") or "")
@@ -82,15 +92,19 @@ def find_al_jobs(workspace: str | Path | None) -> list[dict[str, Any]]:
     return rows + failed_rows
 
 
-def find_running_al_job(workspace: str | None) -> dict[str, Any] | None:
+def find_running_al_job(workspace: str | None,
+                        list_jobs=None) -> dict[str, Any] | None:
     """The newest non-terminal active_learning job, or None (F04).
 
     Lets the review window show live progress of a ranking the user just
     started instead of an empty-state dead end.
     """
-    from flexict_pipeline import list_flexict_jobs
+    if list_jobs is None:
+        from flexict_pipeline import list_flexict_jobs
 
-    for status in list_flexict_jobs(workspace):
+        list_jobs = list_flexict_jobs
+
+    for status in list_jobs(workspace):
         if str(status.get("kind") or "") != "active_learning":
             continue
         if str(status.get("status") or "") in TERMINAL_STATES:
@@ -314,8 +328,23 @@ class ActiveLearningWindow:
         self.QtCore, self.QtGui, self.QtWidgets = qt_modules
         QtCore, QtWidgets = self.QtCore, self.QtWidgets
         self.workspace = str(context.get("workspace") or "")
+        # Backend dispatch: absent mode = FlexiCT pair (every existing entry
+        # point and test); "nnunet" = k-fold bundles. Only the new-run form,
+        # job lister/creator, and wording differ — the review half below is
+        # shared because both pipelines write identical artifacts.
+        self._is_nnunet = str(context.get("mode") or "") == "nnunet"
+        self._backend_name = 'nnU-Net' if self._is_nnunet else 'FlexiCT'
+        self._review_entry = (
+            '05 Active Learning Review' if self._is_nnunet
+            else '03 Active Learning Review')
+        self._list_jobs = None  # find_al_jobs defaults to the FlexiCT lister
+        if self._is_nnunet:
+            from nnunet_jobs import list_jobs as nnunet_list_jobs
+
+            self._list_jobs = nnunet_list_jobs
+        window_title = '{0} 主动学习'.format(self._backend_name)
         self.window = QtWidgets.QMainWindow()
-        self.window.setWindowTitle('FlexiCT 主动学习')
+        self.window.setWindowTitle(window_title)
         self.window.resize(980, 640)
         self.window.setMinimumSize(820, 520)
         # F37: at 150% DPI the available screen can be smaller than the
@@ -326,9 +355,11 @@ class ActiveLearningWindow:
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(22, 18, 22, 18)
         root.setSpacing(12)
-        title = QtWidgets.QLabel('FlexiCT 主动学习')
+        title = QtWidgets.QLabel(window_title)
         title.setObjectName("title")
         subtitle = QtWidgets.QLabel(
+            '按各折模型的分歧提供复核顺序建议。双击病例可在 Mimics 中打开并叠加复核提示；分歧分数不代表准确率。'
+            if self._is_nnunet else
             '按两种模型的分歧提供复核顺序建议。双击病例可在 Mimics 中打开并叠加复核提示；分歧分数不代表准确率。'
         )
         subtitle.setObjectName("subtitle")
@@ -340,7 +371,9 @@ class ActiveLearningWindow:
         # and the empty state pointed back at this very menu. A "new run"
         # form on the same window closes the loop: pick the unlabeled pool
         # once, submit, and the run below refreshes as it completes.
-        self._new_run_group = self._build_new_run_form()
+        self._new_run_group = (
+            self._build_nnunet_run_form() if self._is_nnunet
+            else self._build_new_run_form())
         self._new_run_group.hide()
         picker = QtWidgets.QHBoxLayout()
         picker.addWidget(QtWidgets.QLabel('排序任务'))
@@ -430,10 +463,14 @@ class ActiveLearningWindow:
         self._submit_results: Queue = Queue()
         self._seen_running_job_id = ""
         # Pair discovery runs off the GUI thread too (R62-9): loading state +
-        # 120 s deadline + its own result queue.
-        self._loading_pairs = True
-        self._pair_deadline = time.time() + 120.0
+        # 120 s deadline + its own result queue. The nnU-Net mode swaps the
+        # pair check for a multi-fold model listing with the same shape.
+        self._loading_pairs = not self._is_nnunet
+        self._pair_deadline = time.time() + 120.0 if self._loading_pairs else 0.0
         self._pair_results: Queue = Queue()
+        self._loading_models = self._is_nnunet
+        self._model_deadline = time.time() + 120.0 if self._loading_models else 0.0
+        self._model_results: Queue = Queue()
         self._submit_deadline = 0.0
         # R75 P2: the running-job scan stats every job directory — seconds
         # on a network workspace. It runs on a worker thread; the poll
@@ -475,9 +512,37 @@ class ActiveLearningWindow:
         self.fast_timer.setInterval(80)
         self.fast_timer.timeout.connect(self._poll_background_results)
         self.fast_timer.start()
-        self._start_pair_loading()
+        if self._is_nnunet:
+            self._start_model_loading()
+        else:
+            self._start_pair_loading()
 
     # -- new run ---------------------------------------------------------------
+
+    def _add_pool_controls(self, layout, row):
+        """Shared "unlabeled pool" row: remembered dataset_root + browse."""
+        QtWidgets = self.QtWidgets
+        remembered = read_json(
+            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
+        self.pool_edit = QtWidgets.QLineEdit()
+        self.pool_edit.setText(
+            str(self.context.get("dataset_root")
+                or remembered.get("dataset_root") or "")
+        )
+        self.pool_edit.setPlaceholderText('未标注数据池（数据集文件夹，每例一个子目录）')
+        layout.addWidget(QtWidgets.QLabel('数据池'), row, 0)
+        layout.addWidget(self.pool_edit, row, 1)
+        self.pool_browse_button = QtWidgets.QPushButton('浏览...')
+        self.pool_browse_button.clicked.connect(self._browse_pool)
+        layout.addWidget(self.pool_browse_button, row, 2)
+
+    def _add_start_run_button(self, layout, row):
+        QtWidgets = self.QtWidgets
+        self.start_run_button = QtWidgets.QPushButton('开始排序')
+        self.start_run_button.setObjectName('primary')
+        self.start_run_button.setEnabled(False)
+        self.start_run_button.clicked.connect(self._submit_new_run)
+        layout.addWidget(self.start_run_button, row, 2)
 
     def _build_new_run_form(self):
         """The minimal "start a ranking run" form (F04).
@@ -490,28 +555,38 @@ class ActiveLearningWindow:
         group = QtWidgets.QGroupBox('新建病例排序')
         layout = QtWidgets.QGridLayout(group)
         layout.setContentsMargins(16, 14, 16, 14)
-        remembered = read_json(
-            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
-        self.pool_edit = QtWidgets.QLineEdit()
-        self.pool_edit.setText(
-            str(self.context.get("dataset_root")
-                or remembered.get("dataset_root") or "")
-        )
-        self.pool_edit.setPlaceholderText('未标注数据池（数据集文件夹，每例一个子目录）')
-        layout.addWidget(QtWidgets.QLabel('数据池'), 0, 0)
-        layout.addWidget(self.pool_edit, 0, 1)
-        self.pool_browse_button = QtWidgets.QPushButton('浏览...')
-        self.pool_browse_button.clicked.connect(self._browse_pool)
-        layout.addWidget(self.pool_browse_button, 0, 2)
+        self._add_pool_controls(layout, 0)
         self.pair_label = QtWidgets.QLabel('正在后台检查 2D+3D 模型对...')
         self.pair_label.setWordWrap(True)
         layout.addWidget(QtWidgets.QLabel('模型对'), 1, 0)
         layout.addWidget(self.pair_label, 1, 1, 1, 2)
-        self.start_run_button = QtWidgets.QPushButton('开始排序')
-        self.start_run_button.setObjectName('primary')
-        self.start_run_button.setEnabled(False)
-        self.start_run_button.clicked.connect(self._submit_new_run)
-        layout.addWidget(self.start_run_button, 2, 2)
+        # Generic form-status label: the submit poll writes here for both
+        # backends (pair_label for FlexiCT, kept for the existing tests).
+        self._form_status = self.pair_label
+        self._add_start_run_button(layout, 2)
+        layout.setColumnStretch(1, 1)
+        return group
+
+    def _build_nnunet_run_form(self):
+        """nnU-Net variant: pick a multi-fold bundle instead of a pair.
+
+        Only bundles with >= 2 trained fold_[0-4] checkpoints can produce
+        k-fold disagreement; ineligible ones are skipped with an explanation.
+        """
+        QtWidgets = self.QtWidgets
+        group = QtWidgets.QGroupBox('新建病例排序')
+        layout = QtWidgets.QGridLayout(group)
+        layout.setContentsMargins(16, 14, 16, 14)
+        self.model_combo = QtWidgets.QComboBox()
+        layout.addWidget(QtWidgets.QLabel('模型'), 0, 0)
+        layout.addWidget(self.model_combo, 0, 1, 1, 2)
+        self._models = []
+        self.model_status_label = QtWidgets.QLabel('正在后台检查可用的多折模型...')
+        self.model_status_label.setWordWrap(True)
+        layout.addWidget(self.model_status_label, 1, 0, 1, 3)
+        self._form_status = self.model_status_label
+        self._add_pool_controls(layout, 2)
+        self._add_start_run_button(layout, 3)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -568,6 +643,64 @@ class ActiveLearningWindow:
         )
         self.start_run_button.setEnabled(True)
 
+    def _start_model_loading(self):
+        """nnU-Net: list multi-fold bundles off the GUI thread (R62-9)."""
+
+        def load():
+            try:
+                from active_learning_common import al_fold_ids
+                from nnunet_common import load_models, model_usability
+
+                eligible, skipped = [], 0
+                for row in load_models(self.workspace or None):
+                    usable, _reason = model_usability(row)
+                    fold_count = len(
+                        al_fold_ids(Path(str(row.get("model_dir")))))
+                    if usable and fold_count >= 2:
+                        row = dict(row)
+                        row["al_fold_count"] = fold_count
+                        eligible.append(row)
+                    else:
+                        skipped += 1
+                self._model_results.put((eligible, skipped, ""))
+            except Exception as exc:
+                self._model_results.put((None, 0, str(exc)))
+
+        worker = threading.Thread(
+            target=load, name="nnunet-al-model-check")
+        worker.daemon = True
+        worker.start()
+
+    def _apply_models(self, models, skipped, error):
+        self._loading_models = False
+        label = self._form_status
+        if error:
+            label.setStyleSheet("color: #b42318; font-weight: 600;")
+            label.setText('模型库检查失败: {0}'.format(error))
+            return
+        self._models = list(models or [])
+        if not self._models:
+            label.setStyleSheet("color: #b42318; font-weight: 600;")
+            text = (
+                '未找到含至少 2 个已训练折的 nnU-Net 模型。请先在 nnU-Net 训练窗口'
+                '对同一数据集逐折训练多个折（折 0–4，不含 all），再启动排序。'
+            )
+            if skipped:
+                text += '（已跳过 {0} 个不满足条件或不完整的已注册模型）'.format(
+                    skipped)
+            label.setText(text)
+            return
+        label.setStyleSheet("")
+        label.setText(
+            '已找到 {0} 个可用的多折模型，已按最新排序。'.format(len(self._models)))
+        for row in self._models:
+            self.model_combo.addItem('{0}（{1} · {2} 折）'.format(
+                str(row.get("task_name") or row.get("task_id") or ""),
+                str(row.get("model_id") or ""),
+                int(row.get("al_fold_count") or 0),
+            ))
+        self.start_run_button.setEnabled(True)
+
     def _poll_background_results(self):
         if self._refresh_pending:
             try:
@@ -592,11 +725,26 @@ class ActiveLearningWindow:
                     '模型对检查超时。FlexiCT 工作区所在磁盘可能离线或过慢；'
                     '请关闭本窗口、重新连接磁盘后重试。'
                 )
+        if self._loading_models:
+            try:
+                models, skipped, error = self._model_results.get_nowait()
+            except Empty:
+                pass
+            else:
+                self._apply_models(models, skipped, error)
+            if self._loading_models and time.time() >= self._model_deadline:
+                self._loading_models = False
+                self._form_status.setStyleSheet(
+                    "color: #b42318; font-weight: 600;")
+                self._form_status.setText(
+                    '模型检查超时。工作区所在磁盘可能离线或过慢；'
+                    '请关闭本窗口、重新连接磁盘后重试。'
+                )
         if self._submit_deadline and time.time() >= self._submit_deadline:
             self._submit_deadline = 0.0
             self.start_run_button.setEnabled(True)
-            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.pair_label.setText('任务创建超时。请重试。')
+            self._form_status.setStyleSheet("color: #b42318; font-weight: 600;")
+            self._form_status.setText('任务创建超时。请重试。')
         # S08: drain async annotate/skip writes. Success refreshes the row
         # (only then does it show as annotated — UI31); a failure keeps the
         # old row and says so, leaving the click retryable.
@@ -623,8 +771,8 @@ class ActiveLearningWindow:
         self._submit_deadline = 0.0
         if isinstance(payload, str):
             self.start_run_button.setEnabled(True)
-            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.pair_label.setText(friendly_error(payload))
+            self._form_status.setStyleSheet("color: #b42318; font-weight: 600;")
+            self._form_status.setText(friendly_error(payload))
             return
         job = payload
         self.start_run_button.setEnabled(True)
@@ -632,8 +780,9 @@ class ActiveLearningWindow:
         # status line for the (still empty) run list (same trap as F14).
         self.refresh()
         self.status_label.setText(
-            '主动学习任务 {0} 已启动。进度见「FlexiCT Show Status and Stop」；'
-            '完成后本窗口刷新即可看到排序。'.format(job.get("job_id"))
+            '主动学习任务 {0} 已启动。进度见「{1} Show Status and Stop」；'
+            '完成后本窗口刷新即可看到排序。'.format(
+                job.get("job_id"), self._backend_name)
         )
 
     def _submit_new_run(self):
@@ -642,13 +791,33 @@ class ActiveLearningWindow:
             if not dataset_root:
                 raise RuntimeError('请先选择未标注数据池文件夹。')
             workspace = self.workspace or None
+            # The model (pair member or bundle row) is captured on the GUI
+            # thread — the worker must not read combo state.
+            model_row = None
+            if self._is_nnunet:
+                index = self.model_combo.currentIndex()
+                if not 0 <= index < len(self._models):
+                    raise RuntimeError('请先选择一个多折模型。')
+                model_row = dict(self._models[index])
             self.start_run_button.setEnabled(False)
-            self.pair_label.setStyleSheet("")
-            self.pair_label.setText('正在后台创建主动学习任务...')
+            self._form_status.setStyleSheet("")
+            self._form_status.setText('正在后台创建主动学习任务...')
             self._submit_deadline = time.time() + 60.0
 
             def create():
                 try:
+                    if self._is_nnunet:
+                        from nnunet_jobs import create_job
+
+                        request = {
+                            "operation": "active_learning",
+                            "workspace": workspace or "",
+                            "dataset_root": dataset_root,
+                            "model_manifest": str(
+                                model_row.get("manifest_path") or ""),
+                        }
+                        self._submit_results.put(create_job(request))
+                        return
                     from flexict_common import load_pair
                     from flexict_pipeline import create_flexict_job
 
@@ -675,13 +844,13 @@ class ActiveLearningWindow:
                     self._submit_results.put(str(exc))
 
             worker = threading.Thread(
-                target=create, name="flexict-al-job-create")
+                target=create, name="al-job-create")
             worker.daemon = True
             worker.start()
         except Exception as exc:
             self.start_run_button.setEnabled(True)
-            self.pair_label.setStyleSheet("color: #b42318; font-weight: 600;")
-            self.pair_label.setText(friendly_error(exc))
+            self._form_status.setStyleSheet("color: #b42318; font-weight: 600;")
+            self._form_status.setText(friendly_error(exc))
 
     # -- new ranking (F04) ----------------------------------------------------
 
@@ -743,7 +912,8 @@ class ActiveLearningWindow:
 
             def scan():
                 try:
-                    result = find_running_al_job(self.workspace or None)
+                    result = find_running_al_job(
+                        self.workspace or None, list_jobs=self._list_jobs)
                 except Exception:
                     result = None
                 self._running_scan_results.put(result)
@@ -794,7 +964,8 @@ class ActiveLearningWindow:
 
         def scan():
             try:
-                jobs = find_al_jobs(self.workspace or None)
+                jobs = find_al_jobs(
+                    self.workspace or None, list_jobs=self._list_jobs)
             except Exception:
                 jobs = []
             self._refresh_results.put(jobs)
@@ -802,6 +973,17 @@ class ActiveLearningWindow:
         worker = threading.Thread(
             target=scan, name="al-jobs-scan", daemon=True)
         worker.start()
+
+    def _job_display_name(self, job) -> str:
+        """The combo entry's trailing identifier: the FlexiCT pair's label
+        or the nnU-Net model's task name."""
+        if self._is_nnunet:
+            return " · ".join(
+                part for part in (
+                    str(job.get("task_name") or ""),
+                    str(job.get("task_id") or ""),
+                ) if part)
+        return str(job.get("label_name") or "")
 
     def _apply_jobs(self, jobs):
         self._jobs = list(jobs or [])
@@ -821,7 +1003,7 @@ class ActiveLearningWindow:
                         ),
                         {"failed": "失败", "cancelled": "已取消",
                          "abandoned": "已放弃"}.get(state, state),
-                        str(job.get("label_name") or ""),
+                        self._job_display_name(job),
                     )
                 )
                 continue
@@ -832,7 +1014,7 @@ class ActiveLearningWindow:
                         time.localtime(float(job.get("created_at_epoch") or 0)),
                     ),
                     len(job.get("ranking") or []) or "-",
-                    str(job.get("label_name") or ""),
+                    self._job_display_name(job),
                 )
             )
         self.job_combo.blockSignals(False)
@@ -846,7 +1028,10 @@ class ActiveLearningWindow:
             self.table.setRowCount(0)
             self._set_actions_enabled(False)
             self.status_label.setText(
-                '还没有已完成的主动学习运行。点击「新建排序…」，用已训练的 2D+3D 模型对未标注病例池启动第一次排序。'
+                '还没有已完成的主动学习运行。点击「新建排序…」，'
+                + ('用含多个已训练折的 nnU-Net 模型对未标注病例池启动第一次排序。'
+                   if self._is_nnunet else
+                   '用已训练的 2D+3D 模型对未标注病例池启动第一次排序。')
             )
 
     def _job_selected(self):
@@ -923,7 +1108,7 @@ class ActiveLearningWindow:
         )
         if self._jobs and bands_degenerate(
                 self._jobs[self.job_combo.currentIndex()]):
-            text += (" 注意：双模型对的分歧图只有一级，中带与高带覆盖"
+            text += (" 注意：模型的分歧图只有一级时，中带与高带覆盖"
                      "相同的体素。")
         # R81 复审: cases the uncertainty batch excluded (grid mismatch,
         # missing mask) silently shortened the ranking — say so and point at
@@ -986,8 +1171,8 @@ class ActiveLearningWindow:
             ):
                 self.status_label.setText(
                     "请求已等待 {0:.0f} 秒仍无结果——Mimics 中的主动学习"
-                    "监控（03 Active Learning Review）可能尚未运行。".format(
-                        age)
+                    "监控（{1}）可能尚未运行。".format(
+                        age, self._review_entry)
                 )
             return
         self._request_poll_epoch = max(
@@ -1037,9 +1222,10 @@ class ActiveLearningWindow:
             "open_bands": "该病例的工程及其不确定度带",
         }
         self.status_label.setText(
-            "已为 {1} 请求：{0}。它通过 FlexiCT 菜单的主动学习监控"
-            "（03 Active Learning Review）在 Mimics 中执行；本窗口会自动更新。".format(
+            "已为 {1} 请求：{0}。它通过 {2} 菜单的主动学习监控"
+            "（{3}）在 Mimics 中执行；本窗口会自动更新。".format(
                 labels.get(what, what), case_id,
+                self._backend_name, self._review_entry,
             )
         )
 
@@ -1158,7 +1344,11 @@ def main() -> int:
         from PySide6 import QtCore, QtGui, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-        configure_application(app, 'FlexiCT 主动学习')
+        configure_application(
+            app,
+            'nnU-Net 主动学习'
+            if str(context.get("mode") or "") == "nnunet"
+            else 'FlexiCT 主动学习')
         app.setStyleSheet(stylesheet())
         window = ActiveLearningWindow(context, (QtCore, QtGui, QtWidgets))
         window.show()
