@@ -131,6 +131,13 @@ def find_latest_receipt():
             for name in os.listdir(folder):
                 if not name.endswith(RECEIPT_SUFFIX):
                     continue
+                if ".previous-" in name:
+                    # Archived by flush_pending_receipts (S01): an older
+                    # import's receipt kept as evidence, not an undo
+                    # candidate. With a rolled-back clock its
+                    # created_at_epoch is the newest in the folder and
+                    # would shadow the current receipt.
+                    continue
                 path = os.path.join(folder, name)
                 try:
                     with open(path, "r") as handle:

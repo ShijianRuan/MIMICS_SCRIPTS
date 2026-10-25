@@ -265,6 +265,39 @@ class ReceiptContracts(unittest.TestCase):
             self.assertEqual(json.loads(Path(receipt).read_text()), existing)
             self.assertIn("事务身份冲突", module._read_pending_receipts(folder)["case"]["last_error"])
 
+    def test_archived_receipt_never_shadows_current_receipt_for_undo(self):
+        spec = importlib.util.spec_from_file_location(
+            "undo_review", ROOT / "runtime_py35/import_undo_mimics.py")
+        import_undo_mimics = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {"mimics": types.ModuleType("mimics")}):
+            spec.loader.exec_module(import_undo_mimics)
+
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+
+            def receipt(case, created):
+                return {
+                    "schema_version": "mimics_import_receipt.v1",
+                    "case_id": case,
+                    "mcs_path": str(out / (case + ".mcs")),
+                    "mcs_fingerprint": "sha256:" + case,
+                    "created_masks": [],
+                    "created_at_epoch": created,
+                }
+
+            # Clock rollback (S01): the archived older import carries the
+            # newest created_at_epoch in the folder. Undo discovery must
+            # still find the current receipt, not the archived evidence.
+            (out / ".case.previous-deadbeef.import_receipt.json").write_text(
+                json.dumps(receipt("old", 200.0)))
+            (out / ".case.import_receipt.json").write_text(
+                json.dumps(receipt("new", 100.0)))
+            with mock.patch.object(import_undo_mimics, "_candidate_receipt_dirs",
+                                   lambda: [str(out)]):
+                path, payload = import_undo_mimics.find_latest_receipt()
+            self.assertEqual(payload["case_id"], "new")
+            self.assertTrue(str(path).endswith(".case.import_receipt.json"))
+
 
 class SingleSliceGeometry(unittest.TestCase):
     def test_single_slice_rejects_skew_and_nonunit_iop_through_public_helpers(self):
