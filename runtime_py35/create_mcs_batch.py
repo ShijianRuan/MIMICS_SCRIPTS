@@ -366,25 +366,17 @@ def _receipt_payload_digest(payload):
         return ""
 
 
-def _receipt_epoch(payload):
-    try:
-        return float(payload.get("created_at_epoch") or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def flush_pending_receipts(output_dir):
     """Retry the pending receipt writes; return the case ids that succeeded.
 
     S01 round 3: a receipt file merely EXISTING no longer counts as healed.
     It is only this import's evidence when its transaction digest matches
     the queued payload — an older import's receipt (or a corrupt file) at
-    the same path must not be mistaken for the missing undo record. When
-    the on-disk receipt belongs to an older import it is replaced with the
-    queued payload (the authoritative record for the project now at that
-    path); a queued payload OLDER than the on-disk receipt is stale and
-    dropped. Every heal is verified by reading the receipt back before it
-    is reported. Failures stay queued for the next scan.
+    the same path must not be mistaken for the missing undo record. For
+    differing transactions, project path and saved content establish which
+    record belongs to the current project; wall clocks never decide this.
+    Ambiguous identities stay pending, and replaced evidence is archived.
+    Every heal is verified before it is reported.
     """
     pending = _read_pending_receipts(output_dir)
     written = []
@@ -406,19 +398,33 @@ def flush_pending_receipts(output_dir):
                     del pending[case_id]
                     written.append(str(case_id))
                     continue
-                if _receipt_epoch(existing) > _receipt_epoch(payload):
-                    # The receipt on disk is NEWER than the queued payload:
-                    # the queue entry is stale, the disk record stands. The
-                    # case HAS its undo evidence, so it counts as healed.
+                project = str(payload.get("mcs_path") or "")
+                current = _file_fingerprint(project) if project else ""
+                queued_matches = bool(current and current == payload.get("mcs_fingerprint"))
+                existing_matches = bool(current and current == existing.get("mcs_fingerprint")
+                                        and os.path.normcase(os.path.abspath(str(existing.get("mcs_path") or "")))
+                                        == os.path.normcase(os.path.abspath(project)))
+                if existing_matches and not queued_matches:
                     log_message(
                         output_dir,
-                        "补写完成（磁盘回执比待写记录新，保留磁盘版本）：{0}".format(
+                        "补写完成（磁盘回执匹配当前工程，待写事务已过期）：{0}".format(
                             receipt_path))
                     del pending[case_id]
                     written.append(str(case_id))
                     continue
-                # Older import's receipt (or a corrupt/unreadable file):
-                # replace it with this import's queued record.
+                if not queued_matches or existing_matches:
+                    # Both matching the same bytes is still ambiguous when
+                    # GUID/provenance differ. Never drop an undo record based
+                    # on timestamps, including when the clock was rolled back.
+                    entry["last_error"] = "回执事务身份冲突：无法确认哪次导入对应当前工程，已保留待补写记录。"
+                    pending[case_id] = entry
+                    continue
+                previous_digest = _receipt_payload_digest(existing)
+                suffix = ".import_receipt.json"
+                stem = receipt_path[:-len(suffix)] if receipt_path.endswith(suffix) else receipt_path
+                history = stem + ".previous-{0}.import_receipt.json".format(previous_digest[:16])
+                if not os.path.isfile(history):
+                    write_json_atomic(history, existing)
             write_json_atomic(receipt_path, payload)
             verified = runtime_common.read_json(receipt_path, None)
             if payload_digest and isinstance(verified, dict) and (

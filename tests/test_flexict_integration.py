@@ -1919,7 +1919,7 @@ class TestActiveLearningReviewUI(unittest.TestCase):
 
         self.assertFalse(bands_degenerate({}))
         self.assertFalse(bands_degenerate({"uncertainty_bands": {}}))
-        # distinct bands (different voxel counts) -> no hint
+        # Different file counts cannot establish identical voxel regions.
         self.assertFalse(bands_degenerate({
             "uncertainty_bands": {
                 "written": {"moderate": 8, "high": 5},
@@ -1930,6 +1930,7 @@ class TestActiveLearningReviewUI(unittest.TestCase):
         self.assertTrue(bands_degenerate({
             "uncertainty_bands": {
                 "written": {"moderate": 5, "high": 5},
+                "coincident": True,
                 "moderate_threshold": 4, "high_threshold": 5},
         }))
 

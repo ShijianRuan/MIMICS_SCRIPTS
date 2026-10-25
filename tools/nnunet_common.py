@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -138,6 +139,27 @@ def file_fingerprint(path: str | Path) -> str | None:
 # the JSON round-trip through job status files.
 FINGERPRINT_ABSENT = "__absent__"
 FINGERPRINT_UNREADABLE = "__unreadable__"
+
+
+@contextmanager
+def prediction_output_guard(output_path: str | Path):
+    """Serialize final compare/exchange and restore on the actual output.
+
+    The guard lives beside the target, so independent workspaces and drive /
+    UNC aliases of the same directory participate in the same protocol.
+    """
+    from resource_locks import FileResourceLock
+
+    target = Path(output_path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(os.path.normcase(target.name).encode("utf-8")).hexdigest()[:20]
+    lock = FileResourceLock(target.parent / (".mimics-publish-" + digest + ".lock"),
+                            "prediction-output", "Prediction publish/restore")
+    lock.acquire(wait_seconds=30, poll_seconds=.05)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def capture_output_fingerprint(path: str | Path) -> str:
