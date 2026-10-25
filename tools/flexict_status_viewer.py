@@ -242,6 +242,11 @@ class StatusWindow:
         self.window.closeEvent = self._close_event
 
     def _close_event(self, event):
+        if self._restore_busy:
+            self._close_after_restore = True
+            self.window.setWindowTitle('正在完成结果恢复，完成后自动关闭')
+            event.ignore()
+            return
         self.refresher.stop()
         self._restore_timer.stop()
         # Hand the C++ widget tree to Qt: leaving it for Python GC to
@@ -553,8 +558,10 @@ class StatusWindow:
             except Exception as exc:
                 self._restore_results.put(str(exc))
 
+        # A restore transaction must outlive its window and finish even
+        # when the application receives a normal quit request.
         thread = threading.Thread(target=worker)
-        thread.daemon = True
+        thread.daemon = False
         thread.start()
         self._restore_timer.start()
 
@@ -565,6 +572,11 @@ class StatusWindow:
             return
         self._restore_timer.stop()
         self._restore_busy = False
+        close_after_restore = getattr(self, "_close_after_restore", False)
+        self._close_after_restore = False
+        if close_after_restore and error is None:
+            self.window.close()
+            return
         if error is None:
             self.QtWidgets.QMessageBox.information(
                 self.window, "已恢复旧结果", "旧结果已恢复为当前结果。"

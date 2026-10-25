@@ -63,6 +63,17 @@ def case_state_label(value: str) -> str:
     return _CASE_STATE_LABELS.get(str(value), str(value))
 
 
+def al_phase_label(value: str) -> str:
+    if value.startswith("predicting_fold_"):
+        return '第 {0} 折预测'.format(value.rsplit('_', 1)[-1])
+    return {
+        'launching': '正在启动', 'preparing_inputs': '准备病例影像',
+        'batch_predicting_2d': '2D 模型预测', 'batch_predicting_3d': '3D 模型预测',
+        'computing_uncertainty': '计算分歧并生成排序', 'waiting_for_gpu': '等待 GPU',
+        'cancelling': '正在停止并释放资源', 'running': '正在运行',
+    }.get(value, value)
+
+
 def find_al_jobs(workspace: str | Path | None,
                  list_jobs=None) -> list[dict[str, Any]]:
     """Terminal active_learning jobs, newest first — completed ones first,
@@ -311,11 +322,13 @@ def bands_degenerate(job: dict[str, Any]) -> bool:
     bands = job.get("uncertainty_bands")
     if not isinstance(bands, dict):
         return False
+    if "coincident" in bands:
+        return bool(bands["coincident"])
     written = bands.get("written") or {}
     moderate = int(written.get("moderate") or 0)
     high = int(written.get("high") or 0)
-    if moderate and moderate == high:
-        return True
+    # File counts do not establish voxel equality. Legacy jobs can only be
+    # certified from equal thresholds; new jobs record the actual comparison.
     thresholds = bands.get("moderate_threshold"), bands.get("high_threshold")
     if None in thresholds:
         return False
@@ -364,6 +377,7 @@ class ActiveLearningWindow:
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
+        subtitle.setText(subtitle.text() + ' 完成后请先在 Mimics 保存工程；“已标注”仅记录复核进度，不会自动保存或启动训练。')
         root.addWidget(title)
         root.addWidget(subtitle)
 
@@ -391,19 +405,41 @@ class ActiveLearningWindow:
         root.addLayout(picker)
         root.addWidget(self._new_run_group)
 
+        filters = QtWidgets.QHBoxLayout()
+        self.search_edit = QtWidgets.QLineEdit()
+        self.search_edit.setPlaceholderText('查找病例名称、编号或源路径（Ctrl+F）')
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._render_rows)
+        filters.addWidget(self.search_edit, 1)
+        self.pending_only = QtWidgets.QCheckBox('仅看待复核')
+        self.pending_only.setToolTip('隐藏已标注和已跳过病例；已查看病例仍需复核。')
+        self.pending_only.toggled.connect(self._render_rows)
+        filters.addWidget(self.pending_only)
+        root.addLayout(filters)
+        self._find_shortcut = self.QtGui.QShortcut(self.QtGui.QKeySequence('Ctrl+F'), self.window)
+        self._find_shortcut.activated.connect(self.search_edit.setFocus)
+
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
-            ['排序', '病例', '分数', '不确定体积 (mm³)', '状态', '路径']
+            ['排序', '病例', '分歧总量', '分歧体积 (mm³)', '状态', '源影像 / 工程路径']
         )
+        self.table.horizontalHeaderItem(2).setToolTip(
+            '体素分歧程度 × 体素体积后求和；较大区域会得到较高总量。它不是错误概率或准确率。')
         self.table.horizontalHeader().setSectionResizeMode(
             1, QtWidgets.QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
             5, QtWidgets.QHeaderView.Stretch)
         # F15: the numeric columns must never be squeezed below their unit
         # headers by the two stretch columns.
-        self.table.setColumnWidth(3, 130)
-        self.table.horizontalHeader().setMinimumSectionSize(120)
+        self.table.horizontalHeader().setMinimumSectionSize(64)
+        for column, width in ((0, 64), (2, 108), (3, 145), (4, 88)):
+            self.table.setColumnWidth(column, width)
+        for column in range(self.table.columnCount()):
+            item = self.table.horizontalHeaderItem(column)
+            if column != 2:
+                item.setToolTip(item.text())
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.verticalHeader().hide()
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.itemDoubleClicked.connect(self._open_and_overlay_selected)
@@ -430,16 +466,27 @@ class ActiveLearningWindow:
         actions.addWidget(self.overlay_button)
         self.consensus_button = QtWidgets.QPushButton('应用共识 Mask')
         self.consensus_button.clicked.connect(self._apply_consensus)
+        self.consensus_button.setToolTip('创建各标签的独立预测草稿，不覆盖人工 Mask；多数票仍需人工复核。')
         actions.addWidget(self.consensus_button)
+        self.next_button = QtWidgets.QPushButton('下一例待复核')
+        self.next_button.setShortcut(self.QtGui.QKeySequence('Alt+N'))
+        self.next_button.setToolTip('选择下一例未完成病例；不自动切换或关闭 Mimics 工程。Alt+N')
+        self.next_button.clicked.connect(self._next_pending)
+        actions.addWidget(self.next_button)
         actions.addStretch(1)
         root.addLayout(actions)
         marking = QtWidgets.QHBoxLayout()
         self.annotated_button = QtWidgets.QPushButton('标记为已标注')
         self.annotated_button.clicked.connect(self._mark_annotated)
+        self.annotated_button.setToolTip('确认已在 Mimics 保存标注后记录完成；此按钮不保存工程，也不把草稿自动加入训练。')
         marking.addWidget(self.annotated_button)
         self.skip_button = QtWidgets.QPushButton('标记为跳过')
         self.skip_button.clicked.connect(self._mark_skipped)
         marking.addWidget(self.skip_button)
+        self.retry_writes_button = QtWidgets.QPushButton('重试未保存标记')
+        self.retry_writes_button.clicked.connect(self._retry_failed_writes)
+        self.retry_writes_button.hide()
+        marking.addWidget(self.retry_writes_button)
         marking.addStretch(1)
         self.export_button = QtWidgets.QPushButton('导出 CSV')
         self.export_button.clicked.connect(self._export_csv)
@@ -499,6 +546,9 @@ class ActiveLearningWindow:
         # and the last marking could be dropped.
         self._state_write_lock = threading.Lock()
         self._state_write_pending = 0
+        self._state_write_failures = {}
+        self._close_when_saved = False
+        self.window.closeEvent = self._close_event
         self._refresh_async()
         # The Mimics-side monitor reports outcomes by rewriting request
         # files; poll them so the table and status line follow along
@@ -523,13 +573,15 @@ class ActiveLearningWindow:
         """Shared "unlabeled pool" row: remembered dataset_root + browse."""
         QtWidgets = self.QtWidgets
         remembered = read_json(
-            Path.home() / ".mimics_script" / "flexict_settings.json", {}) or {}
+            Path.home() / ".mimics_script" / (
+                "nnunet_settings.json" if self._is_nnunet else "flexict_settings.json"), {}) or {}
         self.pool_edit = QtWidgets.QLineEdit()
         self.pool_edit.setText(
             str(self.context.get("dataset_root")
                 or remembered.get("dataset_root") or "")
         )
         self.pool_edit.setPlaceholderText('未标注数据池（数据集文件夹，每例一个子目录）')
+        self.pool_edit.setToolTip('选择未标注病例池，排除固定验证/测试患者及其多期影像。当前不会自动识别数据池与训练、验证集的重叠。')
         layout.addWidget(QtWidgets.QLabel('数据池'), row, 0)
         layout.addWidget(self.pool_edit, row, 1)
         self.pool_browse_button = QtWidgets.QPushButton('浏览...')
@@ -764,6 +816,17 @@ class ActiveLearningWindow:
             self._job_selected()
         if first_error:
             self.status_label.setText(friendly_error(first_error))
+        with self._state_write_lock:
+            pending_writes = self._state_write_pending
+            failed_writes = len(self._state_write_failures)
+        self.retry_writes_button.setVisible(bool(failed_writes))
+        self.retry_writes_button.setEnabled(not pending_writes)
+        if self._close_when_saved and not pending_writes:
+            self._close_when_saved = False
+            if failed_writes:
+                self.status_label.setText('有 {0} 个标记保存失败，窗口已保留。请重试；Mimics 标注内容不受影响。'.format(failed_writes))
+            else:
+                self.window.close()
         try:
             payload = self._submit_results.get_nowait()
         except Empty:
@@ -932,7 +995,7 @@ class ActiveLearningWindow:
             percent = int(running.get("progress_percent") or 0)
             self.status_label.setText(
                 '排序进行中（{}，{}%）——完成后列表会自动刷新。'.format(
-                    phase, percent))
+                    al_phase_label(phase), percent))
             return
         # A job we announced disappeared from the running list: it reached a
         # terminal state — refresh so it appears in the picker.
@@ -986,6 +1049,7 @@ class ActiveLearningWindow:
         return str(job.get("label_name") or "")
 
     def _apply_jobs(self, jobs):
+        selected_job = self._job_dir
         self._jobs = list(jobs or [])
         self.job_combo.blockSignals(True)
         self.job_combo.clear()
@@ -1019,7 +1083,9 @@ class ActiveLearningWindow:
             )
         self.job_combo.blockSignals(False)
         if self._jobs:
-            self.job_combo.setCurrentIndex(0)
+            selected_index = next((index for index, job in enumerate(self._jobs)
+                                   if str(job.get("job_dir") or "") == selected_job), 0)
+            self.job_combo.setCurrentIndex(selected_index)
             self._job_selected()
         else:
             self._job_dir = ""
@@ -1064,30 +1130,75 @@ class ActiveLearningWindow:
         self._job_dir = job_dir
         self._rows = load_ranking(job_dir)
         self._state = load_annotation_state(job_dir)
-        self.table.setRowCount(len(self._rows))
+        geometries = read_json(Path(job_dir) / "input_geometries.json", {}) or {}
+        for row in self._rows:
+            geometry = (geometries.get("cases") or {}).get(str(row.get("case") or "")) or {}
+            row["case_name"] = str(geometry.get("case_name") or row.get("case") or "")
+            row["source_path"] = str(geometry.get("source_image_path") or geometry.get("mcs_path") or "")
+        self._render_rows()
+        self._refresh_status_text()
+
+    def _render_rows(self, *_args):
+        if not hasattr(self, "_rows"):
+            return
+        QtCore, QtWidgets = self.QtCore, self.QtWidgets
+        selected = self._selected_case()
+        query = self.search_edit.text().strip().casefold()
+        visible = []
         cases = self._state.get("cases") or {}
         for row_index, row in enumerate(self._rows):
             case_id = str(row.get("case") or "")
             entry = cases.get(case_id) or {}
+            if self.pending_only.isChecked() and entry.get("state") in ("annotated", "skipped"):
+                continue
+            if query and query not in " ".join(str(row.get(key) or "") for key in (
+                    "case", "case_name", "source_path")).casefold():
+                continue
+            visible.append((row_index, row, entry))
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(visible))
+        restore_row = None
+        for display_index, (row_index, row, entry) in enumerate(visible):
+            case_id = str(row.get("case") or "")
             values = [
                 row_index + 1,
-                case_id,
+                row.get("case_name") or case_id,
                 "{:.2f}".format(float(row.get("integrated") or 0.0)),
                 "{:.1f}".format(float(row.get("uncertain_vol") or 0.0)),
                 case_state_label(entry.get("state") or "new"),
-                self._case_image_hint(case_id),
+                row.get("source_path") or self._case_image_hint(case_id),
             ]
             for column, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
+                item.setData(QtCore.Qt.UserRole, case_id)
+                if column == 1:
+                    item.setToolTip('{0}\n内部编号：{1}'.format(value, case_id))
                 if column in (0, 2, 3):
                     item.setTextAlignment(
                         QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if str(entry.get("state") or "new") == "annotated":
                     item.setForeground(self.QtGui.QBrush(
                         self.QtGui.QColor(PALETTE["success"])))
-                self.table.setItem(row_index, column, item)
+                self.table.setItem(display_index, column, item)
+            if case_id == selected:
+                restore_row = display_index
+        if restore_row is not None:
+            self.table.selectRow(restore_row)
         self._set_actions_enabled(bool(self._rows))
-        self._refresh_status_text()
+
+    def _next_pending(self):
+        count = self.table.rowCount()
+        start = self.table.currentRow()
+        cases = self._state.get("cases") or {}
+        for offset in range(1, count + 1):
+            index = (start + offset) % count
+            case_id = str(self.table.item(index, 1).data(self.QtCore.Qt.UserRole) or "")
+            if (cases.get(case_id) or {}).get("state") not in ("annotated", "skipped"):
+                self.table.selectRow(index)
+                self.table.scrollToItem(self.table.item(index, 1))
+                return
+        self.status_label.setText('当前筛选内没有下一例待复核病例。可取消“仅看待复核”查看已完成记录。')
 
     def _refresh_status_text(self):
         """Summary line for the current job (F14: callers that have a more
@@ -1108,8 +1219,7 @@ class ActiveLearningWindow:
         )
         if self._jobs and bands_degenerate(
                 self._jobs[self.job_combo.currentIndex()]):
-            text += (" 注意：模型的分歧图只有一级时，中带与高带覆盖"
-                     "相同的体素。")
+            text += (" 注意：本轮中带与高带覆盖相同的体素，新任务只叠加一组分歧提示。")
         # R81 复审: cases the uncertainty batch excluded (grid mismatch,
         # missing mask) silently shortened the ranking — say so and point at
         # the log holding the per-case Chinese reasons.
@@ -1130,12 +1240,14 @@ class ActiveLearningWindow:
 
     def _selected_case(self) -> str:
         row = self.table.currentRow()
-        if not 0 <= row < len(self._rows):
+        if not 0 <= row < self.table.rowCount():
             return ""
-        return str(self._rows[row].get("case") or "")
+        item = self.table.item(row, 1)
+        return str(item.data(self.QtCore.Qt.UserRole) or "") if item else ""
 
     def _set_actions_enabled(self, enabled: bool):
         self.export_button.setEnabled(enabled)
+        self.next_button.setEnabled(bool(enabled and self.table.rowCount()))
         selected = bool(enabled and self.table.selectionModel().hasSelection() and self._selected_case())
         for button in (self.open_button, self.overlay_button,
                        self.consensus_button, self.annotated_button,
@@ -1263,8 +1375,12 @@ class ActiveLearningWindow:
             job_dir, case_id, value = self._state_write_queue.get()
             try:
                 set_case_state(job_dir, case_id, value)
+                with self._state_write_lock:
+                    self._state_write_failures.pop((job_dir, case_id), None)
                 self._state_write_results.put((case_id, value, None))
             except Exception as exc:
+                with self._state_write_lock:
+                    self._state_write_failures[(job_dir, case_id)] = (value, str(exc))
                 self._state_write_results.put((case_id, value, str(exc)))
             finally:
                 with self._state_write_lock:
@@ -1280,10 +1396,53 @@ class ActiveLearningWindow:
             with self._state_write_lock:
                 pending = self._state_write_pending
             if pending <= 0:
-                return 0
+                with self._state_write_lock:
+                    return len(self._state_write_failures)
             time.sleep(0.02)
         with self._state_write_lock:
-            return max(0, self._state_write_pending)
+            return max(0, self._state_write_pending) + len(self._state_write_failures)
+
+    def _retry_failed_writes(self):
+        with self._state_write_lock:
+            if self._state_write_pending:
+                return
+            failures = list(self._state_write_failures.items())
+        # Enqueue on the same FIFO so newer edits cannot be reordered by a
+        # separate retry worker. Each failure remembers its original job.
+        for (job_dir, case_id), (value, _error) in failures:
+            with self._state_write_lock:
+                self._state_write_pending += 1
+            self._state_write_queue.put((job_dir, case_id, value))
+        if failures:
+            self.status_label.setText('正在重试 {0} 个未保存标记…'.format(len(failures)))
+
+    def _close_event(self, event):
+        with self._state_write_lock:
+            pending = self._state_write_pending
+            failed = len(self._state_write_failures)
+        if pending:
+            self._close_when_saved = True
+            self.status_label.setText('正在保存 {0} 个进度标记，完成后自动关闭。'.format(pending))
+            event.ignore()
+            return
+        if failed:
+            box = self.QtWidgets.QMessageBox
+            answer = box.warning(self.window, '进度标记尚未保存',
+                                 '有 {0} 个标记保存失败。重试、保留窗口，或明确放弃这些进度标记后关闭？Mimics 标注内容不受影响。'.format(failed),
+                                 box.Retry | box.Discard | box.Cancel, box.Cancel)
+            if answer == box.Retry:
+                self._close_when_saved = True
+                self._retry_failed_writes()
+                event.ignore()
+                return
+            if answer != box.Discard:
+                event.ignore()
+                return
+            with self._state_write_lock:
+                self._state_write_failures.clear()
+        self.poll_timer.stop()
+        self.fast_timer.stop()
+        event.accept()
 
     def _mark_annotated(self):
         case_id = self._selected_case()

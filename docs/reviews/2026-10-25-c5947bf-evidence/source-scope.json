@@ -1,0 +1,174 @@
+{
+  "baseline": "a62109359a3c2e3f58940d189dc77732f9dff5d6",
+  "reviewed_source": "c5947bf681647c295e11a7096163733986bc9ba9",
+  "implementation_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+  "new_commit_count": 29,
+  "changed_remote_file_count": 29,
+  "commits": [
+    {
+      "sha": "8d56f8ca618d9682446366865ddab6ffe5d8eff5",
+      "subject": "docs: R88 SLIP 独立审查发现入账——2 项 P2 + 4 项 P3"
+    },
+    {
+      "sha": "b188a7d32531fb1cf4e3fe07834231bda2616c90",
+      "subject": "fix: SLIP 多模态启用 + R88 审查问题修复"
+    },
+    {
+      "sha": "cf9bcafa078fd669c55679c1429d1aae66984f33",
+      "subject": "docs: R88-1..R88-5 入账已解决 + R89 轮次登记 + 复杂度账本"
+    },
+    {
+      "sha": "9765ba770a2d87b761a71b95e8ea95c8fb84e9d5",
+      "subject": "docs: R90-1 入账——SLIP 点击包含/排除不符预期的根因核验"
+    },
+    {
+      "sha": "23e7f7955d0702e63f4efd9240f52643c6bb5dbe",
+      "subject": "Merge remote review a621093: eee725b SLIP integration revalidation"
+    },
+    {
+      "sha": "396f48cb3c63358016c4e9060814c6353e744187",
+      "subject": "docs: R91 入账——外部评审 a621093（eee725b SLIP 复审）8 卡登记"
+    },
+    {
+      "sha": "d89f2cb4c7bfc566ee92fa6d18ebcebce8a732f0",
+      "subject": "fix(slip): reset 回执到达前的人工编辑不得被静默覆盖（R91-1 / SL01）"
+    },
+    {
+      "sha": "28c42509e177dbe947123819d2ead031afd60a5c",
+      "subject": "fix(slip): 撤销到零条提示时恢复会话基线而非应用空输出（R91-3 / SL03）"
+    },
+    {
+      "sha": "aa9283068d6557b76866fc72e0e4510a39bd2e30",
+      "subject": "fix(slip): gpu.lock 被自己的 worker 持有时入口改为取回会话（R91-2 / SL02）"
+    },
+    {
+      "sha": "bcff48c8af3c5487d9fccbc86b4684e7396cc0b5",
+      "subject": "fix(slip): 预测发布失败后的重试不再重复累计提示（R91-4 / SL04）"
+    },
+    {
+      "sha": "ada23f3fea5a2a5d5245bc294ef7482de7dc30f8",
+      "subject": "fix(pack): SLIP 分发包补齐桥接脚本与模型资源校验（R91-5 / SL05）"
+    },
+    {
+      "sha": "8538d920f1e393b8c37d7683c7f3fbc1dc5f5d47",
+      "subject": "fix(slip): 无 CUDA 时在创建草稿/导出缓冲前明确拒绝（R91-6 / SL06）"
+    },
+    {
+      "sha": "2f6c6eee186ae13c18de05f26827b5d9de5ac82e",
+      "subject": "fix(repair): GPU 恢复校验备份完整性与进程占用，暂存式换回不再先删当前安装（R91-7 / N01）"
+    },
+    {
+      "sha": "7d74720f18430ac1bff998109a4a42bae344867d",
+      "subject": "fix(tools): 进度窗口识别新一次运行并重置显示，陈旧终态不再锁定基线（R91-8 / N02）"
+    },
+    {
+      "sha": "46184ad9782fd77a2846937f73b352c319390976",
+      "subject": "fix(tests): 语法回归 walk 跳过 python_env，消除 full 门禁 0xCFFFFFFF 挂起终止（R92-1）"
+    },
+    {
+      "sha": "f55b29a7a912078a043501113e08b1161f3adcf4",
+      "subject": "fix(tests): 语法 walk 改纯内存编译，不再写 .pyc（R92-1 续）"
+    },
+    {
+      "sha": "07c2e7ec6948a61d2f898d874a244c8044eb6cc8",
+      "subject": "docs: R91 八卡销项入账 + R92-1 根因修正（docs only）"
+    },
+    {
+      "sha": "889f7e62caa12c1555fa8455b2a57c435634ec51",
+      "subject": "fix(tests): test_all 模块级锁定离屏平台，消除真实置顶弹窗（R92-2）"
+    },
+    {
+      "sha": "36eb23fd1a1ffd98a5a534e832b5cffcda55bdbd",
+      "subject": "docs: R92-2 弹窗问题入账 + R92-1 根因最终修正（docs only）"
+    },
+    {
+      "sha": "01c4d2e6a178edec93e0428c729e01456f9b37e3",
+      "subject": "feat(nnunet): easy_predict 新增 use_folds 参数 + R93 账本登记（nnU-Net 主动学习）"
+    },
+    {
+      "sha": "f9e698b572095f80029c925beabf23aacaaaad31",
+      "subject": "refactor(al): 提取 active_learning_common 共享模块（R93 步骤 2）"
+    },
+    {
+      "sha": "4bdf816118a527a5ab741b389415d58a6d341e9c",
+      "subject": "feat(nnunet): run_active_learning 阶段机 + job 分发（R93 步骤 3+4）"
+    },
+    {
+      "sha": "fee88ea836c8cc97b9e54db6bd8da2541756421d",
+      "subject": "feat(al): 复核窗口泛化双后端——nnU-Net 模式接入（R93 步骤 5）"
+    },
+    {
+      "sha": "5d6fcf783d4909bfa00124bfa31fefbdef70494d",
+      "subject": "fix(test): 入口脚本计数 28→29——补 D20 新增 nnU-Net 批量预测入口漏更"
+    },
+    {
+      "sha": "69737c6d7f4f594aeac5050aa4f3eefe7560cf0f",
+      "subject": "refactor(al): 提取 runtime_py35 共享 AL 监控/应用模块（R93 步骤 6）"
+    },
+    {
+      "sha": "dbd4dabb97b582b961f0e8f22d8e573f8a4ff912",
+      "subject": "feat(nnunet): 主动学习审核入口脚本 + 文档（R93 步骤 7）"
+    },
+    {
+      "sha": "2669f5f6a3deb1d64d25b3df373ec28ac3717db5",
+      "subject": "feat(test): AL 失败路径与 nnU-Net 模式 UI 冒烟测试（R93 步骤 8）"
+    },
+    {
+      "sha": "b8177c85f153209fbda281120e5f5916bd423567",
+      "subject": "fix(test): R76 AL 扫描线程测试桩补 list_jobs 形参"
+    },
+    {
+      "sha": "c5947bf681647c295e11a7096163733986bc9ba9",
+      "subject": "docs: R93 收口——账本销项 + 复杂度台账 + L5 验收项登记"
+    }
+  ],
+  "changed_remote_files": [
+    "CONFIG_REFERENCE.md",
+    "docs/03_Review/complexity_ledger.md",
+    "docs/03_Review/improvement_backlog.md",
+    "docs/MIMICS_PROJECT_ARCHITECTURE_CN.md",
+    "docs/TEST_STRATEGY.md",
+    "docs/flexict_mimics.md",
+    "integrations/nnunet_segmentation_workflow/Action4_Predict.py",
+    "repair/cu118/switch_gpu_torch.py",
+    "runtime_py35/active_learning_apply.py",
+    "runtime_py35/flexict_mimics.py",
+    "runtime_py35/nnunet_mimics.py",
+    "runtime_py35/slip_mimics.py",
+    "scripting_library/02_AI/nnUNet/05_Active_Learning_Review.py",
+    "slip_bridge.py",
+    "tests/test_all.py",
+    "tests/test_gui_smoke.py",
+    "tests/test_nnunet_integration.py",
+    "tests/test_slip_bridge_reconcile.py",
+    "tests/test_slip_mimics.py",
+    "tests/test_ui_workflow_regressions.py",
+    "tools/active_learning_common.py",
+    "tools/flexict_active_learning_ui.py",
+    "tools/flexict_pipeline.py",
+    "tools/nnunet_common.py",
+    "tools/nnunet_jobs.py",
+    "tools/nnunet_pipeline.py",
+    "tools/package_portable.py",
+    "tools/run_regression_matrix.py",
+    "tools/setup_progress_window.py"
+  ],
+  "implementation_files": [
+    "mimics_bridge.py",
+    "runtime_py35/active_learning_apply.py",
+    "runtime_py35/create_mcs_batch.py",
+    "tests/test_active_learning_review_regressions.py",
+    "tests/test_all.py",
+    "tests/test_flexict_integration.py",
+    "tests/test_gui_smoke.py",
+    "tools/active_learning_common.py",
+    "tools/flexict_active_learning_ui.py",
+    "tools/flexict_status_viewer.py",
+    "tools/nnunet_common.py",
+    "tools/nnunet_jobs.py",
+    "tools/nnunet_pipeline.py",
+    "tools/nnunet_status_viewer.py",
+    "tools/run_regression_matrix.py"
+  ],
+  "provenance": "SHA/topology relative to last self-pushed a621093; physical pusher is not inferred from shared author identity"
+}

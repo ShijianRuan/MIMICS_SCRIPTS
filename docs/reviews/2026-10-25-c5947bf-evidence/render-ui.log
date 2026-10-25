@@ -1,0 +1,109 @@
+qt.qpa.fonts: Populating font family aliases took 58 ms. Replace uses of missing font family "Sans Serif" with one that exists to avoid this cost. 
+{
+  "nnunet": {
+    "window_size": [
+      820,
+      650
+    ],
+    "selected_case": "caseA",
+    "case_name_tooltip": "患者甲_动脉期_长病例名称用于实际可读性检查\n内部编号：caseA",
+    "buttons": {
+      "open_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 93,
+        "text_width": 65
+      },
+      "overlay_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "consensus_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 116,
+        "text_width": 87
+      },
+      "next_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "annotated_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "skip_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 93,
+        "text_width": 65
+      },
+      "export_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 84,
+        "text_width": 55
+      }
+    },
+    "horizontal_scroll_available": false
+  },
+  "flexict": {
+    "window_size": [
+      820,
+      650
+    ],
+    "selected_case": "caseA",
+    "case_name_tooltip": "患者甲_动脉期_长病例名称用于实际可读性检查\n内部编号：caseA",
+    "buttons": {
+      "open_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 93,
+        "text_width": 65
+      },
+      "overlay_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "consensus_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 116,
+        "text_width": 87
+      },
+      "next_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "annotated_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 106,
+        "text_width": 78
+      },
+      "skip_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 93,
+        "text_width": 65
+      },
+      "export_button": {
+        "visible": true,
+        "enabled": true,
+        "width": 84,
+        "text_width": 55
+      }
+    },
+    "horizontal_scroll_available": false
+  }
+}

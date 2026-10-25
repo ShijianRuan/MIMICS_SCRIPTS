@@ -2384,8 +2384,8 @@ class TestRestorePreviousOffGuiThread(unittest.TestCase):
         self._test_failure_reported_on_gui_thread("flexict_status_viewer")
 
     def test_close_event_stops_restore_poll(self):
-        """Closing the window mid-restore must not leave the poll timer
-        firing on a torn-down window."""
+        """A close during restore waits for its receipt, then tears down
+        timers; the live commit must not be abandoned between renames."""
         _AppFixture.app()
         for module_name in ("nnunet_status_viewer", "flexict_status_viewer"):
             with self.subTest(module=module_name):
@@ -2409,21 +2409,18 @@ class TestRestorePreviousOffGuiThread(unittest.TestCase):
                             {"status_path": "X:/j/status.json"}
                         )
                         self.assertTrue(started.wait(5.0))
-                        window._close_event(mock.Mock())
-                        self.assertFalse(window._restore_timer.isActive())
+                        event = mock.Mock()
+                        window._close_event(event)
+                        event.ignore.assert_called_once()
+                        self.assertTrue(window._restore_timer.isActive())
                         release.set()
-                        # The worker finishes, but with the poll timer
-                        # stopped its receipt must not touch the window.
                         self.assertTrue(
                             self._wait_until(
-                                lambda: not window._restore_results.empty()
+                                lambda: not window._restore_busy
                             ),
                             "worker never finished",
                         )
-                        self.assertTrue(
-                            window._restore_busy,
-                            "closed window must not re-enter GUI code",
-                        )
+                        self.assertFalse(window._restore_timer.isActive())
                 finally:
                     release.set()
                     window.window.close()

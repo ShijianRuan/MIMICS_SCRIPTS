@@ -1,0 +1,16 @@
+{
+  "status": "pass",
+  "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+  "remote_source": "c5947bf681647c295e11a7096163733986bc9ba9",
+  "remote_commits": 29,
+  "remote_changed_files": 29,
+  "implementation_files": 15,
+  "regression_suites": 12,
+  "reported_tests": 556,
+  "platform_skips": 3,
+  "new_contract_tests": 16,
+  "verified_local_links": 61,
+  "source_files": 21,
+  "artifacts": 35,
+  "boundary": "Artifact/source consistency only; not full repository or native clinical validation"
+}

@@ -1,0 +1,9 @@
+test_install_progress_updates_do_not_reset_run (test_all.TestSetupProgressWindow.test_install_progress_updates_do_not_reset_run) ... ok
+test_new_run_within_close_window_cancels_close (test_all.TestSetupProgressWindow.test_new_run_within_close_window_cancels_close) ... ok
+test_slow_state_read_keeps_ticks_responsive (test_all.TestSetupProgressWindow.test_slow_state_read_keeps_ticks_responsive) ... ok
+test_stale_ok_then_new_check_resets_display (test_all.TestSetupProgressWindow.test_stale_ok_then_new_check_resets_display) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.368s
+
+OK

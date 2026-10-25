@@ -2049,42 +2049,45 @@ def publish_prediction_output(
         # Validate the copy we are about to publish, not just the source:
         # a partial copy (disk full mid-write) must fail here, not in Mimics.
         validate_prediction_nifti(staging)
-        if publish_target_conflict(output_path, expected_previous_fingerprint):
-            # S02: the target changed while the task ran — modified,
-            # appeared, deleted, or unreadable at start. Keep BOTH: the
-            # newer target stays in place (or stays absent), the validated
-            # candidate parks next to it — never a silent replace.
-            kept = output_path.with_name(
-                "{}.candidate-{}{}".format(
-                    output_path.stem, uuid.uuid4().hex[:8],
-                    "".join(output_path.suffixes),
+        from nnunet_common import prediction_output_guard
+
+        with prediction_output_guard(output_path):
+            if publish_target_conflict(output_path, expected_previous_fingerprint):
+                # S02: the target changed while the task ran — modified,
+                # appeared, deleted, or unreadable at start. Keep BOTH: the
+                # newer target stays in place (or stays absent), the validated
+                # candidate parks next to it — never a silent replace.
+                kept = output_path.with_name(
+                    "{}.candidate-{}{}".format(
+                        output_path.stem, uuid.uuid4().hex[:8],
+                        "".join(output_path.suffixes),
+                    )
                 )
-            )
-            os.replace(str(staging), str(kept))
-            raise PredictionOutputConflict(
-                "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），"
-                "为避免覆盖较新的结果，本次预测未替换它。"
-                "本次预测已保留在：{}".format(kept),
-                kept,
-            )
-        if output_path.exists():
-            # Stamp BEFORE the suffixes so the kept-aside copy keeps a
-            # recognizable .nii.gz name (nibabel and Mimics can open it
-            # directly on the recovery path).
-            replaced = output_path.with_name(
-                "{}.replaced-{}{}".format(
-                    output_path.stem, uuid.uuid4().hex[:8],
-                    "".join(output_path.suffixes),
+                os.replace(str(staging), str(kept))
+                raise PredictionOutputConflict(
+                    "目标结果在任务运行期间已变化（可能已被另一任务发布或人工修改），"
+                    "为避免覆盖较新的结果，本次预测未替换它。"
+                    "本次预测已保留在：{}".format(kept),
+                    kept,
                 )
-            )
-            os.replace(str(output_path), str(replaced))
-        try:
-            replace_with_retry(str(staging), str(output_path))
-        except OSError:
-            if replaced is not None and not output_path.exists():
-                os.replace(str(replaced), str(output_path))
-                replaced = None
-            raise
+            if output_path.exists():
+                # Stamp BEFORE the suffixes so the kept-aside copy keeps a
+                # recognizable .nii.gz name (nibabel and Mimics can open it
+                # directly on the recovery path).
+                replaced = output_path.with_name(
+                    "{}.replaced-{}{}".format(
+                        output_path.stem, uuid.uuid4().hex[:8],
+                        "".join(output_path.suffixes),
+                    )
+                )
+                os.replace(str(output_path), str(replaced))
+            try:
+                replace_with_retry(str(staging), str(output_path))
+            except OSError:
+                if replaced is not None and not output_path.exists():
+                    os.replace(str(replaced), str(output_path))
+                    replaced = None
+                raise
     finally:
         if staging.exists():
             try:

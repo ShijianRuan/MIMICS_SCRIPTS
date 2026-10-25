@@ -1,5 +1,11 @@
 **MIMICS_SCRIPTS 跨职能评审与开发测试交接**
 
+## 🆕 2026-10-25 · c5947bf 主动学习复核与严重问题修复
+
+[报告](2026-10-25-c5947bf-active-learning.md) · [结构化记录](2026-10-25-c5947bf-active-learning.json) · [证据](2026-10-25-c5947bf-evidence/README.md) · [闭环图](2026-10-25-c5947bf-evidence/active-learning-loop.mmd)
+
+审查远端 29 个提交，修复 9 项新增/遗留问题（P1 六项、P2 三项），并优化两个后端的复核界面。实现提交 `4af03938284e59ac2673746c65ed70dfdbc47c44`；主动学习目前支持复核排序，但标注成本收益与完整训练反馈循环尚未验收。
+
 ## 🆕 2026-10-22 · eee725b 新改动与 SLIP 专项复审
 
 [报告](2026-10-22-eee725b-revalidation.md) · [结构化记录](2026-10-22-eee725b-revalidation.json) · [证据](2026-10-22-eee725b-evidence/README.md) · [可编辑会话图](2026-10-22-eee725b-evidence/slip-session-contract.mmd)

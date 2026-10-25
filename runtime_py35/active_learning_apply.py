@@ -31,6 +31,7 @@ from __future__ import print_function
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -49,7 +50,8 @@ def _matrix_close_payload(a, b, tolerance=1e-4):
                 if abs(
                     float(a[row_index][column_index])
                     - float(b[row_index][column_index])
-                ) > tolerance:
+                ) > tolerance or not all(math.isfinite(float(value)) for value in (
+                        a[row_index][column_index], b[row_index][column_index])):
                     return False
     except Exception:
         return False
@@ -210,6 +212,11 @@ def bind(host, monitor_key, backend_label):
                 return [("{0} Consensus".format(backend_label), path)]
             return []
         bands_dir = os.path.join(uncertainty_dir, "bands")
+        bands = status.get("uncertainty_bands") or {}
+        if bands.get("coincident"):
+            path = os.path.join(bands_dir, "{0}_high.nii.gz".format(case_id))
+            if os.path.isfile(path):
+                return [("{0} Disagreement".format(backend_label), path)]
         rows = []
         for level, title in (
             ("high", "{0} Uncertainty (High)".format(backend_label)),
@@ -423,7 +430,11 @@ def bind(host, monitor_key, backend_label):
             # fails with guidance if the project's image is not the case.
             what = "bands"
         masks = host._al_mask_paths(job_dir, case_id, what)
-        if not masks:
+        status = host._read_json(os.path.join(job_dir, "status.json"), {}) or {}
+        zero_disagreement = what == "bands" and any(
+            str(row.get("case") or "") == case_id and row.get("max") == 0
+            for row in status.get("ranking") or [])
+        if not masks and not zero_disagreement:
             host._al_mark_request(request_path, "failed", "overlay files not found")
             return
         # Verified-grid contract: the active image must still be this case on
@@ -502,6 +513,11 @@ def bind(host, monitor_key, backend_label):
                 "was not started.",
             )
             return
+        if not masks:
+            host._al_mark_request(request_path, "applied",
+                                  "模型预测一致，本例没有分歧带；这不代表标注正确。")
+            host._al_mark_viewed(job_dir, case_id)
+            return
         bridge_root = os.path.join(
             job_dir, "al_apply_" + uuid.uuid4().hex[:8]
         )
@@ -574,6 +590,7 @@ def bind(host, monitor_key, backend_label):
             "bridge_root": bridge_root,
             "masks": masks,
             "target_identity": target_identity,
+            "target_grid": target_grid,
             "source_geometry": expected,
         }
 
@@ -585,30 +602,46 @@ def bind(host, monitor_key, backend_label):
         truncated second band must not leave a half-applied overlay.
         """
         rows = []
-        by_name = dict(
-            (str(candidate.get("name") or ""), candidate)
-            for candidate in result.get("masks") or []
-        )
+        candidates = result.get("masks") or []
+        names = [str(candidate.get("name") or "") for candidate in candidates]
+        if len(set(names)) != len(names):
+            return [], "conversion result contains duplicate buffer names"
+        consumed = set()
         for index, (title, _path) in enumerate(masks):
-            row = by_name.get("al_{0}".format(index))
-            if row is None:
+            original_name = "al_{0}".format(index)
+            matches = [candidate for candidate in candidates
+                       if candidate.get("name") == original_name or (
+                           candidate.get("original_name") == original_name
+                           and candidate.get("name") == original_name + "_label{0}".format(
+                               candidate.get("label_value")))]
+            if not matches:
                 return [], "conversion result is missing buffer {0}".format(index)
-            output_path = str(row.get("output_path") or "")
-            if not output_path or not os.path.isfile(output_path):
-                return [], "conversion buffer {0} was not written".format(index)
-            shape = row.get("mimics_shape") or []
-            try:
-                expected_bytes = int(shape[0]) * int(shape[1]) * int(shape[2])
-                actual_bytes = os.path.getsize(output_path)
-            except Exception:
-                return [], "conversion buffer {0} has no readable shape".format(
-                    index)
-            if expected_bytes <= 0 or actual_bytes != expected_bytes:
-                return [], (
-                    "conversion buffer {0} is truncated ({1} of {2} bytes)"
-                    .format(index, actual_bytes, expected_bytes)
-                )
-            rows.append((title, row))
+            if len(matches) > 1 and any(row.get("name") == original_name for row in matches):
+                return [], "conversion mixes binary and split-label buffers"
+            for row in matches:
+                consumed.add(row["name"])
+                output_path = str(row.get("output_path") or "")
+                if not output_path or not os.path.isfile(output_path):
+                    return [], "conversion buffer {0} was not written".format(index)
+                shape = row.get("mimics_shape") or []
+                try:
+                    if len(shape) != 3 or any(int(v) != v or int(v) <= 0 for v in shape):
+                        raise ValueError("invalid shape")
+                    expected_bytes = int(shape[0]) * int(shape[1]) * int(shape[2])
+                    actual_bytes = os.path.getsize(output_path)
+                    label_value = int(row.get("label_value") or 0)
+                    if row.get("name") != original_name and label_value <= 0:
+                        raise ValueError("invalid label")
+                except Exception:
+                    return [], "conversion buffer {0} has no readable shape or label".format(index)
+                if actual_bytes != expected_bytes:
+                    return [], (
+                        "conversion buffer {0} is truncated ({1} of {2} bytes)"
+                        .format(index, actual_bytes, expected_bytes)
+                    )
+                rows.append((title, row))
+        if consumed != set(names):
+            return [], "conversion result contains unexpected buffers"
         return rows, ""
 
     def _al_target_still_matches(transaction):
@@ -639,7 +672,16 @@ def bind(host, monitor_key, backend_label):
                 "The active image changed while the overlay was converting. "
                 "Reactivate the case image and request the overlay again."
             )
-        # Same object: the recorded source geometry is still the reference.
+        # Registration/resampling can change the physical grid without
+        # replacing the Image object. Conversion belongs to the launch grid.
+        expected_grid = transaction.get("target_grid")
+        if expected_grid:
+            current_grid = host.mimics_mask_apply._active_live_grid_payload() or {}
+            if list(current_grid.get("target_shape") or []) != list(
+                    expected_grid.get("target_shape") or []) or not _matrix_close_payload(
+                        current_grid.get("target_voxel_to_ras_matrix"),
+                        expected_grid.get("target_voxel_to_ras_matrix")):
+                return "The active image grid changed while the overlay was converting. Request it again."
         return ""
 
     def _al_finish_conversion(transaction):
@@ -674,6 +716,19 @@ def bind(host, monitor_key, backend_label):
             if not rows:
                 host._al_mark_request(request_path, "failed", "no foreground voxels")
                 return
+            if request.get("what") == "consensus":
+                status = host._read_json(os.path.join(job_dir, "status.json"), {}) or {}
+                labels = status.get("labels") or [status.get("label_name") or ""]
+                titled_rows = []
+                for title, row in rows:
+                    label_value = int(row.get("label_value") or 0)
+                    if 0 < label_value <= len(labels):
+                        value = labels[label_value - 1]
+                        label_name = value.get("name", "") if isinstance(value, dict) else str(value)
+                    else:
+                        label_name = "label {0}".format(label_value)
+                    titled_rows.append((title + " · " + label_name, row))
+                rows = titled_rows
             error = host._al_target_still_matches(transaction)
             if error:
                 host._al_mark_request(request_path, "failed", error)

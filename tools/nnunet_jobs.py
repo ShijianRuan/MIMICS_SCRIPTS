@@ -396,6 +396,20 @@ def reattach_job(status_path: str | Path) -> bool:
 
 
 def restore_replaced_output(status_path: str | Path) -> dict[str, Any]:
+    from nnunet_common import prediction_output_guard
+
+    path = Path(status_path).expanduser().resolve()
+    status = read_json(path, {}) or {}
+    output = str(status.get("output_path") or "")
+    if not output:
+        raise RuntimeError("该任务没有记录结果路径，无法恢复。")
+    with prediction_output_guard(output):
+        # Re-read identities/status only after acquiring the same guard the
+        # publisher uses, and hold it through status publication.
+        return _restore_replaced_output_locked(path)
+
+
+def _restore_replaced_output_locked(status_path: str | Path) -> dict[str, Any]:
     """S02: swap the kept-aside previous result back into the output path.
 
     Conflict-protected like the publish boundary: the current output is only

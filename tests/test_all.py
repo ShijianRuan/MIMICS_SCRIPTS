@@ -4027,6 +4027,7 @@ class TestCreateMcsBatch(unittest.TestCase):
                 create_mcs_batch._MaskIdentity("Liver-Old", "g-old", 4, "")],
         )
         old_payload["created_at_epoch"] = 1000.0
+        old_payload["mcs_fingerprint"] = "sha256:old-project-content"
         create_mcs_batch.write_json_atomic(receipt_path, old_payload)
 
         # Today's re-import snapshot is queued after its write failed.
@@ -4151,6 +4152,7 @@ class TestCreateMcsBatch(unittest.TestCase):
                 create_mcs_batch._MaskIdentity("Liver-Old", "g-old", 4, "")],
         )
         older_payload["created_at_epoch"] = 1000.0
+        older_payload["mcs_fingerprint"] = "sha256:old-project-content"
         create_mcs_batch._write_pending_receipts(runtime_dir, {
             "case_s01g": {
                 "receipt_path": receipt_path,
@@ -19670,11 +19672,15 @@ class TestSetupProgressWindow(unittest.TestCase):
         _cleanup(self.tmp)
 
     def _make_window(self):
-        from PySide6 import QtWidgets
+        from PySide6 import QtCore, QtWidgets
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(
             ["test"]
         )
+        # Keep QApplication alive across the entire fixture. A local-only
+        # wrapper and a reader still holding its QWidget can crash during
+        # interpreter teardown even after unittest printed "OK".
+        type(self)._qt_app = app
         for attr, value in (
             ("STATE_FILE", Path(self.state_path)),
             ("LOG_FILE", Path(self.log_path)),
@@ -19684,8 +19690,15 @@ class TestSetupProgressWindow(unittest.TestCase):
             self.addCleanup(patcher.stop)
         window = self.ui.ProgressWindow()
         window._timer.stop()  # 测试手动驱动 _tick
-        self.addCleanup(window.close)
-        self.addCleanup(window._stop_reader.set)
+        def cleanup_window():
+            window._stop_reader.set()
+            window._reader.join(timeout=2)
+            window._timer.stop()
+            window.close()
+            window.deleteLater()
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+            app.processEvents()
+        self.addCleanup(cleanup_window)
         return window
 
     def test_stale_ok_then_new_check_resets_display(self):

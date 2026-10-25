@@ -1798,16 +1798,12 @@ def _validate_dicom_slice_grid(headers: list) -> None:
                 "DICOM 序列中存在无法解析的层面位置（ImagePositionPatient）："
                 "{0}".format(getattr(ds, "filename", "<unknown>"))
             )
-        if not np.isfinite(pos).all():
+        if pos.shape != (3,) or not np.isfinite(pos).all():
             raise ValueError(
                 "DICOM 序列的层面位置含非有限数值：{0}".format(
                     getattr(ds, "filename", "<unknown>"))
             )
         positions.append((ds, pos))
-    if len(positions) < 2:
-        # A single positioned slice cannot be non-uniform.
-        return
-
     iops = {
         tuple(np.round(np.asarray(
             [float(v) for v in getattr(ds, "ImageOrientationPatient", [])],
@@ -1865,6 +1861,11 @@ def _validate_dicom_slice_grid(headers: list) -> None:
             "网格，已拒绝导入。请回原图源检查导出设置。"
         )
     slice_dir = slice_dir / norm
+
+    # Per-image orientation must be valid even for one slice; only the
+    # between-slice step requires two positions (S06).
+    if len(positions) < 2:
+        return
 
     projections = [
         float(np.dot(pos, slice_dir)) for _, pos in positions

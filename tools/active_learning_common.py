@@ -117,11 +117,13 @@ def materialize_al_pool(job_dir: Path,
                 # Mimics to open it (the .mcs convention mirrors
                 # mimics_label_export's mcs_output lookup).
                 "source_image_path": str(image),
+                "case_name": case_dir.name,
                 "mcs_path": case_mcs_path(dataset_root, case_dir.name),
             }
         except Exception:
             geometries[case_id] = {
                 "source_image_path": str(image),
+                "case_name": case_dir.name,
                 "mcs_path": case_mcs_path(dataset_root, case_dir.name),
             }
         update_status(
@@ -243,19 +245,27 @@ def write_uncertainty_bands(uncertainty_dir: Path,
     if moderate >= high:
         moderate = max(1, high - 1)
     written = {"moderate": 0, "high": 0}
+    coincident = bool(images)
     for case_id, (image, values) in images.items():
+        case_bands = {}
         for level, threshold in (("moderate", moderate), ("high", high)):
             if threshold < 1:
+                coincident = False
                 continue
             band = (values >= threshold).astype(np.uint8)
+            case_bands[level] = band
             if not band.any():
                 continue
             nib.save(
                 nib.Nifti1Image(band, image.affine, image.header),
                 str(bands_dir / "{}_{}.nii.gz".format(case_id, level)))
             written[level] += 1
+        if len(case_bands) != 2 or not np.array_equal(
+                case_bands["moderate"], case_bands["high"]):
+            coincident = False
     return {"dir": str(bands_dir), "moderate_threshold": moderate,
-            "high_threshold": high, "written": written}
+            "high_threshold": high, "written": written,
+            "coincident": bool(coincident and written["high"])}
 
 
 def rank_disagreement(job_dir: Path,

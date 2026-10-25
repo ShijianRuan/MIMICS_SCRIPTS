@@ -1,0 +1,41 @@
+Regression matrix: 12 suite(s), profile=fast
+========================================================================
+[run ] flexict_integration: tests/test_flexict_integration.py
+[PASS] flexict_integration (7.2s)
+[run ] flexict_common: tests/test_flexict_common.py
+[PASS] flexict_common (0.1s)
+[run ] flexict_pkg: integrations/flexict-finetune/tests/test_flexict_pkg.py
+[PASS] flexict_pkg (7.0s)
+[run ] nnunet_integration: tests/test_nnunet_integration.py
+[PASS] nnunet_integration (11.2s)
+[run ] slip_mimics: tests/test_slip_mimics.py
+[PASS] slip_mimics (1.6s)
+[run ] slip_bridge: tests/test_slip_bridge_reconcile.py
+[PASS] slip_bridge (0.6s)
+[run ] geometry_manifest_regressions: tests/test_geometry_manifest_regressions.py
+[PASS] geometry_manifest_regressions (0.2s)
+[run ] review_workflow_regressions: tests/test_review_workflow_regressions.py
+[PASS] review_workflow_regressions (0.2s)
+[run ] active_learning_review: tests/test_active_learning_review_regressions.py
+[PASS] active_learning_review (1.5s)
+[run ] gui_smoke: tests/test_gui_smoke.py
+[PASS] gui_smoke (4.4s)
+[run ] ui_quality: tests/test_ui_quality.py
+[PASS] ui_quality (0.3s)
+[run ] cross_workflow: tests/test_cross_workflow_transitions.py
+[PASS] cross_workflow (0.4s)
+========================================================================
+Matrix summary (fast)
+  [pass] flexict_integration                  7.2s
+  [pass] flexict_common                       0.1s
+  [pass] flexict_pkg                          7.0s
+  [pass] nnunet_integration                  11.2s
+  [pass] slip_mimics                          1.6s
+  [pass] slip_bridge                          0.6s
+  [pass] geometry_manifest_regressions        0.2s
+  [pass] review_workflow_regressions          0.2s
+  [pass] active_learning_review               1.5s
+  [pass] gui_smoke                            4.4s
+  [pass] ui_quality                           0.3s
+  [pass] cross_workflow                       0.4s
+12/12 suites passed. Artifact: /tmp/mimics-review-20261025/regression-matrix.json

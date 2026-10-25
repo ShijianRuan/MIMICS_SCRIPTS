@@ -1,0 +1,221 @@
+{
+  "schema": "review_validation.v1",
+  "reviewed_remote_source": "c5947bf681647c295e11a7096163733986bc9ba9",
+  "implementation_source": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+  "environment": {
+    "python": "3.13.12 | packaged by Anaconda, Inc. | (main, Feb 24 2026, 16:07:20) [Clang 20.1.8 ]",
+    "numpy": "2.4.6",
+    "nibabel": "5.4.2",
+    "SimpleITK": "2.5.5",
+    "PySide6": "6.11.1"
+  },
+  "platform": "macOS; QT_QPA_PLATFORM=offscreen; no native Mimics/CUDA",
+  "process_environment": {
+    "QT_QPA_PLATFORM": "offscreen",
+    "TMPDIR": "/private/tmp",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "MIMICS_BRIDGE_PYTHON": "existing conda Python (test process only)"
+  },
+  "selected_regression_matrix": {
+    "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+    "file": "regression-matrix.json",
+    "suites": [
+      {
+        "name": "flexict_integration",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 149,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "flexict_common",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 24,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "flexict_pkg",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 10,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "nnunet_integration",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 154,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "slip_mimics",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 65,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "slip_bridge",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 12,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "geometry_manifest_regressions",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 6,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "review_workflow_regressions",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 11,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "active_learning_review",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 16,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "gui_smoke",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 102,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "ui_quality",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 5,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      },
+      {
+        "name": "cross_workflow",
+        "status": "pass",
+        "exit_code": 0,
+        "tests_reported": 2,
+        "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44"
+      }
+    ],
+    "total_suites": 12,
+    "failed_suites": 0,
+    "reported_tests": 556,
+    "skipped": 3,
+    "skip_reason": "GUI Windows-only locking checks"
+  },
+  "extra_checks": [
+    {
+      "log": "receipt-final.log",
+      "tests": 31,
+      "exit_code": 0,
+      "selection": "test_all.TestCreateMcsBatch",
+      "identity": "working tree before commit; affected source bytes match implementation commit"
+    },
+    {
+      "log": "affected-core-final.log",
+      "tests": 59,
+      "exit_code": 0,
+      "skipped": 1,
+      "selection": [
+        "test_all.TestMimicsBridgeNiftiNormalization",
+        "test_all.TestMimicsBridgeBufferMapping"
+      ],
+      "identity": "working tree before commit; affected source bytes match implementation commit"
+    },
+    {
+      "log": "remote-fix-revalidation.log",
+      "tests": 8,
+      "exit_code": 0,
+      "selection": "test_all.TestGpuRepairLauncher",
+      "identity": "upstream GPU repair source unchanged between reviewed and implementation commits; isolated temporary package fixtures only"
+    },
+    {
+      "logs": [
+        "setup-progress-final-0.log",
+        "setup-progress-final-1.log",
+        "setup-progress-final-2.log",
+        "setup-progress-final-3.log",
+        "setup-progress-final-4.log"
+      ],
+      "tests_per_run": 4,
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "selection": "test_all.TestSetupProgressWindow",
+      "identity": "post-cleanup fixture bytes match implementation commit"
+    }
+  ],
+  "baseline_logs": {
+    "source_commit": "c5947bf681647c295e11a7096163733986bc9ba9",
+    "baseline-slip.log": 77,
+    "baseline-nnunet.log": 154,
+    "baseline-flexict.log": 149
+  },
+  "retained_initial_failures": [
+    {
+      "log": "affected-core-initial.log",
+      "tests": 59,
+      "errors": 1,
+      "skipped": 1,
+      "exit_code": 1,
+      "source_identity": "review working tree before final bridge interpreter environment was supplied",
+      "reason": "external bridge interpreter not discovered; rerun with an existing interpreter, no install/config edit"
+    },
+    {
+      "log": "setup-progress-initial-crash.log",
+      "tests": 4,
+      "printed_result": "OK",
+      "process_exit_code": 139,
+      "source_identity": "review working tree before QApplication/test reader lifecycle cleanup; not the final implementation snapshot",
+      "resolution": "retain QApplication; cleanup reader, timer and widget on Qt thread; 5 independent processes then exit 0"
+    }
+  ],
+  "ui": {
+    "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+    "data": "synthetic JSON and NIfTI fixtures; no patient data",
+    "logical_window": [
+      820,
+      650
+    ],
+    "scale_factors": [
+      1,
+      1.5
+    ],
+    "images": [
+      "nnunet-review.png",
+      "nnunet-review-scale-1_5.png",
+      "flexict-review.png",
+      "flexict-review-scale-1_5.png"
+    ],
+    "observations": [
+      "ui-observations.json",
+      "ui-observations-scale-1_5.json"
+    ],
+    "boundary": "real Qt widget render/event loop on macOS, not target Windows/Mimics end-to-end"
+  },
+  "not_run": [
+    "full repository regression profile",
+    "actual Mimics host interaction",
+    "native Windows locking and display",
+    "real GPU/model inference",
+    "training or convergence/annotation-time experiment",
+    "environment installation/repair"
+  ],
+  "commands": [
+    "QT_QPA_PLATFORM=offscreen TMPDIR=/private/tmp PYTHONDONTWRITEBYTECODE=1 MIMICS_BRIDGE_PYTHON=<existing-python> <existing-python> tools/run_regression_matrix.py --only flexict_integration flexict_common flexict_pkg nnunet_integration slip_mimics slip_bridge geometry_manifest_regressions review_workflow_regressions active_learning_review gui_smoke ui_quality cross_workflow --timeout 180 --output <fresh-evidence>/regression-matrix.json",
+    "QT_QPA_PLATFORM=offscreen TMPDIR=/private/tmp PYTHONDONTWRITEBYTECODE=1 MIMICS_BRIDGE_PYTHON=<existing-python> <existing-python> -m unittest discover -s tests -p test_active_learning_review_regressions.py -v",
+    "PYTHONPATH=tests:tools:. QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 <existing-python> -m unittest test_all.TestSetupProgressWindow -v (5 independent processes)"
+  ]
+}
