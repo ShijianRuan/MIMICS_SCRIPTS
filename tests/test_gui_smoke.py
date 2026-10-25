@@ -3133,6 +3133,108 @@ class TestActiveLearningWindow(unittest.TestCase):
             self.assertIn("数据池", window.pair_label.text())
 
 
+class TestNNUNetActiveLearningWindow(unittest.TestCase):
+    """R93 步骤 5/8：nnU-Net 模式的 AL 复核窗口。
+
+    分歧来源是 k 折模型，所以表单只允许含 >=2 个已训练折（各自带
+    checkpoint_final.pth）的 bundle；单折模型必须在列表阶段被跳过并
+    说明原因，而不是让标注者启动一个注定失败的任务。
+    """
+
+    def _bundle(self, root, model_id, folds):
+        model_dir = root / "models" / model_id
+        for fold in folds:
+            fold_dir = model_dir / "fold_{}".format(fold)
+            fold_dir.mkdir(parents=True)
+            (fold_dir / "checkpoint_final.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+        return {
+            "model_id": model_id,
+            "task_id": "Dataset701_Segtask",
+            "task_name": "Segtask",
+            "model_dir": str(model_dir),
+            "manifest_path": str(
+                model_dir / "mimics_model_manifest.json"),
+        }
+
+    def _window(self, tmp, rows):
+        import flexict_active_learning_ui as al_ui
+        import nnunet_common
+
+        _AppFixture.app()
+        # The model check imports load_models at call time inside its
+        # worker thread, so the stub must stay installed for the whole
+        # window lifetime (not just the constructor).
+        patcher = mock.patch.object(
+            nnunet_common, "load_models", return_value=rows)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        window = al_ui.ActiveLearningWindow(
+            {"workspace": str(Path(tmp) / "workspace"), "mode": "nnunet"},
+            QT)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and window._loading_models:
+            _AppFixture.app().processEvents()
+            window._poll_background_results()
+            time.sleep(0.02)
+        self.assertFalse(window._loading_models, "model check never landed")
+        return window
+
+    def test_lists_only_multifold_bundles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [
+                self._bundle(root, "m_single", ["0"]),
+                self._bundle(root, "m_kfold", ["0", "1", "3"]),
+            ]
+            window = self._window(tmp, rows)
+            try:
+                self.assertEqual(1, window.model_combo.count())
+                self.assertIn("m_kfold", window.model_combo.itemText(0))
+                self.assertIn("3 折", window.model_combo.itemText(0))
+                self.assertIn(
+                    "已找到 1 个可用的多折模型",
+                    window.model_status_label.text())
+                self.assertTrue(window.start_run_button.isEnabled())
+            finally:
+                window.window.close()
+
+    def test_single_fold_bundle_skipped_with_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [self._bundle(root, "m_single", ["0"])]
+            window = self._window(tmp, rows)
+            try:
+                self.assertEqual(0, window.model_combo.count())
+                text = window.model_status_label.text()
+                self.assertIn("未找到含至少 2 个已训练折的 nnU-Net 模型", text)
+                self.assertIn("已跳过 1 个", text)
+                self.assertFalse(window.start_run_button.isEnabled())
+            finally:
+                window.window.close()
+
+    def test_submit_requires_pool_and_model(self):
+        """表单校验必须同步失败：缺池/缺模型都不派发后台创建任务。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [self._bundle(root, "m_single", ["0"])]
+            window = self._window(tmp, rows)
+            try:
+                window.pool_edit.setText("")
+                window._submit_new_run()
+                self.assertIn(
+                    "请先选择未标注数据池文件夹",
+                    window.model_status_label.text())
+                window.pool_edit.setText(str(root / "pool"))
+                window._submit_new_run()
+                self.assertIn(
+                    "请先选择一个多折模型",
+                    window.model_status_label.text())
+            finally:
+                window.window.close()
+
+
 class TestWindowClampedToSmallScreen(unittest.TestCase):
     """F37: a hard minimum larger than the available screen (150% DPI on
     1280x720 leaves ~853x480 logical pixels minus the taskbar) forced

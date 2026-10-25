@@ -4061,6 +4061,186 @@ class TestNNUNetActiveLearningLifecycle(unittest.TestCase):
             self.assertEqual(status["execution_backend"], "local")
             self.assertTrue(created["job_id"].startswith("active_learning_"))
 
+    def test_al_rejects_empty_pool(self):
+        """空池：在占用 GPU 之前就失败，绝不留下一个看似在跑的任务。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=0)
+            exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 1)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("No image cases were found", str(status.get("error")))
+            # failed before any fold ran
+            self.assertFalse((job_dir / "predictions_fold_0").exists())
+
+    def test_al_fails_when_all_predictions_off_grid(self):
+        """两折预测共享同一错误网格：run_batch 的成对检查看不见，但输入
+        几何核对会全例剔除——必须中文报错并指向任务日志，而不是静默给
+        标注者一份短了一截的排名。"""
+        import nibabel as nib
+        import numpy as np
+
+        def shifted_worker(stage, params, *args, **kwargs):
+            source_dir = Path(params["input_path"])
+            output = Path(params["output_path"])
+            output.mkdir(parents=True, exist_ok=True)
+            fold = str(params["use_folds"][0])
+            for image_path in sorted(source_dir.glob("*.nii.gz")):
+                source = nib.load(str(image_path))
+                # BOTH folds shift identically: they agree with each other
+                # but disagree with the case's recorded input geometry.
+                affine = np.asarray(source.affine, dtype=float).copy()
+                affine[0, 3] += 100.0
+                prediction = np.zeros(source.shape[:3], dtype=np.uint8)
+                prediction[1:-1, 1:-1, 1:-1] = 1
+                nib.save(nib.Nifti1Image(prediction, affine),
+                         str(output / image_path.name))
+            return {"status": "ok", "result": {}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=2)
+            with mock.patch.object(
+                    pipeline, "_spawn_worker", side_effect=shifted_worker), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None):
+                exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 1)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("没有病例成功计算不确定度", str(status.get("error")))
+            self.assertIn("全部在预测网格核对中被剔除", str(status.get("error")))
+            log_text = (job_dir / "uncertainty_log.txt").read_text(
+                encoding="utf-8")
+            self.assertIn("网格与该病例输入不一致", log_text)
+            for case_id in cases:
+                self.assertIn(case_id, log_text)
+
+    def test_al_rejects_ranking_success_mismatch(self):
+        """S10：排名结果必须与本轮成功清单完全一致。分析器少吐一例时
+        宁可整轮失败，也不能给复核窗口一份缺了病例的排名。"""
+        from flexict_common import flexict_repo_dir
+        repo = flexict_repo_dir()
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        import uncertainty  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
+            with mock.patch.object(
+                    pipeline, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None), \
+                 mock.patch.object(
+                     uncertainty, "run_batch",
+                     return_value=[{"case": case} for case in cases]), \
+                 mock.patch.object(
+                     uncertainty, "analyze_uncertainty_dir",
+                     return_value=[
+                         {"case": cases[0], "integrated": 1.0,
+                          "uncertain_vol": 1.0, "max": 0.5},
+                         {"case": cases[1], "integrated": 0.5,
+                          "uncertain_vol": 0.5, "max": 0.5},
+                     ]):
+                exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 1)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("排名结果与本轮成功清单不一致", str(status.get("error")))
+            self.assertIn("排名 2 例、成功 3 例", str(status.get("error")))
+
+
+class TestEasyPredictUseFolds(unittest.TestCase):
+    """easy_predict 必须把 use_folds 原样透传给 nnUNetPredictor——k 折
+    主动学习的逐折推理依赖这一契约；None 时回退到模型的全部可用折。"""
+
+    class _FakePredictor:
+        last_instance = None
+
+        def __init__(self, **kwargs):
+            self.init_kwargs = None
+            TestEasyPredictUseFolds._FakePredictor.last_instance = self
+
+        def initialize_from_trained_model_folder(self, **kwargs):
+            self.init_kwargs = kwargs
+
+    def _load_module(self):
+        # Action4_Predict imports torch at module level and pulls
+        # nnUNetPredictor from nnunetv2 inside easy_predict; stub both so the
+        # test stays hermetic (no GPU stack) and fast.
+        fake_torch = types.ModuleType("torch")
+        fake_torch.device = lambda value: value
+        fake_predict_module = types.ModuleType(
+            "nnunetv2.inference.predict_from_raw_data")
+        fake_predict_module.nnUNetPredictor = self._FakePredictor
+        # easy_predict imports nnUNetPredictor at CALL time, so the stubs
+        # must stay installed for the whole test method, not just the load.
+        patcher = mock.patch.dict(sys.modules, {
+            "torch": fake_torch,
+            "nnunetv2": types.ModuleType("nnunetv2"),
+            "nnunetv2.inference": types.ModuleType("nnunetv2.inference"),
+            "nnunetv2.inference.predict_from_raw_data": fake_predict_module,
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location(
+            "action4_predict_use_folds_under_test",
+            WORKFLOW / "Action4_Predict.py")
+        module = importlib.util.module_from_spec(spec)
+        # dataclasses resolves string annotations through
+        # sys.modules[cls.__module__]; register before exec.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        return module
+
+    def _make_model_and_input(self, tmp):
+        import nibabel as nib
+        import numpy as np
+
+        model_dir = (
+            Path(tmp) / "Dataset701_Segtask"
+            / "MimicsNNUNetTrainer__nnUNetPlans__3d_fullres")
+        for fold in ("0", "1"):
+            fold_dir = model_dir / "fold_{}".format(fold)
+            fold_dir.mkdir(parents=True)
+            (fold_dir / "checkpoint_final.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text(
+            '{"plans_name": "nnUNetPlans"}', encoding="utf-8")
+        input_dir = Path(tmp) / "input"
+        input_dir.mkdir()
+        nib.save(
+            nib.Nifti1Image(
+                np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)),
+            str(input_dir / "case000.nii.gz"))
+        return model_dir, input_dir
+
+    def test_easy_predict_locks_to_requested_fold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._load_module()
+            model_dir, input_dir = self._make_model_and_input(tmp)
+            with mock.patch.object(module, "_easy_predict_singlethread"), \
+                 mock.patch.object(module, "_easy_predict_multiprocess"):
+                module.easy_predict(
+                    model_dir, input_dir, Path(tmp) / "out",
+                    use_cpu=True, use_folds=["0"])
+            kwargs = self._FakePredictor.last_instance.init_kwargs
+            self.assertEqual(kwargs["use_folds"], ("0",))
+            self.assertEqual(kwargs["checkpoint_name"], "checkpoint_final.pth")
+            self.assertEqual(kwargs["model_training_output_dir"], str(model_dir))
+
+    def test_easy_predict_defaults_to_all_available_folds(self):
+        """use_folds=None：加载目录里全部可用折（fold 扫描返回 int 折号）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._load_module()
+            model_dir, input_dir = self._make_model_and_input(tmp)
+            with mock.patch.object(module, "_easy_predict_singlethread"), \
+                 mock.patch.object(module, "_easy_predict_multiprocess"):
+                module.easy_predict(
+                    model_dir, input_dir, Path(tmp) / "out", use_cpu=True)
+            kwargs = self._FakePredictor.last_instance.init_kwargs
+            self.assertEqual(kwargs["use_folds"], (0, 1))
+
 
 class FakeMask:
     def __init__(self, name, pixels=1, content=None):
