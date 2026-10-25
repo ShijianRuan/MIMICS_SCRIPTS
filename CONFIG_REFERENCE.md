@@ -274,6 +274,13 @@ hatch — none are annotator-facing).
 | `runtime_retention_days` | `30` | Retention for rebuildable `runtime/` Dataset folders (nnUNet_raw/nnUNet_preprocessed/nnUNet_results, 0 disables). Datasets referenced by registered models or non-terminal jobs are never removed; everything else is deleted once older than this. |
 | `source_grid_cache_retention_days` | `30` | Retention for the rebuildable `cache/source_grid/` per-case training inputs (0 disables). Task trees of non-terminal jobs are never removed. |
 
+Active-learning ranking jobs (local only; the form rejects remote backends)
+carry their uncertainty settings as request fields with code defaults, not
+config keys: `uncertainty_method` (`"disagreement"`),
+`uncertainty_moderate_threshold` (`3`), `uncertainty_high_threshold` (`6`).
+They are exposed in the review window's new-ranking form and need no file
+entry.
+
 ### Train/validation split contract
 
 The nnU-Net and FlexiCT training pipelines split cases into five rotating

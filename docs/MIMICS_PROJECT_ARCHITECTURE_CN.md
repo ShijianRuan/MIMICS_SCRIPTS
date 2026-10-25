@@ -465,6 +465,22 @@ runtime_py35/nnunet_mimics.py
 
 （2026-09-27：原 `02_AI/nnUNet/04_Stop_Running_Task.py` 与本入口的状态窗口重复，按 D1 决策删除，停止功能由本入口承担。）
 
+### 7.5 `02_AI/nnUNet/05_Active_Learning_Review.py`
+
+用途：复用 FlexiCT 的主动学习复核闭环，把分歧来源换成 nnU-Net 的
+k 折模型（UIHTools `Action6_Uncertainty` 同源算法）。标注者选一个
+**含 ≥2 折 checkpoint 的已训模型**和一个未标注病例池（dataset_root），
+任务对池内每例逐折推理（`easy_predict` 的 `use_folds`），再经
+`disagreement` 排序回答"下一个该标注谁"，产出与 FlexiCT 完全相同的
+工件（`ranking.csv`、双带 `bands/`、consensus、`input_geometries.json`、
+`apply_requests/`、`annotation_state.json`），因此复核窗口、双击开病例、
+叠加不确定度带、标记回流全部复用同一套 UI 与 Mimics 监控
+（`runtime_py35/active_learning_apply.py`，两后端共享）。
+
+约束：仅本地执行（远程后端在表单层明确拒绝）；池物化只读源数据集，
+输出全部写入 job 目录；未标注病例需要先经 01 Import 生成 .mcs 才能
+双击打开。
+
 ## 8. Review 功能入口
 
 ### 8.1 `03_Review/01_Identify_Mask_At_Cursor.py`

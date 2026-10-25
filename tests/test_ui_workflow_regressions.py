@@ -589,13 +589,13 @@ class TestUiWorkflow(unittest.TestCase):
 
 
 class TestFrontDoorRoutes(unittest.TestCase):
-    def test_all_29_entry_scripts_call_their_actual_runtime_handler(self):
+    def test_all_30_entry_scripts_call_their_actual_runtime_handler(self):
         # This module supplies the repository's existing Mimics stub. It does
         # not emulate a Mimics workstation or execute actual API operations.
         import test_all  # noqa: F401
         import _mimics_entrypoint
         paths = sorted((ROOT / 'scripting_library').rglob('*.py'))
-        self.assertEqual(len(paths), 29)
+        self.assertEqual(len(paths), 30)
         for p in paths:
             with self.subTest(entry=str(p.relative_to(ROOT))):
                 source = p.read_text(encoding='utf-8-sig')

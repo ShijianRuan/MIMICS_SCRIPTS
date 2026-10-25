@@ -109,6 +109,14 @@ grid 后经 mask buffer 事务应用；网格不匹配的预测会被拒绝而�
    pair 模式下两模型分歧只有单一非零级别，moderate/high 两条带覆盖同一批
    体素——状态栏会提示这一点，避免把两条 overlay 读成两个独立信号。
 
+> **nnU-Net 路径共用同一闭环**：`02_AI/nnUNet/05_Active_Learning_Review.py`
+> 打开同一个 Review 窗口（nnU-Net 模式）。分歧来源换成 **k 折模型**——选一个
+> 含 ≥2 折 checkpoint 的已训 nnU-Net 模型和一个未标注池，每折各对池预测一次，
+> 折间分歧即不确定度信号（默认 moderate=3 / high=6；k 折分歧的每体素最大级别
+> 同样 ≤5，high 默认值也走同一 clamp 逻辑）。工件结构、复核操作、Mimics 监控
+> （`runtime_py35/active_learning_apply.py`，两后端共享）与状态回流完全相同。
+> 仅本地执行（远程后端在表单层明确拒绝）；池物化只读源数据集。
+
 ### 3.4 状态与停止（04 Show Status and Stop）
 
 打开外部状态窗口：job 列表、日志查看、模型列表；**运行中的任务可从中停止**
