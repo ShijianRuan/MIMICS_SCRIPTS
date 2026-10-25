@@ -3801,6 +3801,267 @@ class JobLifecycleTests(unittest.TestCase):
             )
 
 
+class TestNNUNetActiveLearningLifecycle(unittest.TestCase):
+    """run_active_learning: the nnU-Net k-fold AL stage machine. The worker
+    spawn and GPU acquisition are mocked; the shared ranking/band/grid
+    validation code runs for real through the nnU-Net entry point."""
+
+    def _setup_al_job(self, tmp, cases_count=3, folds=("0", "1")):
+        import nibabel as nib
+        import numpy as np
+
+        dataset_root = Path(tmp) / "pool"
+        dataset_root.mkdir(parents=True, exist_ok=True)
+        cases = []
+        for index in range(cases_count):
+            case_id = "case{:02d}".format(index)
+            case_dir = dataset_root / case_id
+            case_dir.mkdir(parents=True, exist_ok=True)
+            image = np.zeros((6, 8, 8), dtype=np.float32)
+            image[1:-1, 1:-1, 1:-1] = 100.0
+            nib.save(
+                nib.Nifti1Image(image, np.eye(4)),
+                str(case_dir / "ct.nii.gz"))
+            cases.append(case_id)
+        workspace = Path(tmp) / "workspace"
+        model_dir = (
+            workspace / "runtime" / "nnUNet_results" / "Dataset701_Segtask"
+            / "MimicsNNUNetTrainer__nnUNetPlans__3d_fullres")
+        for fold in folds:
+            fold_dir = model_dir / "fold_{}".format(fold)
+            fold_dir.mkdir(parents=True)
+            (fold_dir / "checkpoint_final.pth").write_bytes(b"x")
+        (model_dir / "plans.json").write_text("{}", encoding="utf-8")
+        (model_dir / "dataset.json").write_text("{}", encoding="utf-8")
+        manifest_path = model_dir / "mimics_model_manifest.json"
+        common.write_json_atomic(manifest_path, {
+            "model_id": "m_al",
+            "model_dir": str(model_dir),
+            "task_id": "Segtask", "task_name": "Segtask",
+            "labels": ["whole"], "folds": list(folds),
+        })
+        request = pipeline.normalize_request({
+            "operation": "active_learning",
+            "workspace": str(workspace),
+            "dataset_root": str(dataset_root),
+            "model_manifest": str(manifest_path),
+        })
+        # The job dir lives OUTSIDE the workspace so the end-of-run sweep of
+        # workspace jobs cannot touch this test's status file.
+        job_dir = Path(tmp) / "jobs" / request["job_id"]
+        job_dir.mkdir(parents=True)
+        common.write_json_atomic(job_dir / "request.json", request)
+        common.write_json_atomic(job_dir / "control.json", {"action": "run"})
+        common.write_json_atomic(
+            job_dir / "status.json",
+            {"schema_version": common.SCHEMA_VERSION,
+             "job_id": request["job_id"], "kind": "active_learning",
+             "status": "launching", "created_at_epoch": time.time(),
+             "updated_at_epoch": time.time()},
+        )
+        return job_dir, workspace, cases
+
+    def _fake_predict_worker(self, capture, skip=None):
+        """A worker that writes per-fold DIFFERING predictions (the k-fold
+        disagreement signal) and records the spawned params. ``skip`` is a
+        (fold, filename) pair the given fold "fails" to produce."""
+        import nibabel as nib
+        import numpy as np
+
+        def fake_worker(stage, params, *args, **kwargs):
+            if stage != "infer":
+                raise RuntimeError("unexpected stage {}".format(stage))
+            capture.append(dict(params))
+            source_dir = Path(params["input_path"])
+            output = Path(params["output_path"])
+            output.mkdir(parents=True, exist_ok=True)
+            fold = str(params["use_folds"][0])
+            for image_path in sorted(source_dir.glob("*.nii.gz")):
+                if skip and fold == skip[0] and image_path.name == skip[1]:
+                    continue
+                source = nib.load(str(image_path))
+                prediction = np.zeros(source.shape[:3], dtype=np.uint8)
+                if fold == "0":
+                    prediction[2:-2, 2:-2, 2:-2] = 1
+                else:
+                    prediction[1:-1, 1:-1, 1:-1] = 1  # disagrees with fold 0
+                nib.save(nib.Nifti1Image(prediction, source.affine),
+                         str(output / image_path.name))
+            return {"status": "ok", "result": {}}
+
+        return fake_worker
+
+    def _model_dir_of(self, job_dir):
+        request = common.read_json(job_dir / "request.json") or {}
+        manifest = common.read_json(request["model_manifest"]) or {}
+        return Path(manifest["model_dir"])
+
+    def test_completed_al_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp)
+            capture = []
+            with mock.patch.object(
+                    pipeline, "_spawn_worker",
+                    side_effect=self._fake_predict_worker(capture)), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None):
+                exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["kind"], "active_learning")
+            self.assertEqual(status["uncertainty_method"], "disagreement")
+            self.assertEqual(status["labels"], ["whole"])
+            self.assertEqual(status["model_id"], "m_al")
+            # one spawn per fold, each locked to exactly that fold
+            model_dir = self._model_dir_of(job_dir)
+            self.assertEqual(
+                [params["use_folds"] for params in capture], [["0"], ["1"]])
+            for params in capture:
+                self.assertTrue(params["disable_tta"])
+                # no checkpoint override: the fold's checkpoint_final.pth
+                self.assertNotIn("checkpoint_name", params)
+                self.assertEqual(params["model_folder"], str(model_dir))
+            # ranking sorted descending by integrated score
+            ranking = status.get("ranking") or []
+            self.assertEqual(len(ranking), len(cases))
+            scores = [row["integrated"] for row in ranking]
+            self.assertEqual(scores, sorted(scores, reverse=True))
+            self.assertEqual(status["top_case"], ranking[0]["case"])
+            self.assertEqual(status.get("excluded_case_count"), 0)
+            # uncertainty artifacts on disk (S10: per-run directory)
+            uncertainty_dir = Path(str(status["uncertainty_dir"]))
+            self.assertTrue(uncertainty_dir.name.startswith("uncertainty_run_"))
+            self.assertTrue((uncertainty_dir / "ranking.csv").is_file())
+            bands = status.get("uncertainty_bands") or {}
+            # a 2-fold disagreement pair can only reach level 5 on the x10
+            # scale, so the high threshold clamps to the max present level
+            self.assertEqual(bands["high_threshold"], 5)
+            self.assertEqual(bands["moderate_threshold"], 3)
+            self.assertEqual(bands["written"]["moderate"], len(cases))
+            self.assertEqual(bands["written"]["high"], len(cases))
+            # per-case source geometry recorded for the overlay contract
+            geometries = common.read_json(
+                job_dir / "input_geometries.json", {}) or {}
+            self.assertEqual(
+                geometries.get("schema_version"), "nnunet_al_geometries.v1")
+            for case_id in cases:
+                self.assertIn(case_id, geometries.get("cases") or {})
+
+    def test_al_rejects_model_below_two_folds(self):
+        """k 折分歧至少需要 2 个折模型；fold_all 是单模型，不算折。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(
+                tmp, cases_count=1, folds=("0",))
+            fold_all = self._model_dir_of(job_dir) / "fold_all"
+            fold_all.mkdir(parents=True)
+            (fold_all / "checkpoint_final.pth").write_bytes(b"x")
+            exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 1)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("主动学习需要至少 2 个已训练折", str(status.get("error")))
+            # failed before any fold ran
+            self.assertFalse((job_dir / "predictions_fold_0").exists())
+
+    def test_al_cancel_between_folds(self):
+        """Stop requested while fold 0 runs: the fold loop must stop before
+        fold 1 and the job must land in cancelled (not failed)."""
+        capture = []
+
+        def cancelling_worker(stage, params, request, roots, job_dir,
+                              status_path, control_path, log_path,
+                              resource_lock=None):
+            result = self._fake_predict_worker(capture)(
+                stage, params, request, roots, job_dir, status_path,
+                control_path, log_path, resource_lock=resource_lock)
+            common.write_json_atomic(
+                Path(control_path),
+                {"action": "cancel", "requested_at_epoch": time.time()})
+            return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=2)
+            with mock.patch.object(
+                    pipeline, "_spawn_worker",
+                    side_effect=cancelling_worker), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None):
+                exit_code = pipeline.run_active_learning(job_dir)
+            self.assertEqual(exit_code, 0)
+            status = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(status["status"], "cancelled")
+            self.assertEqual(status["phase"], "cancelled")
+            # fold 1 never started
+            self.assertEqual(len(capture), 1)
+            self.assertEqual(capture[0]["use_folds"], ["0"])
+            self.assertFalse((job_dir / "predictions_fold_1").exists())
+
+    def test_al_retry_excludes_stale_fold_prediction(self):
+        """S10 for the per-fold directories: a retried run whose fold 0
+        produced nothing for a case must not rank that case on the previous
+        run's prediction file left behind in predictions_fold_0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir, workspace, cases = self._setup_al_job(tmp, cases_count=3)
+            with mock.patch.object(
+                    pipeline, "_spawn_worker",
+                    side_effect=self._fake_predict_worker([])), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None):
+                self.assertEqual(pipeline.run_active_learning(job_dir), 0)
+            first = common.read_json(job_dir / "status.json", {}) or {}
+            self.assertEqual(3, len(first.get("ranking") or []))
+            # Retry: fold 0 now produces nothing for case01.
+            with mock.patch.object(
+                    pipeline, "_spawn_worker",
+                    side_effect=self._fake_predict_worker(
+                        [], skip=("0", "case01.nii.gz"))), \
+                 mock.patch.object(pipeline, "_acquire_local_gpu",
+                                   return_value=None):
+                self.assertEqual(pipeline.run_active_learning(job_dir), 0)
+            second = common.read_json(job_dir / "status.json", {}) or {}
+            ranked = [row["case"] for row in second.get("ranking") or []]
+            self.assertEqual(2, len(ranked))
+            self.assertNotIn("case01", ranked)
+            self.assertEqual(1, second.get("excluded_case_count"))
+
+    def test_create_job_rejects_remote_active_learning(self):
+        """首期 AL 仅本机执行：远程后端在创建边界就被拒绝，绝不留下一个
+        永远无法启动的 launching 任务。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            request = {
+                "operation": "active_learning",
+                "workspace": str(Path(tmp) / "workspace"),
+                "dataset_root": str(Path(tmp) / "pool"),
+                "model_manifest": str(Path(tmp) / "manifest.json"),
+                "execution_backend": "remote",
+                "remote_profile_id": "server_a",
+            }
+            with self.assertRaises(RuntimeError) as ctx:
+                jobs.create_job(request)
+            self.assertIn("主动学习任务首期仅支持本机执行", str(ctx.exception))
+
+    def test_create_job_dispatches_local_active_learning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request = {
+                "operation": "active_learning",
+                "workspace": str(Path(tmp) / "workspace"),
+                "dataset_root": str(Path(tmp) / "pool"),
+                "model_manifest": str(Path(tmp) / "manifest.json"),
+            }
+            with mock.patch.object(jobs, "_launch") as launch:
+                launch.return_value = SimpleNamespace(pid=321)
+                created = jobs.create_job(request)
+            command = launch.call_args[0][0]
+            self.assertTrue(command[1].endswith("nnunet_pipeline.py"))
+            self.assertEqual(command[2], "active_learning")
+            self.assertEqual(command[3], "--job-dir")
+            status = common.read_json(Path(created["status_path"]))
+            self.assertEqual(status["kind"], "active_learning")
+            self.assertEqual(status["execution_backend"], "local")
+            self.assertTrue(created["job_id"].startswith("active_learning_"))
+
+
 class FakeMask:
     def __init__(self, name, pixels=1, content=None):
         self.name = name

@@ -87,6 +87,10 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
         # Validate before creating status/control files. A launcher that
         # never existed cannot reconcile a permanent "launching" job.
         raise RuntimeError("Remote training server was not selected.")
+    if values.get("execution_backend") == "remote" and values["operation"] == "active_learning":
+        # 首期主动学习仅本机执行：折间分歧推理 + 排序都在本地 GPU 完成。
+        raise RuntimeError(
+            "主动学习任务首期仅支持本机执行，暂不支持远程训练服务器。")
     paths = workspace_paths(values["workspace"])
     job_dir = paths["jobs"] / safe_identifier(values["job_id"])
     if job_dir.exists():
@@ -145,7 +149,9 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
         command = [
             sys.executable,
             str(ROOT / "tools" / "nnunet_pipeline.py"),
-            "infer" if values["operation"] == "infer" else "run",
+            values["operation"]
+            if values["operation"] in {"infer", "active_learning"}
+            else "run",
             "--job-dir",
             str(job_dir),
         ]

@@ -579,7 +579,7 @@ def normalize_labels(value: object) -> list[dict[str, Any]]:
 def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
     values = dict(request or {})
     operation = str(values.get("operation") or "train").lower()
-    if operation not in {"train", "infer"}:
+    if operation not in {"train", "infer", "active_learning"}:
         raise ValueError("Unsupported nnU-Net operation: {}".format(operation))
     values["operation"] = operation
     values["job_id"] = safe_identifier(values.get("job_id"), operation)

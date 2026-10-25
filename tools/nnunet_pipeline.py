@@ -66,6 +66,14 @@ from resource_locks import (  # noqa: E402
     register_process,
     unregister_process,
 )
+# Shared active-learning helpers (also used by flexict_pipeline). This module
+# is imported BY active_learning_common lazily inside function bodies, so a
+# module-level import here is safe (no cycle at import time).
+from active_learning_common import (  # noqa: E402
+    materialize_al_pool,
+    rank_disagreement,
+    write_uncertainty_bands,
+)
 
 
 SUPPORTED_SUFFIXES = (
@@ -2675,6 +2683,244 @@ def run_inference(job_dir: Path) -> int:
             pass
 
 
+def _al_fold_ids(model_dir: Path) -> list[str]:
+    """Trained 0-4 folds in a model bundle (each with checkpoint_final.pth).
+
+    fold_all (train-on-everything) yields a single model — no k-fold
+    disagreement is possible from it, so it is not listed here.
+    """
+    return sorted(
+        path.name[5:]
+        for path in model_dir.glob("fold_*")
+        if path.is_dir()
+        and re.fullmatch(r"fold_[0-4]", path.name)
+        and (path / "checkpoint_final.pth").is_file()
+    )
+
+
+def _al_predict_fold(job_dir: Path,
+                     request: dict[str, Any],
+                     roots: dict[str, Path],
+                     model_dir: Path,
+                     fold: str,
+                     fold_index: int,
+                     fold_total: int,
+                     status_path: Path,
+                     control_path: Path,
+                     log_path: Path,
+                     gpu_lock) -> Path:
+    """Run ONE fold model over the materialized pool (folder-mode easy_predict)."""
+    predictions = job_dir / "predictions_fold_{}".format(fold)
+    predictions.mkdir(parents=True, exist_ok=True)
+    # S10: this directory holds THIS run's outputs only. A retried run whose
+    # fold produced nothing for a case would otherwise inherit the previous
+    # run's prediction file and pass the grid pre-check on stale data.
+    for stale in predictions.glob("*.nii.gz"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    # 15–70% is the per-fold prediction span (inputs take 5–15, uncertainty
+    # starts at 75) — mirrors the FlexiCT 2D/3D progress mapping.
+    progress = 15 + int(55 * fold_index / max(1, fold_total))
+    update_status(
+        status_path,
+        status="predicting_fold_{}".format(fold),
+        phase="predicting_fold_{}".format(fold),
+        message="nnU-Net fold {} is predicting the unlabeled pool.".format(fold),
+        progress_percent=progress,
+        active_fold=fold,
+    )
+    _spawn_worker(
+        "infer",
+        {
+            "model_folder": str(model_dir),
+            "input_path": str(job_dir / "input"),
+            "output_path": str(predictions),
+            "disable_tta": True,  # locked recipe: no TTA
+            "use_cpu": bool(request.get("use_cpu", False)),
+            "enable_stats": False,
+            "gpu_device_id": 0,
+            "num_processes_preprocessing": int(
+                request.get("inference_workers") or 2),
+            "num_processes_segmentation_export": int(
+                request.get("inference_workers") or 2),
+            # k-fold disagreement IS the uncertainty signal: predict with
+            # this fold only (easy_predict use_folds).
+            "use_folds": [fold],
+        },
+        request, roots, job_dir, status_path,
+        control_path, log_path, resource_lock=gpu_lock)
+    return predictions
+
+
+def run_active_learning(job_dir: Path) -> int:
+    """Active-learning cycle: batch-predict the unlabeled pool once per
+    trained fold of a selected model bundle, rank cases by inter-fold
+    disagreement, and write overlay band masks for the review UI (stages
+    preparing_inputs -> predicting_fold_<f> -> computing_uncertainty ->
+    completed). Mirrors flexict_pipeline.run_active_learning; the ranking,
+    band, and grid-validation logic is shared via active_learning_common."""
+    request_path = job_dir / "request.json"
+    status_path = job_dir / "status.json"
+    control_path = job_dir / "control.json"
+    log_path = job_dir / "job.log"
+    request = normalize_request(read_json(request_path, {}) or {})
+    write_json_atomic(request_path, request)
+    roots = _runtime_roots(request)
+    model_manifest_path = Path(
+        str(request.get("model_manifest") or "")).expanduser().resolve()
+    manifest = read_json(model_manifest_path, {}) or {}
+    model_dir = Path(
+        str(
+            request.get("model_dir_override")
+            or manifest.get("model_dir")
+            or model_manifest_path.parent
+        )
+    ).expanduser().resolve()
+    method = str(request.get("uncertainty_method") or "disagreement").strip()
+    moderate = int(request.get("uncertainty_moderate_threshold") or 3)
+    high = int(request.get("uncertainty_high_threshold") or 6)
+    labels = [str(value) for value in manifest.get("labels") or []]
+    update_status(
+        status_path,
+        schema_version=SCHEMA_VERSION,
+        job_id=request["job_id"],
+        kind="active_learning",
+        task_id=manifest.get("task_id") or request.get("task_id") or "",
+        task_name=manifest.get("task_name") or request.get("task_name") or "",
+        labels=labels,
+        status="running",
+        phase="preparing_inputs",
+        message="Preparing the unlabeled pool for nnU-Net active learning.",
+        log_path=str(log_path),
+        control_path=str(control_path),
+        controller_pid=os.getpid(),
+        controller_start_marker=process_start_marker(os.getpid()),
+        progress_percent=5,
+    )
+    gpu_lock = None
+    try:
+        if not manifest or not model_dir.is_dir():
+            raise RuntimeError("Selected nnU-Net model is missing or invalid.")
+        folds = _al_fold_ids(model_dir)
+        if len(folds) < 2:
+            raise RuntimeError(
+                "主动学习需要至少 2 个已训练折（各自含 checkpoint_final.pth）的"
+                "模型来计算折间分歧，当前模型只有 {0} 个可用折：{1}。请先用训练"
+                "界面对同一数据集逐折训练多个折。".format(len(folds), model_dir))
+        case_ids = materialize_al_pool(
+            job_dir, request, status_path, control_path,
+            schema_version="nnunet_al_geometries.v1")
+        update_status(status_path, case_count=len(case_ids), cases=case_ids)
+        gpu_lock = _acquire_local_gpu(
+            request, status_path, control_path, log_path,
+            "nnU-Net active learning")
+        predictions: dict[str, Path] = {}
+        try:
+            for fold_index, fold in enumerate(folds):
+                _raise_if_cancelled(control_path)
+                predictions[fold] = _al_predict_fold(
+                    job_dir, request, roots, model_dir, fold,
+                    fold_index, len(folds),
+                    status_path, control_path, log_path, gpu_lock)
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
+                gpu_lock = None
+        update_status(
+            status_path,
+            status="computing_uncertainty",
+            phase="computing_uncertainty",
+            message="Ranking cases by {}-fold disagreement.".format(len(folds)),
+            progress_percent=75,
+        )
+        _raise_if_cancelled(control_path)
+        # S09/S10-hardened ranking — shared with the FlexiCT path, see
+        # active_learning_common.rank_disagreement.
+        uncertainty_dir, ranking, successful_cases, excluded_case_count = (
+            rank_disagreement(
+                job_dir, predictions, case_ids, method,
+                # 单标签模型传 None：run_batch 自动取全部非零标签；
+                # 多分类模型传 1..N（nnU-Net 标签按 labels 顺序编号）。
+                list(range(1, len(labels) + 1)) if len(labels) > 1 else None,
+            )
+        )
+        bands = write_uncertainty_bands(
+            uncertainty_dir, successful_cases, method, moderate, high)
+        summary = [
+            {
+                "case": str(row.get("case") or ""),
+                "integrated": float(row.get("integrated") or 0.0),
+                "uncertain_vol": float(row.get("uncertain_vol") or 0.0),
+                "max": float(row.get("max") or 0.0),
+            }
+            for row in ranking
+        ]
+        update_status(
+            status_path,
+            status="completed",
+            phase="completed",
+            message="nnU-Net active learning ranked {} case(s).".format(
+                len(summary)),
+            progress_percent=100,
+            labels=labels,
+            model_id=manifest.get("model_id"),
+            model_manifest=str(model_manifest_path),
+            uncertainty_method=method,
+            uncertainty_dir=str(uncertainty_dir),
+            ranking_csv=str(uncertainty_dir / "ranking.csv"),
+            uncertainty_bands=bands,
+            ranking=summary,
+            top_case=summary[0]["case"] if summary else "",
+            excluded_case_count=excluded_case_count,
+            uncertainty_log=str(job_dir / "uncertainty_log.txt"),
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except InterruptedError:
+        update_status(
+            status_path,
+            status="cancelled",
+            phase="cancelled",
+            message="nnU-Net active learning was cancelled.",
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 0
+    except Exception as exc:
+        append_log(log_path, traceback.format_exc())
+        update_status(
+            status_path,
+            status="failed",
+            phase="failed",
+            error="{}: {}".format(type(exc).__name__, exc),
+            traceback=traceback.format_exc(),
+            completed_at_epoch=time.time(),
+            worker_pid=None,
+            worker_start_marker=None,
+        )
+        return 1
+    finally:
+        if gpu_lock is not None:
+            try:
+                gpu_lock.release()
+            except Exception:
+                pass
+        _record_log_compaction(status_path, log_path)
+        try:
+            _sweep_expired_jobs(str(request["workspace"]))
+        except OSError:
+            pass
+        try:
+            _sweep_runtime_and_cache(str(request["workspace"]))
+        except Exception:
+            pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2682,11 +2928,15 @@ def main() -> int:
     run_parser.add_argument("--job-dir", required=True)
     infer_parser = sub.add_parser("infer")
     infer_parser.add_argument("--job-dir", required=True)
+    al_parser = sub.add_parser("active_learning")
+    al_parser.add_argument("--job-dir", required=True)
     args = parser.parse_args()
     job_dir = Path(args.job_dir).expanduser().resolve()
     job_dir.mkdir(parents=True, exist_ok=True)
     if args.command == "infer":
         return run_inference(job_dir)
+    if args.command == "active_learning":
+        return run_active_learning(job_dir)
     return run_training(job_dir)
 
 
