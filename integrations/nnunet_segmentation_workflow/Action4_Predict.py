@@ -1062,6 +1062,7 @@ def easy_predict(
     num_processes_preprocessing: int = 3,
     num_processes_segmentation_export: int = 3,
     checkpoint_name: str = "checkpoint_final.pth",
+    use_folds: Optional[Sequence[Union[int, str]]] = None,
 ) -> None:
     """
     简化版预测接口：用户只需提供 model_folder、input_path、output_path。
@@ -1107,6 +1108,9 @@ def easy_predict(
     checkpoint_name : str
         加载的 checkpoint 文件名，默认 "checkpoint_final.pth"。
         少样本微调配方（FlexiCT）按验证 Dice 选优，应传 "checkpoint_best.pth"。
+    use_folds : Sequence[int | str] | None
+        指定仅加载的折（如 [0] 或 ["all"]），默认 None 加载全部可用折。
+        主动学习按折分歧排序时需要逐折推理，传入单折列表。
 
     示例
     ----------
@@ -1158,7 +1162,7 @@ def easy_predict(
     )
 
     mf = str(_to_path(model_folder))
-    folds = tuple(meta["available_folds"])
+    folds = tuple(use_folds) if use_folds else tuple(meta["available_folds"])
     predictor.initialize_from_trained_model_folder(
         model_training_output_dir=mf,
         use_folds=folds,

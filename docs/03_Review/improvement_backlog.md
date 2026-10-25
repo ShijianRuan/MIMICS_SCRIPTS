@@ -15,6 +15,39 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R93（2026-10-25 用户立项：nnU-Net 路径接入不确定度主动学习 · k 折分歧排序 · 完整闭环）
+
+- [ ] **R93-1【P1·功能闭环】通用 nnU-Net 路径没有不确定度主动学习步骤**：
+  UIHTools 的 `Action6_Uncertainty.py`（不确定度排序 AL）当初已随 FlexiCT
+  集成进本项目（`integrations/flexict-finetune/uncertainty/uncertainty.py`
+  与其逐函数同源），但完整闭环（排序 → 复核窗口 → Mimics 叠加 → 标记回流）
+  只接在 FlexiCT 路径；走通用 nnU-Net 训练路径的标注者无法回答"下一个该
+  标注谁"，标完只能盲选下一例。
+  根因：AL job 阶段机、复核窗口、Mimics 叠加监控三段都硬绑在
+  `flexict_pipeline.py` / `flexict_active_learning_ui.py` / `flexict_mimics.py`
+  的 FlexiCT 后端上，算法层（uncertainty.py）与工件层（uncertainty_run_*/
+  ranking.csv / bands/ / input_geometries.json / apply_requests/）本是通用
+  的，却无第二消费者。
+  用户已拍板的设计决策：分歧来源 = k 折模型（UIHTools 原味）；评分对象 =
+  未标注病例池（每折模型对池各推理一次 → 分歧排序）；折模型来源 = 复用
+  已训多折模型（现有训练 UI fold=all/逐折训练，AL 任务只做逐折推理+排序+
+  复核工件）；首期仅本地执行（远程 AL 明确拒绝）。
+  影响视角：标注者（主动学习闭环缺失，选例全凭感觉）+ 产品（nnU-Net 路径
+  功能不完整）。严重度：P1（核心产品流程不闭环）。
+  验收标准（写入后不放宽）：
+  1. nnU-Net AL 任务对含 ≥2 折 checkpoint 的模型 bundle + 未标注病例池
+     产出与 FlexiCT 完全相同结构的复核工件（kind="active_learning"、
+     ranking.csv、bands/、input_geometries.json 含 mcs_path），现有复核
+     窗口与 Mimics 叠加监控双链路可用；
+  2. 失败路径全覆盖：bundle <2 折拒绝、空池拒绝、全例网格剔除报中文错误
+     并指向日志、排名/成功清单不一致拒绝、折间取消生效、远程提交明确拒绝；
+  3. `easy_predict` 新增 `use_folds` 参数向后兼容（None = 原全折行为）；
+  4. 提取到共享模块的 FlexiCT 行为零变化：现有 TestActiveLearningWindow、
+     TestFlexiCTActiveLearningApply 等套件全绿；
+  5. 新增失败路径测试套件注册进 run_regression_matrix（smoke/fast）；
+  6. 池物化绝不写源数据集（只读红线，输出仅入 job 目录）。
+
+
 ### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）
 
 - [x] **R92-2【P1】每次跑回归测试都会弹出一个"导入数据"置顶窗口，必须
