@@ -17,7 +17,7 @@
 
 ### R93（2026-10-25 用户立项：nnU-Net 路径接入不确定度主动学习 · k 折分歧排序 · 完整闭环）
 
-- [ ] **R93-1【P1·功能闭环】通用 nnU-Net 路径没有不确定度主动学习步骤**：
+- [x] **R93-1【P1·功能闭环】通用 nnU-Net 路径没有不确定度主动学习步骤**：
   UIHTools 的 `Action6_Uncertainty.py`（不确定度排序 AL）当初已随 FlexiCT
   集成进本项目（`integrations/flexict-finetune/uncertainty/uncertainty.py`
   与其逐函数同源），但完整闭环（排序 → 复核窗口 → Mimics 叠加 → 标记回流）
@@ -46,6 +46,26 @@
      TestFlexiCTActiveLearningApply 等套件全绿；
   5. 新增失败路径测试套件注册进 run_regression_matrix（smoke/fast）；
   6. 池物化绝不写源数据集（只读红线，输出仅入 job 目录）。
+  〔R93 当轮解决，9 commit：`01c4d2e..b8177c8`。①同构工件：
+  `nnunet_pipeline.run_active_learning`（4bdf816）产出 kind=
+  "active_learning" + ranking.csv/bands//input_geometries.json(含
+  mcs_path)，复核窗口（fee88ea 双后端参数化）与 Mimics 监控
+  （69737c6 提取 runtime_py35/active_learning_apply.py 共享）双链路
+  同一代码服务两后端。②失败路径测试 8 项进 test_nnunet_integration
+  （2669f5f）：<2 折/空池/全例网格剔除（中文报错+日志指向）/排名
+  不一致；远程拒绝在 nnunet_jobs（4bdf816，RuntimeError）+ UI 表单
+  层；折间取消沿既有 stage cancel 检查。③use_folds 向后兼容
+  （01c4d2e，None=原全折行为，TestEasyPredictUseFolds 2 项）。④
+  FlexiCT 行为零变化证据：fast 32/32（20261025T210851，flexict_
+  integration 156s 全过、gui_smoke 102/102）；fee88ea 曾把 R76 线程
+  契约测试桩悄悄打死（list_jobs 形参缺失的 TypeError 被 scan 吞），
+  b8177c8 修复桩签名，属测试桩过期非产品回归。⑤测试并入既有
+  nnunet_integration / gui_smoke 套件（已在 fast/full 矩阵注册）。⑥
+  池物化走共享 materialize_al_pool，输出仅写 job 目录，源数据集只读
+  （只读路径约束在共享函数内，Totalsegmentator 实机验收为 L5 项）。
+  实机端到端（本地 RTX 3060：小子集训 2 折 → 排序 → 复核窗双击开
+  病例/叠加/标记回流）已登记 L5 人工项（docs/TEST_STRATEGY.md L5 表
+  R93-1 行），未执行前不视为验收完成。〕
 
 
 ### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）

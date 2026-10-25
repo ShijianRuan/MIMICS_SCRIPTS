@@ -49,7 +49,9 @@ python_env/python.exe tools/run_regression_matrix.py --list
   远程执行 13 项契约
 - `test_flexict_common.py` / `test_flexict_pkg.py`（独立仓）— 配置/注册表/
   backbone/解码器/权重加载/不确定度
-- `test_nnunet_integration.py` — nnU-Net 训练/推理管线、job 记录
+- `test_nnunet_integration.py` — nnU-Net 训练/推理管线、job 记录、
+  主动学习失败路径（<2 折拒绝、空池、全例网格剔除、排名不一致、
+  use_folds 透传）
 - `test_nninteractive_bridge_prompts.py`（pytest 风格）— 桥接 prompt 顺序契约
 - `test_nninteractive_task_integration.py` / `test_mimics_nnint_deep.py` /
   `test_mimics_nnint_functional.py` — nnInteractive 三套：任务路由/边界/功能
@@ -94,6 +96,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 | SLIP 实机 | `python_env/python.exe tests/manual/run_slip_bridge_gpu_acceptance.py`（Totalsegmentator s0000，需 slip_models 权重） | 16 项契约全过（单发+异步、predict/undo/reset、错误路径、close、gpu.lock 互斥与释放），dice 在 0.10–0.45 区间。模型本身不限模态（论文 Table 4），但实机验收目前仅在 CT 上执行过；MR 等其他模态的实机验收待补 |
 | SLIP 分发包人工检查（R91-5/SL05） | 打包标准与 with-env 合成包各一并解压 | 包内含根级 slip_bridge.py；完整 SLIP 发布模式含可校验的 slip_models 资源；缺件时解压预检明示缺失项而非报发布成功 |
 | SLIP 无 GPU 机器拒绝路径（R91-6/SL06） | 在无 CUDA 的机器上跑 SLIP/01_Annotate 入口 | 在创建草稿/导出缓冲之前被明确拒绝并提示需要 CUDA GPU，不产生任何半途产物 |
+| nnU-Net AL 端到端（R93-1） | nnU-Net 训练窗对 Totalsegmentator 只读小子集逐折训练 2 折 → `02_AI/nnUNet/05_Active_Learning_Review` 排序未标注池 → 复核窗口双击开病例/叠加不确定度带/标记状态 | ranking.csv 排序合理；不确定度双带出现在 Mimics；annotation_state.json 状态回流；全程不写源数据集路径 |
 
 ## 资源清单（运行测试需要什么）
 
