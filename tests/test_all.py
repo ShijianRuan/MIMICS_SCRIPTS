@@ -42,6 +42,13 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNTIME_DIR = os.path.join(PROJECT_ROOT, "runtime_py35")
 
+# 单进程跑全部测试：平台插件在第一个 QApplication 构造时就已锁定。字母序
+# 最先执行的 GUI 测试若不带 setdefault，会在真实 windows 平台上建 app，
+# 之后所有测试内的 setdefault 都失效，测试期间会弹出真实置顶窗口（还
+# 会被 Windows 挂起检测终止）。必须在模块级、任何导入副作用之前锁定
+# 离屏平台。与 test_gui_smoke.py / test_ui_quality.py 的做法一致。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 sys.path.insert(0, RUNTIME_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 
