@@ -3298,7 +3298,10 @@ class TestWindowClampedToSmallScreen(unittest.TestCase):
 
         seen_threads = []
 
-        def fake_find_al_jobs(workspace):
+        def fake_find_al_jobs(workspace, list_jobs=None):
+            # The scan passes the injected backend lister — a stub that
+            # rejects it raises inside the scan's except and the mock looks
+            # "never called".
             seen_threads.append(threading.current_thread())
             return []
 
