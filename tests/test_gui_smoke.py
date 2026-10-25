@@ -1268,6 +1268,20 @@ class TestIoPathSetupDebounce(unittest.TestCase):
         self.assertIn("count_existing_label_files", source)
         self.assertIn("mask_candidate_list", source)
 
+    def test_portable_grid_gate_is_flag_scoped(self):
+        # R94-2: the dead-source bypass may only trigger when the launcher
+        # confirmed the project carries its import-time grid snapshot
+        # (source_portable_grid) AND the submitted path equals the recorded
+        # one. Everything else keeps the default exists-check rejection.
+        _AppFixture.app()
+        source = (ROOT / "tools" / "io_path_setup_ui.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("source_portable_grid", source)
+        self.assertIn("portable_grid = (", source)
+        # The default rejection for a non-existing source must survive.
+        self.assertIn("请选择一个存在的来源文件或文件夹。", source)
+
     def test_candidate_checkboxes_sync_with_name_field(self):
         # R68 audit P1: the sync helper ran without its QtCore import and
         # raised NameError on every keystroke, silently disabling the whole

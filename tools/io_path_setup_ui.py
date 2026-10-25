@@ -436,6 +436,10 @@ def run_ui(context, preview_path=""):
     from PySide6 import QtCore, QtGui, QtWidgets
 
     mode = str(context.get("mode") or "export_masks")
+    # Distributed-mcs export (R94-2): True only when the launcher confirmed
+    # the recorded source is missing on this machine but the project carries
+    # its import-time grid snapshot. Only export_masks ever sets it.
+    source_portable_grid = bool(context.get("source_portable_grid"))
     status_path = context.get("status_path")
     state_path = context.get("state_path")
     owner_pid = context.get("owner_pid")
@@ -575,9 +579,12 @@ def run_ui(context, preview_path=""):
         return edit
 
     source_initial = context.get("source_initial") or remembered_mode.get("source_path", "")
+    source_hint = "支持：NIfTI、MHA/MHD、NRRD、DICOM 文件、病例文件夹或 DICOM 序列文件夹。"
+    if source_portable_grid:
+        source_hint += "\n原始图像不在本机：保持此路径直接提交即可，导出将按工程内保存的原始网格重采样。"
     source_edit = path_row(
         "来源图像或病例", source_initial, file_or_folder=True,
-        hint="支持：NIfTI、MHA/MHD、NRRD、DICOM 文件、病例文件夹或 DICOM 序列文件夹。",
+        hint=source_hint,
     )
 
     # R61-7: only a folder the user actually chose themselves sticks across
@@ -1090,22 +1097,38 @@ def run_ui(context, preview_path=""):
 
         def validate_paths():
             try:
-                if not os.path.exists(source):
-                    submission_results.put({"title": "来源不存在", "error": "请选择一个存在的来源文件或文件夹。"})
-                    return
+                # Distributed-mcs export (R94-2): the recorded source path only
+                # exists on the importer's machine. When the project carries
+                # its grid snapshot, submitting that dead path as-is is valid;
+                # the export resamples on the snapshot grid.
+                portable_grid = (
+                    source_portable_grid
+                    and not os.path.exists(source)
+                    and os.path.normcase(source)
+                    == os.path.normcase(str(context.get("source_initial") or ""))
+                )
+                if portable_grid:
+                    selection["case_info"] = {
+                        "image": source,
+                        "case_dir": os.path.dirname(source),
+                    }
+                else:
+                    if not os.path.exists(source):
+                        submission_results.put({"title": "来源不存在", "error": "请选择一个存在的来源文件或文件夹。"})
+                        return
+                    case_info = discover_single_source(source)
+                    if not case_info:
+                        submission_results.put({
+                            "title": "不支持的来源",
+                            "error": "未找到支持的 3D 图像或 DICOM 文件夹。",
+                        })
+                        return
+                    selection["case_info"] = case_info
                 if not os.path.isdir(output):
                     os.makedirs(output)
                 fd, probe_path = tempfile.mkstemp(prefix=".mimics_write_test_", dir=output)
                 os.close(fd)
                 os.remove(probe_path)
-                case_info = discover_single_source(source)
-                if not case_info:
-                    submission_results.put({
-                        "title": "不支持的来源",
-                        "error": "未找到支持的 3D 图像或 DICOM 文件夹。",
-                    })
-                    return
-                selection["case_info"] = case_info
                 submission_results.put({"selection": selection})
             except Exception as exc:
                 submission_results.put({

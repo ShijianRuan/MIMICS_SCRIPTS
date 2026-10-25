@@ -177,4 +177,118 @@ class TestOverlayRollback(unittest.TestCase):
         self.assertIn('high',marked[0][1])
         self.assertIn('moderate',marked[0][1])
 
+class TestPortableGridExport(unittest.TestCase):
+    """R94-2：分发场景——A 转好 .mcs 发给 B，B 机器上没有原图。
+    管线创建的工程把 A 的绝对路径记进元数据并携带导入时的网格快照
+    （shape + voxel-to-RAS 矩阵）。导出必须靠快照落回原始网格，
+    而不是因路径已死而拒绝运行。"""
+
+    MATRIX = '[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # The recorded source path only exists on the importer's machine.
+        self.dead_source = self.root / 'importer_machine' / 'ct.nii.gz'
+        self.image = types.SimpleNamespace(guid='A', logical_dimensions=[2, 2, 2])
+        self.mask = types.SimpleNamespace(name='liver', image=self.image)
+
+    def metadata(self, snapshot=True):
+        values = {export.SOURCE_IMAGE_PATH_METADATA: str(self.dead_source)}
+        if snapshot:
+            values[export.SOURCE_IMAGE_SHAPE_METADATA] = '[2, 2, 2]'
+            values[export.SOURCE_VOXEL_TO_RAS_MATRIX_METADATA] = self.MATRIX
+        def read(image, key, default=''):
+            return values.get(key, default)
+        return read
+
+    def patches(self, metadata, confirm=None, monitor=None, bridge=None):
+        stack = __import__('contextlib').ExitStack()
+        add = stack.enter_context
+        add(mock.patch.object(export.mimics.data, 'masks', [self.mask]))
+        add(mock.patch.object(export.mimics.data.images, 'get_active', return_value=self.image))
+        add(mock.patch.object(export, '_metadata_get', side_effect=metadata))
+        add(mock.patch.object(export, '_derive_mimics_voxel_to_ras_matrix',
+                              return_value=[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]))
+        add(mock.patch.object(export.runtime_common, 'try_acquire_local_operation', return_value='token'))
+        add(mock.patch.object(export.runtime_common, 'release_local_operation', lambda *a: None))
+        add(mock.patch.object(export, '_current_project_case_id', return_value='s0001'))
+        add(mock.patch.object(export, '_current_project_path', return_value=str(self.root / 's0001.mcs')))
+        add(mock.patch.object(export, '_project_root', return_value=self.tmp.name))
+        if confirm is not None:
+            add(mock.patch.object(export, '_confirm_degraded_export', side_effect=confirm))
+        if monitor is not None:
+            add(mock.patch.object(export, '_start_foreground_export_monitor', side_effect=monitor))
+        add(mock.patch.object(export, '_stream_mask_to_file',
+                              side_effect=lambda mask, path: (Path(path).write_bytes(b'\x01' * 8), 8)[1]))
+        if bridge is not None:
+            add(mock.patch.object(export, '_launch_bridge_background', side_effect=bridge))
+        return stack
+
+    def run_export(self, snapshot, confirm_result=None):
+        """Drive _start_current_project_export through to the bridge params."""
+        confirm_calls = []
+        def confirm(count=1):
+            confirm_calls.append(count)
+            return confirm_result
+        captured = {}
+        def monitor_start(m):
+            captured['monitor'] = m
+            return True
+        class Process(object):
+            pid = 4321
+        def bridge_launch(params, job_dir):
+            captured['params'] = params
+            return Process()
+        with self.patches(self.metadata(snapshot), confirm=confirm,
+                          monitor=monitor_start, bridge=bridge_launch):
+            descriptor = export._start_current_project_export(
+                str(self.root / 'case'), str(self.dead_source),
+                str(self.root / 'out'), [0, 1, 2], [False] * 3)
+            # One tick reads the mask buffer, the next builds the bridge params.
+            export._foreground_export_tick(captured['monitor'])
+            export._foreground_export_tick(captured['monitor'])
+        return captured, confirm_calls, descriptor
+
+    def test_dead_source_with_snapshot_exports_on_original_grid(self):
+        captured, confirm_calls, descriptor = self.run_export(snapshot=True)
+        self.assertEqual([], confirm_calls, 'snapshot present: no degraded confirm')
+        self.assertEqual('export', descriptor['kind'])
+        params = captured['params']
+        self.assertEqual(str(self.dead_source), params['source_image_path'])
+        self.assertEqual('[2, 2, 2]', params['source_image_shape'])
+        self.assertEqual(self.MATRIX, params['source_voxel_to_ras_matrix'])
+        self.assertTrue(params['require_source_geometry'])
+
+    def test_dead_source_without_snapshot_requires_user_confirmation(self):
+        with self.assertRaisesRegex(RuntimeError, 'original source image'):
+            self.run_export(snapshot=False, confirm_result=False)
+        # Cancelled: no export monitor may have been started at all.
+        # (run_export never reaches the tick calls when start raises.)
+
+    def test_dead_source_without_snapshot_degrades_only_on_user_accept(self):
+        captured, confirm_calls, descriptor = self.run_export(
+            snapshot=False, confirm_result=True)
+        self.assertEqual([1], confirm_calls)
+        params = captured['params']
+        self.assertEqual('', params['source_image_path'])
+        self.assertNotIn('source_image_shape', params)
+        self.assertFalse(params['require_source_geometry'])
+
+    def test_setup_ui_portable_flag_only_with_snapshot(self):
+        import io_setup_mimics as setup
+        contexts = []
+        def fake_launch(mode, python_exe, context, callback, timeout_seconds=3600):
+            contexts.append(context)
+            return 0
+        for snapshot, expected in ((True, True), (False, False)):
+            contexts[:] = []
+            with self.patches(self.metadata(snapshot)), \
+                    mock.patch.object(export, '_python_exe', return_value='py'), \
+                    mock.patch.object(setup, 'launch', side_effect=fake_launch):
+                export._launch_external_export_setup()
+            self.assertEqual(expected, contexts[0]['source_portable_grid'])
+            self.assertEqual(str(self.dead_source), contexts[0]['source_initial'])
+
 if __name__=='__main__':unittest.main()

@@ -1979,13 +1979,12 @@ def _start_foreground_export_monitor(monitor, poll_seconds=0.15):
         return False
 
 
-def _read_source_grid_metadata(selected):
+def _read_source_grid_metadata(image):
     """Read the import-time grid snapshot (shape + voxel-to-RAS matrix) from
-    the active image's metadata. Returns a dict of raw metadata values or {}
+    an image's metadata. Returns a dict of raw metadata values or {}
     when the project carries no usable snapshot (e.g. hand-created projects).
     """
     try:
-        image = getattr(selected[0], "image", None)
         if image is None:
             return {}
         shape = _metadata_get(image, SOURCE_IMAGE_SHAPE_METADATA, "")
@@ -2051,12 +2050,17 @@ def _start_current_project_export(case_dir, source_image_path, output_root, axes
         )
         degraded_export = False
         source_grid_metadata = {}
-        if not source_image_path:
+        if not source_image_path or not os.path.exists(source_image_path):
             # The export can still land on the original grid when the project
             # carries the grid snapshot from import time (pipeline-created
-            # projects always do). Only ask about the Mimics-grid fallback
+            # projects always do) - including when the recorded path only
+            # exists on the importer's machine (distributed .mcs). The bridge
+            # prefers the file when it is reachable and falls back to the
+            # snapshot otherwise. Only ask about the Mimics-grid fallback
             # when even that snapshot is missing.
-            source_grid_metadata = _read_source_grid_metadata(selected)
+            source_grid_metadata = _read_source_grid_metadata(
+                getattr(selected[0], "image", None)
+            )
             if not source_grid_metadata:
                 if not _confirm_degraded_export(len(selected)):
                     raise RuntimeError(
@@ -2776,6 +2780,19 @@ def _launch_external_export_setup():
         return 1
     case_id = _current_project_case_id() or os.path.splitext(os.path.basename(project_path))[0]
     source_initial = _active_source_path()
+    # Distributed-mcs support (R94-2): when the recorded source image is not
+    # on this machine but the project carries its import-time grid snapshot,
+    # the setup UI may submit the dead recorded path as-is and the export
+    # resamples on the snapshot grid (see _start_current_project_export).
+    try:
+        active_image = mimics.data.images.get_active()
+    except Exception:
+        active_image = None
+    source_portable_grid = bool(
+        source_initial
+        and not os.path.exists(source_initial)
+        and _read_source_grid_metadata(active_image)
+    )
 
     def submitted(selection):
         source = str(selection.get("source_path", "") or "")
@@ -2807,6 +2824,7 @@ def _launch_external_export_setup():
         {
             "case_id": case_id,
             "source_initial": source_initial,
+            "source_portable_grid": source_portable_grid,
             # mimics_output_dir controls .mcs storage only. It must never
             # silently redirect exported label files.
             "configured_output": "",
