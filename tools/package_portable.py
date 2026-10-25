@@ -85,6 +85,7 @@ REQUIRED_EXTERNAL_UI_FILES = [
     "runtime_py35/flexict_mimics.py",
     "runtime_py35/mimics_mask_apply.py",
     "tools/flexict_common.py",
+    "tools/active_learning_common.py",
     "tools/flexict_pipeline.py",
     "tools/flexict_training_setup_ui.py",
     "tools/flexict_prediction_setup_ui.py",

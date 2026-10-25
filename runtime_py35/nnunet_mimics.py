@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -15,6 +16,7 @@ import uuid
 
 import mimics
 
+import active_learning_apply
 import external_window_launcher
 import fix_source_affine_metadata
 import mimics_mask_apply
@@ -38,6 +40,7 @@ BUTTON_STATUS = "查看状态与模型"
 BUTTON_UPDATE = "更新匹配掩膜"
 BUTTON_CREATE = "创建可编辑副本"
 BUTTON_BATCH_PREDICT = "批量预测数据集…"
+BUTTON_ACTIVE_LEARNING = "主动学习审核"
 
 # Stable marker carried by the pipeline's validate_materialized_source_geometry
 # failure; the shared repair offer lives in fix_source_affine_metadata.
@@ -830,6 +833,12 @@ def _target_open(monitor):
 
 
 def _monitor_tick_locked(monitor):
+    # The active-learning overlay monitor shares the family injected by
+    # active_learning_apply.bind() below; it never touches job status files
+    # or external processes, so it skips the deadline/process checks.
+    if str(monitor.get("kind") or "") == "al_requests":
+        _al_tick()
+        return
     key = monitor["monitor_key"]
     if time.time() > float(monitor.get("deadline") or 0):
         # A setup form left open past the 1h deadline is still a live window
@@ -1053,28 +1062,33 @@ def _monitor_tick_locked(monitor):
 def _monitor_tick(monitor):
     if monitor.get("busy"):
         return
-    token = runtime_common.try_acquire_local_operation(
-        "mask_buffer_access", "nnU-Net result monitor"
-    )
-    if not token:
-        owner = runtime_common.active_local_operation("mask_buffer_access") or {}
-        owner_text = str(owner.get("owner") or "another Mask operation")
-        due, elapsed = runtime_common.progress_notice_due(
-            monitor,
-            "nnunet_buffer_wait",
-            detail=owner_text,
-            interval_seconds=60.0,
-            initial_delay_seconds=5.0,
+    # The active-learning overlay monitor never touches the prediction mask
+    # buffers, so it neither queues behind nor blocks a running mask apply
+    # (the same exemption the FlexiCT host grants its AL monitor).
+    token = None
+    if str(monitor.get("kind") or "") != "al_requests":
+        token = runtime_common.try_acquire_local_operation(
+            "mask_buffer_access", "nnU-Net result monitor"
         )
-        if due:
-            _log(
-                logging.INFO,
-                "nnU-Net result handling is waiting for {0} ({1}s). Use Show "
-                "Status and Models, then Stop, if the pending result should "
-                "be discarded.".format(owner_text, int(elapsed)),
+        if not token:
+            owner = runtime_common.active_local_operation("mask_buffer_access") or {}
+            owner_text = str(owner.get("owner") or "another Mask operation")
+            due, elapsed = runtime_common.progress_notice_due(
+                monitor,
+                "nnunet_buffer_wait",
+                detail=owner_text,
+                interval_seconds=60.0,
+                initial_delay_seconds=5.0,
             )
-        return
-    runtime_common.clear_progress_notice(monitor, "nnunet_buffer_wait")
+            if due:
+                _log(
+                    logging.INFO,
+                    "nnU-Net result handling is waiting for {0} ({1}s). Use Show "
+                    "Status and Models, then Stop, if the pending result should "
+                    "be discarded.".format(owner_text, int(elapsed)),
+                )
+            return
+        runtime_common.clear_progress_notice(monitor, "nnunet_buffer_wait")
     monitor["busy"] = True
     try:
         _monitor_tick_locked(monitor)
@@ -1082,7 +1096,8 @@ def _monitor_tick(monitor):
         _log(logging.ERROR, "nnU-Net monitor error: {0}\n{1}".format(exc, traceback.format_exc()))
     finally:
         monitor["busy"] = False
-        runtime_common.release_local_operation("mask_buffer_access", token)
+        if token is not None:
+            runtime_common.release_local_operation("mask_buffer_access", token)
 
 
 def _stop_monitor(key):
@@ -1170,8 +1185,26 @@ def _start_monitor(monitor, seconds):
         return False
 
 
+def _start_active_learning():
+    """Open the shared review UI (nnU-Net mode) and start the overlay monitor."""
+    context = {"workspace": _workspace(), "mode": "nnunet"}
+    _launch_gui("flexict_active_learning_ui.py", context, "al_setup")
+    _start_al_request_monitor()
+    return 0
+
+
+# The active-learning overlay monitor/apply family (_al_* functions, the
+# annotation-state guard, and the _AL_* process state) lives in
+# active_learning_apply.py, shared with the FlexiCT host since R93 step 6.
+# bind() injects the whole family onto this module; the review UI and the
+# apply-request / annotation-state file schemas are backend-agnostic, so only
+# the workspace, the monitor key, and the nnU-Net label differ from FlexiCT.
+active_learning_apply.bind(sys.modules[__name__], "nnunet_al_requests", TITLE)
+
+
 def main(action=None):
     _resume_pending_inference_monitors()
+    _start_al_request_monitor()
     if action == BUTTON_TRAIN:
         return start_training()
     if action == BUTTON_PREDICT:
@@ -1189,4 +1222,6 @@ def main(action=None):
         return show_status()
     if action == BUTTON_BATCH_PREDICT:
         return show_batch_predict()
+    if action == BUTTON_ACTIVE_LEARNING:
+        return _start_active_learning()
     return 0
