@@ -15,6 +15,40 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）
+
+- [ ] **R92-1【P2】full 矩阵 test_all 间歇性以退出码 0xCFFFFFFF（3489660927）
+  崩溃，full 门禁无法确定性全绿**：仅 `--profile full` 的 test_all 套件受影响，
+  其余 33 套件全部正常。根因（Windows 事件日志 + 工件历史实证，非本轮改动
+  引入；2026-10-25 全天 5 次崩溃与 1002 事件逐一对齐后修正）：
+  **唯一机制是 Windows 挂起检测自动终止**——test_all 的 PySide6 测试类使
+  进程持有真实顶层窗口，套件运行中主线程任何 ≥5–6 秒的停顿（子进程风暴、
+  IO 停顿，历史上最大概率停顿源是语法 walk）都让窗口无响应，Windows
+  事件 1002（"python.exe 已停止与 Windows 交互并关闭"）随即终止进程。
+  历史上的 ~20 分钟 `py_compile` walk 只是最大且必然的停顿窗口（walk
+  未跳过 `python_env/`，把整个 site-packages 编译了一遍，且每个 .py 写
+  一个 `__pycache__/.pyc`，数千次小文件创建被 AV 实时扫描放大）；工件
+  历史显示 2026-10-10 与 2026-10-19 早已同样崩溃（0xCFFFFFFF），均早于
+  R91 全部 8 个 commit——**先于本轮存在**，同日也有 pass 记录
+  （2026-10-10T224923 pass 942.5s），属机器级既有问题（同机同窗口期另有
+  cc-switch/MimicsResearch 等 App Hang 事件）。
+  **2026-10-25 两项修复已完成（commit `46184ad` walk 跳过 `python_env/`；
+  commit `f55b29a` 改纯内存编译不再写 .pyc）：TestSyntax 单套 1420.9s →
+  43.3s，消除了必然停顿窗口。但同日修复后的两次 full 验证仍在 39.7s /
+  54.0s 崩溃（死亡点在 TestLifecycleAndRetention 段，不在 walk 内），
+  且每次都有匹配的 1002 事件（14:13:34 / 13:39:25）——当天该共享工作站
+  被另一会话的重负载任务压满（explorer.exe 01:35 崩溃重启、他人在跑
+  网络共享数据转换批任务、435 进程），套件内随机停顿仍可跨过 5 秒
+  挂起阈值。结论：修复消除了主要暴露面，剩余风险是共享工作站的
+  负载相关性环境噪声，代码层无法根治。**
+  影响视角：开发（full 门禁红灯是环境噪声，掩盖真实回归）。严重度：P2。
+  验收标准（写入后不放宽）：full 矩阵中 test_all 的语法 walk 不再编译
+  `python_env/` 与 `nninteractive_env/` 两个 vendored 环境树（单跑该用例
+  从 ~20 分钟降到秒级）——**已达成**（`46184ad` + `f55b29a`，TestSyntax
+  43.3s）；且 full 矩阵连跑两轮 test_all 均 pass、退出码 0——**待工作站
+  空闲窗口验证（2026-10-25 当天 4 次 full 均被负载相关的挂起终止杀掉，
+  非修复缺陷）**。
+
 ### R91（2026-10-23 外部评审 a621093：eee725b SLIP 集成复审 8 卡入账）
 
 > 评审对象是 eee725b（b188a7d 之前）。本并入轮已对全部卡片在 HEAD
@@ -23,56 +57,71 @@
 > 证据目录）。评审中"当前入口限制 CT、建议文案明确"一条已被
 > R89-1（b188a7d 实际启用多模态）超越，不入账。完整证据与验收
 > 条件原文：`docs/reviews/2026-10-22-eee725b-revalidation.md`。
+> 8 卡已于本并入轮全部修复（d89f2cb / aa92830 / 28c4250 / bcff48c /
+> ada23f3 / 8538d92 / 2f6c6ee / 7d74720），证据见各条目；真机/解压
+> 类验收登记为 L5 人工项（TEST_STRATEGY.md L5 表）。
 
-- [ ] **R91-1【P1】reset 结果绕过人工修改保护**（评审 SL01）：
-  `_handle_result` 的 reset 分支（runtime_py35/slip_mimics.py:722-735）
-  直接 `_restore_base` 后返回，缺 refined 分支的
-  `expected_target_sha256` 内容校验（:740-741）——reset 回执到达前的
-  人工编辑被静默覆盖。验收：reset 等待中做等体积编辑，回执到达时
-  不覆盖且弹冲突提示；无编辑时正常恢复基线（保护逻辑不退化）。
-- [ ] **R91-2【P1】自有 gpu.lock 阻断会话续接/结束入口**（评审 SL02）：
-  run()（slip_mimics.py:1079-1094）在选择目标前无条件拒绝一切
-  gpu.lock 持有者，不区分本会话 worker 与他人；监控定时器不可用/
-  已停止时用户无法主动查看或关闭自己的会话。R88-3 只修了文案。
-  验收：自有活跃 worker 下重跑入口可续接/关闭并保留原提示；他人
-  持有仍拒绝。
-- [ ] **R91-3【P1】已有 Mask 的首次撤销被应用为空 Mask**（评审 SL03）：
-  空结果确认只覆盖 predict（slip_mimics.py:762），undo 退到零条
-  提示时模型空输出直接写盘（:785），不恢复 base、不询问清空
-  （上游 undo 首个提示 = reset，与 Mimics 会话"从当前 Mask 开始"
-  的基线语义不一致）。验收：非空 base → 首次预测 → undo，结果
-  逐体素等于 base；空 base 同流程才为空。R88-5 只修了 predict 拒绝
-  路径的计数同步。
-- [ ] **R91-4【P2】预测写盘失败后重试重复累计同一提示**（评审 SL04）：
-  桥接 click_inference 先改交互状态后写结果文件，发布失败无回滚；
-  重试 = 再次执行同一点击，worker 历史与客户端撤销计数分叉。
-  验收：状态修改后、文件发布前注入失败，同一提示重试成功后
-  历史仍为 1，撤销一次回到之前状态。
-- [ ] **R91-5【P1】通用部署包含 SLIP 入口但漏桥接与模型权重**（评审
-  SL05）：package_portable.py 全文零处提及 slip（HEAD 复核确认）——
-  INCLUDE_FILES 缺根级 slip_bridge.py，INCLUDE_DIRS 缺 slip_models；
-  打包 exit=0 但目标机 SLIP 入口无法启动。验收：标准/with-env 合成
-  包均含 slip_bridge.py；完整 SLIP 发布模式包含或显式配套可校验的
-  模型资源；解压包预检缺件明示而不报发布成功。
-- [ ] **R91-6【P2】device=auto 的 CPU 路径与上游强制 CUDA 不一致**
-  （评审 SL06）：`_resolve_device(auto)` 可返回 cpu，但上游
-  process_image:298 硬编码 `.to(cuda)` 且 combiner 依赖 CuPy；无 GPU
-  机器走完快照/大缓冲导出后才在后端失败。验收（最小方案）：无
-  CUDA 时在创建草稿/导出缓冲前明确拒绝并提示；若宣称 CPU 可用需
-  真实 CPU 特征与点击/undo/reset 测试（论文 CPU 协议是预计算特征
-  + 关传播，与当前流程不同）。
-- [ ] **R91-7【P1】GPU 恢复见任意备份即删当前安装，部分备份毁环境**
-  （评审 N01）：switch_gpu_torch.py:210 `has_pending_backup` 只查
-  "存在任意 .bak 条目"，非完整可恢复集合（torch/torchvision 目录 +
-  对应元数据齐备）；restore 分支还缺占用预检。验收：仅元数据/仅
-  torch/缺 torchvision/目录损坏均拒绝且当前工作文件不变；完整备份
-  正常恢复，切换失败可回滚。
-- [ ] **R91-8【P2】进度窗口把上次完成态锁定为本次基线**（评审 N02）：
-  setup_progress_window.py `_baseline_epoch`/`network_warning` 只在
-  首次状态初始化（:112-120），新检查继承旧 100% 进度、旧耗时，
-  隐藏本次网络盘提示（评审有真实 Qt 截图证据）。验收：旧 ok → 新
-  checking 显示新耗时与不确定进度、不提前关闭；慢状态读取时界面
-  计时器持续响应。
+- [x] **R91-1【P1】reset 结果绕过人工修改保护**（评审 SL01）
+  〔R91 当轮解决，commit `d89f2cb`〕：reset 分支补上 refined 分支
+  同款的 `expected_target_sha256` 内容校验——reset 等待中的等体积
+  编辑在回执到达时不被静默覆盖（弹冲突提示），无编辑时正常恢复
+  基线，保护逻辑不退化。测试：tests/test_slip_mimics.py 新增 reset
+  等待中编辑冲突用例（+52 行）。
+- [x] **R91-2【P1】自有 gpu.lock 阻断会话续接/结束入口**（评审 SL02）
+  〔R91 当轮解决，commit `aa92830`〕：gpu.lock 被本会话自己的
+  worker 持有时，入口不再一律拒绝而是取回现有会话（保留查看/关闭
+  与原提示）；监控定时器不可用/已停止时同样可取回；他人持有仍
+  拒绝。测试：tests/test_slip_mimics.py +84 行覆盖自有/他人/定时器
+  不可用分支。
+- [x] **R91-3【P1】已有 Mask 的首次撤销被应用为空 Mask**（评审 SL03）
+  〔R91 当轮解决，commit `28c4250`〕：undo 退到零条提示时不再把
+  模型空输出直接写盘，改为恢复会话 base（与"从当前 Mask 开始"的
+  基线语义一致）；空 base 同流程仍为空。测试：tests/
+  test_slip_mimics.py +50 行覆盖非空/空 base 两路径（逐体素断言）。
+- [x] **R91-4【P2】预测写盘失败后重试重复累计同一提示**（评审 SL04）
+  〔R91 当轮解决，commit `bcff48c`〕：桥接层记住发布失败的待发布
+  掩码——同一提示重试只补发布不重复推理，不同提示先回滚孤儿提示；
+  undo 发布失败后下次 undo 补发布、下次 predict 重放已撤销提示，
+  worker 历史与客户端计数保持一致；推理中途异常毒化会话，后续
+  predict/undo/reset 一律拒绝；reset 吸收半发布状态。测试：新建
+  tests/test_slip_bridge_reconcile.py（12 项失败路径，无 GPU，fake
+  模块直测 `_SlipSession`）并注册进 run_regression_matrix。
+- [x] **R91-5【P1】通用部署包含 SLIP 入口但漏桥接与模型权重**（评审
+  SL05）〔R91 当轮解决，commit `ada23f3`〕：package_portable.py 补齐
+  根级 slip_bridge.py 与 slip_models；完整 SLIP 发布模式对模型资源
+  做可校验配套；解压包预检缺件明示而不报发布成功。测试：test_all
+  打包清单用例（+97 行）、test_slip_mimics 预检用例（+35 行）。
+  便携包人工解压检查登记为 L5 项（TEST_STRATEGY.md L5 表）。
+- [x] **R91-6【P2】device=auto 的 CPU 路径与上游强制 CUDA 不一致**
+  （评审 SL06）〔R91 当轮解决，commit `8538d92`〕：最小方案落地——
+  无 CUDA 时在创建草稿/导出缓冲前明确拒绝：Mimics 端入口前置校验
+  + 桥接 open() 对解析为 cpu 的设备在任何 checkpoint/锁/文件工作
+  之前拒绝（上游管线 CUDA-only，论文 CPU 协议是预计算特征+关传播，
+  与当前流程不同，不宣称 CPU 可用）。测试：test_slip_bridge_
+  reconcile.py CPU 门控用例 + test_slip_mimics 无 GPU 入口拒绝用例
+  （+71 行）。
+- [x] **R91-7【P1】GPU 恢复见任意备份即删当前安装，部分备份毁环境**
+  （评审 N01）〔R91 当轮解决，commit `2f6c6ee`〕：restore 前先做完整
+  备份清单校验（torch/torchvision 目录含 lib/__init__.py + 两侧
+  dist-info 元数据齐备）与进程占用预检；换回改为暂存式（活跃目录
+  先改名 .restore-staging、备份就位、失败按逆序回滚），不再先删
+  当前安装；部分备份/占用中一律拒绝且当前可用文件原样在场。切换
+  pip 失败同样可回滚。测试：tests/test_all.py TestGpuRepairLauncher
+  重写为 8 项（4 类部分备份拒绝、占用/占用检查失败拒绝、完整备份
+  恢复、切换失败回滚）。
+- [x] **R91-8【P2】进度窗口把上次完成态锁定为本次基线**（评审 N02）
+  〔R91 当轮解决，commit `7d74720`〕：窗口第一个读到的终态必是上次
+  运行残留（worker 先于窗口启动且必先写非终态）——保持"正在
+  启动…"继续等，不展示旧 100% 进度/旧耗时、不提前关闭；started_at
+  变化或终态后再次出现非终态即判定新一次运行，重置全部运行期显示
+  （新耗时起点、跑马灯、网络盘提示、取消 2 秒关闭倒计时），install/
+  extract 每步不带 started_at 的常规写入不误触发重置。状态读取移到
+  后台线程（close 即停），Qt 计时器只应用快照，网络盘慢读取不再
+  冻结计时器（对证评审 slow_state_read 0 回调证据）。顺带删除死代码
+  ACTION_TITLES（setup_env.py 从不写 action 键）。测试：test_all.py
+  TestSetupProgressWindow 4 项（陈旧 ok→新 checking 全验收、关闭窗口
+  内新运行取消倒计时、install 常规写入不重置、慢读取中 _tick 照常
+  响应）。
 - 评审同时确认（正面结论，无需动作）：vendor 树 15 文件与上游
   d22df6e 逐字节一致（仅 CRLF 归一化差异）、坐标往返合成复现正确、
   50 项 SLIP 失败路径测试在其环境通过（HEAD 已 54 项）；旧卡
