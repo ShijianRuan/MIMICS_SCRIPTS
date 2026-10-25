@@ -66,6 +66,37 @@
   实机端到端（本地 RTX 3060：小子集训 2 折 → 排序 → 复核窗双击开
   病例/叠加/标记回流）已登记 L5 人工项（docs/TEST_STRATEGY.md L5 表
   R93-1 行），未执行前不视为验收完成。〕
+  〔L5 执行记录（2026-10-25 晚，用户拍板训练段走远程 206 服务器，
+  全程走生产入口 nnunet_jobs.create_job 派发，顺带实测远程训练链路）：
+  ①2 折训练：Totalsegmentator 只读子集 10 例（s0001/s0004/s0006/
+  s0009-s0015，kidney_left），2d/30 epoch，逐折串行派发远程 206
+  （fold 0 job train_20261025T214755、fold 1 job train_20261025T223356，
+  各约 42 分钟训练），两次均 completed：逐例上传（fold 1 命中源网格
+  缓存+远程数据集缓存，preparing→training 仅约 2.5 分钟）、SHA-256
+  校验下载、register_downloaded_model 带远程溯源、容器+远程作业目录
+  自动清理（status 键 remote_container_removed/remote_job_removed，
+  事后 SSH 复核 mimics-ai 命名空间零容器、双 GPU 0%）。②<2 折拒绝
+  失败路径真实触发一次（误选单折 bundle 派发 job active_learning_
+  20261025T232104_ee8c1423，立即失败且错误文案与设计一致）——真实
+  远程训练产物上的失败路径验证。③本地 AL：合并 2 折 bundle（merge
+  脚本走生产 register_model）对 6 例未标注池（s0038-s0046，与训练
+  10 例零交集）派发 job active_learning_20261025T232348_954a6df8，
+  5.5 分钟 completed：ranking.csv 6 例 integrated 降序（s0038 居首，
+  s0046 分歧体素仅 310 个排末位，排序合理）、逐例 consensus+不确定度
+  图、双带 bands/（2 折分歧图单非零级 → 高带阈值 6 被数据感知钳到 5，
+  窗口如实提示"中带与高带覆盖相同体素"）、input_geometries.json
+  （source_image_path 指向数据集原 ct.nii.gz，dataset_masks 来源
+  mcs_path 为空符合约定）、S10 排名/成功清单一致（excluded=0）。
+  ④复核窗口离屏驱动（nnU-Net 模式、真实 workspace）：模型下拉仅列
+  合并 2 折 bundle（两个单折远程 bundle 被正确跳过）、job 下拉同时
+  列出本次 completed 与误派 failed（R62-10 失败标记）、表 6 行与
+  ranking.csv 同序、状态列"待标注"、open_bands 请求文件结构完整
+  （schema flexict_al_apply_request.v1）、annotation_state 写入后
+  行状态"已标注"+统计行更新；验收产生的请求/状态文件已全部回滚
+  清理。⑤只读红线：全程零写入 Z: 源路径（池物化输出仅入 job 目录）。
+  **剩余人工末段**（需真实 Mimics 实例，交还用户）：Mimics 内通过
+  05_Active_Learning_Review 打开 s0038、叠加双带、标记状态、
+  annotation_state.json 回流核对。发现的产品缺口见 D13。〕
 
 
 ### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）
@@ -3374,6 +3405,25 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
   `tools/setup_env.py check` 开头检测 repo 路径是否网络盘/UNC，是则在
   状态 JSON 的 message 里追加提示（"检测到环境在网络盘上，检查和推理
   会非常慢，建议先复制到本地盘再检查"），GUI 弹窗原样显示；约 10 行。
+- **D13 远程多折训练无法聚合成单 bundle，AL 不可达**〔2026-10-25
+  R93 L5 验收实测发现〕：远程训练每个 job 在各自 /job 沙箱内用独立
+  results 根（/job/output/runtime/nnUNet_results），fold 无法像本地
+  workspace（跨 job 共享 runtime/nnUNet_results）那样自然累积；且
+  下载步 `_download_artifact` 对本地目标目录整体替换（备份+os.
+  replace），第二次下载必然冲掉第一次的 fold_0。结果：远程逐折训练
+  产出 N 个单折 bundle，而 AL 需要"一个含 ≥2 折的 bundle"，远程训练
+  出来的模型喂不进主动学习（L5 验收只能用脚本走生产 register_model
+  手工合并两 bundle 桥接）。
+  **需求**：远程逐折训练的多折产物可自动聚合为一个多折 bundle。
+  **使用者/频率**：走远程训练 + AL 工作流的标注者，每次 AL 迭代
+  （周级）都会撞上。
+  **不解决会怎样**：变通是手工合并（L5 验收脚本的做法）——标注者
+  不可能做；或退回本地训练，放弃远程 GPU。
+  **最小可行方案**（供拍板，未实施）：下载注册时若目标 task 目录已
+  存在同 dataset/配置的先前 bundle，则把新折合并进既有 bundle 而非
+  整体替换（复用 L5 验收脚本的合并语义：按 fold 目录覆盖 + manifest
+  folds 并集）；改动集中在 `_download_artifact`/`register_downloaded_
+  model`，约 30-50 行。
 
 ### 需求缺口提案（R1 需求视角审计，均 P2 建议、未立项不实施）
 
@@ -3851,6 +3901,8 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
 | 2026-09-29 | R61 | 无 | 四视角评审，未连接服务器、未触数据集。**发现**：外来文件 .mimics_runtime/copy_to_z.py 向 Z:\ImageAnalysisData\1-CT\Segmentation\data\ 下新建 label_task_mr_synced 目录写入（v201 兄弟目录，非 v201 内部）——非本轮所为、未触碰该文件，红线边缘操作已提请用户裁决（拍板"收编"，写入路径将单独审视） | .mimics_runtime/copy_to_z.py（只读检查） | 本轮只读未写 | 未动任何外来文件 |
 | 2026-10-09 | R72 | 206 服务器 | D1+C2 镜像更新（build-image 远程构建两次：00:49 成功 sha256:770ad77592e3→57d6ca9c1ad7；04:00 C2 后重构建，dockerproxy TLS 超时 → digest 锁定基镜像 sha256:4b3cc8f16044）；C2 两次连续 FlexiCT 训练（kidney_left_c2，8 例 kidney_left，fresh run train_20261009T030244 + 续训 train_20261009T041153）；中途一次续训 train_20261009T034436 因陈旧镜像容器退出（本地磁盘不足前先撞代码漂移）、一次 train_20261009T040020 因本地 E: 磁盘不足在下载步失败（5.53/8.08 GiB） | /userdata/shijian_ruan/mimics-ai/{jobs,cache,logs} | 只用 /userdata/shijian_ruan/；无长驻任务（最长一次约 20 分钟训练） | jobs/ 清空、无容器残留、GPU 0%；磁盘不足失败的两个 job 目录已手动清除；本地测试模型（kidney_left_smoke/kidney_left_c2 前一代）为腾磁盘已删（可由远程 checkpoint 再生） |
 | 2026-10-09 | R72 | Totalsegmentator v201 | C2 训练数据源（s0001/s0004/s0006/s0009-s0013 共 8 例 kidney_left） | Z:\...\Totalsegmentator_dataset_v201（只读） | 只读，所有输出写 E:\MIMICS_SCRIPTS\flexict_models | 无写入 |
+| 2026-10-25 | R93 | 206 服务器 | L5 验收训练段（用户拍板走远程）：Totalsegmentator kidney_left 10 例 2d/30 epoch 逐折串行训练 2 个 job（train_20261025T214755 fold 0、train_20261025T223356 fold 1），生产入口 nnunet_jobs.create_job → remote_training_controller → 容器 → 下载注册；事后 SSH 复核清理 | /userdata/shijian_ruan/mimics-ai/{jobs,cache,logs} | 只用 /userdata/shijian_ruan/；串行派发（GPU 排他锁+block 策略）；无长驻（单 job 全程约 47 分钟，人在环监控） | 两个 job 均自动清理（容器+远程作业目录，status 键确认）；SSH 复核 mimics-ai 命名空间零容器、双 GPU 0 MiB/0%；远程数据集缓存（约 10 例）保留供复用 |
+| 2026-10-25 | R93 | Totalsegmentator v201 | L5 验收：训练 10 例（s0001/s0004/s0006/s0009-s0015）+ 未标注池 6 例（s0038-s0046，零交集）只读读取 | Z:\...\Totalsegmentator_dataset_v201（只读） | 只读：训练走源网格缓存（E: 本地），AL 池物化输出仅入 job 目录（C:\Users\...\.mimics_script\nnunet\jobs\） | 无写入（input_geometries.json 记录的 source_image_path 仅作复核窗口打开用） |
 
 ## 轮次报告存档
 
