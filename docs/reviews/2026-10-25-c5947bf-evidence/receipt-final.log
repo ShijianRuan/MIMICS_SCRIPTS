@@ -1,0 +1,159 @@
+test_acquire_lock (test_all.TestCreateMcsBatch.test_acquire_lock) ... ok
+test_creation_status_combines_prepare_and_mcs_failures (test_all.TestCreateMcsBatch.test_creation_status_combines_prepare_and_mcs_failures) ... ok
+test_failed_mcs_case_does_not_stop_later_cases (test_all.TestCreateMcsBatch.test_failed_mcs_case_does_not_stop_later_cases) ... ok
+test_failed_mcs_rebuild_keeps_previous_complete_project (test_all.TestCreateMcsBatch.test_failed_mcs_rebuild_keeps_previous_complete_project) ... ok
+test_fingerprint_skip_logic (test_all.TestCreateMcsBatch.test_fingerprint_skip_logic)
+When fingerprint matches, existing .mcs should be skipped. ... ok
+test_inject_buffer_correct_shape (test_all.TestCreateMcsBatch.test_inject_buffer_correct_shape)
+inject_buffer succeeds when byte count matches. ... ok
+test_inject_buffer_shape_mismatch_error (test_all.TestCreateMcsBatch.test_inject_buffer_shape_mismatch_error)
+inject_buffer should raise RuntimeError on byte count mismatch. ... ok
+test_local_queue_descriptor_is_consumed_by_background_creator (test_all.TestCreateMcsBatch.test_local_queue_descriptor_is_consumed_by_background_creator) ... ok
+test_log_message (test_all.TestCreateMcsBatch.test_log_message) ... ok
+test_logs_directory_created (test_all.TestCreateMcsBatch.test_logs_directory_created) ... ok
+test_native_mimics_exit_quarantines_only_current_case (test_all.TestCreateMcsBatch.test_native_mimics_exit_quarantines_only_current_case) ... ok
+test_partial_work_dir_without_manifest_is_never_converted (test_all.TestCreateMcsBatch.test_partial_work_dir_without_manifest_is_never_converted) ... ok
+test_pending_receipt_flush_corrupt_receipt_replaced (test_all.TestCreateMcsBatch.test_pending_receipt_flush_corrupt_receipt_replaced)
+S01 轮3验收：回执文件损坏（不可解析 JSON）——不能被当作有效证据， ... ok
+test_pending_receipt_flush_heals_across_restart (test_all.TestCreateMcsBatch.test_pending_receipt_flush_heals_across_restart)
+S01 re-review acceptance: after a receipt write failed, a later ... ok
+test_pending_receipt_flush_identical_receipt_heals_without_rewrite (test_all.TestCreateMcsBatch.test_pending_receipt_flush_identical_receipt_heals_without_rewrite)
+S01 轮3验收：磁盘回执与待写载荷属于同一次导入（事务摘要一致）—— ... ok
+test_pending_receipt_flush_replaces_older_receipt (test_all.TestCreateMcsBatch.test_pending_receipt_flush_replaces_older_receipt)
+S01 轮3验收：同病例重新导入后，上一轮回执仍留在工程旁。补写不得 ... ok
+test_pending_receipt_flush_stale_pending_keeps_newer_receipt (test_all.TestCreateMcsBatch.test_pending_receipt_flush_stale_pending_keeps_newer_receipt)
+S01 轮3验收：磁盘回执比待写记录新（待办是过期残留）——保留磁盘 ... ok
+test_pruned_fingerprint_with_manifest_match_keeps_existing_mcs (test_all.TestCreateMcsBatch.test_pruned_fingerprint_with_manifest_match_keeps_existing_mcs)
+R61-2: after the 14-day queue prune deletes the fingerprint file, ... ok
+test_pruned_fingerprint_with_manifest_mismatch_reprocesses (test_all.TestCreateMcsBatch.test_pruned_fingerprint_with_manifest_mismatch_reprocesses)
+R61-2: the manifest records a DIFFERENT source fingerprint — a ... ok
+test_pruned_fingerprint_without_manifest_record_keeps_existing_mcs (test_all.TestCreateMcsBatch.test_pruned_fingerprint_without_manifest_record_keeps_existing_mcs)
+R61-2: published .mcs, fingerprint file pruned, NO manifest record ... ok
+test_publish_failure_leaves_no_consumable_receipt (test_all.TestCreateMcsBatch.test_publish_failure_leaves_no_consumable_receipt)
+F30 failure path: when the publish (staging rename) fails, the ... ok
+test_receipt_failure_is_visible_in_status (test_all.TestCreateMcsBatch.test_receipt_failure_is_visible_in_status)
+S01: a receipt-write failure must not be buried — the final task ... ok
+test_receipt_handoff_uses_real_producer_payload (test_all.TestCreateMcsBatch.test_receipt_handoff_uses_real_producer_payload)
+S01: the receipt payload must survive the producer→queue handoff ... ok
+test_receipt_written_after_publish_against_final_path (test_all.TestCreateMcsBatch.test_receipt_written_after_publish_against_final_path)
+F30: the import receipt must point at the FINAL .mcs path and ... ok
+test_record_failed_case (test_all.TestCreateMcsBatch.test_record_failed_case) ... ok
+test_record_failed_case_keeps_user_source_path (test_all.TestCreateMcsBatch.test_record_failed_case_keeps_user_source_path)
+R61-5: a failure record must name the user's original input path, ... ok
+test_required_metadata_write_failure_is_not_silenced (test_all.TestCreateMcsBatch.test_required_metadata_write_failure_is_not_silenced) ... ok
+test_shape_product (test_all.TestCreateMcsBatch.test_shape_product) ... ok
+test_stop_marker_detected (test_all.TestCreateMcsBatch.test_stop_marker_detected)
+Simulate that the stop marker file is detected. ... ok
+test_supervisor_ignores_descriptor_whose_manifest_was_quarantined (test_all.TestCreateMcsBatch.test_supervisor_ignores_descriptor_whose_manifest_was_quarantined) ... ok
+test_supervisor_restarts_after_native_case_exit_and_finishes_queue (test_all.TestCreateMcsBatch.test_supervisor_restarts_after_native_case_exit_and_finishes_queue) ... [2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 2 .mcs file(s).
+[2026-10-25 23:22:15] [1/2] Creating: case_bad
+[2026-10-25 23:22:15] Create failed for case_bad: controlled create failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1661, in main
+    created_manifest = create_mcs_from_manifest(
+        work_dir, staging_mcs
+    )
+  File "<repo>/tests/test_all.py", line 4258, in fake_create
+    raise RuntimeError("controlled create failure")
+RuntimeError: controlled create failure
+
+[2026-10-25 23:22:15] [2/2] Creating: case_good
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 1 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case001
+[2026-10-25 23:22:15] Create failed for case001: controlled rebuild failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1661, in main
+    created_manifest = create_mcs_from_manifest(
+        work_dir, staging_mcs
+    )
+  File "<repo>/tests/test_all.py", line 4304, in <lambda>
+    create_mcs_batch.create_mcs_from_manifest = lambda *_args: (_ for _ in ()).throw(
+                                                               ~~~~~~~~~~~~~~~~~~~~~^
+        RuntimeError("controlled rebuild failure")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "<repo>/tests/test_all.py", line 4304, in <genexpr>
+    create_mcs_batch.create_mcs_from_manifest = lambda *_args: (_ for _ in ()).throw(
+RuntimeError: controlled rebuild failure
+
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 0 succeeded, 1 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case001
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-25 23:22:15] test message
+[2026-10-25 23:22:15] first message
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Discarding stale prepared-work descriptor: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-25 23:22:15] 补写导入回执成功：<synthetic-tmp>
+[2026-10-25 23:22:15] 补写导入回执成功：<synthetic-tmp>
+[2026-10-25 23:22:15] 补写导入回执成功：<synthetic-tmp>
+[2026-10-25 23:22:15] 补写完成（磁盘回执匹配当前工程，待写事务已过期）：<synthetic-tmp>
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Fingerprint file missing for case_gone; dataset manifest confirms the source is unchanged. Skipping.
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Source fingerprint changed for case_changed; reprocessing.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case_changed
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Fingerprint for case_unknown is missing and the dataset manifest has no record; keeping the existing .mcs and skipping reimport. Delete the .mcs manually to force a reimport.
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 0 succeeded, 0 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case_f30b
+[2026-10-25 23:22:15] Create failed for case_f30b: synthetic publish failure
+Traceback (most recent call last):
+  File "<repo>/runtime_py35/create_mcs_batch.py", line 1664, in main
+    _publish_mcs(staging_mcs, mcs_path)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "<repo>/tests/test_all.py", line 4210, in failing_publish
+    raise RuntimeError("synthetic publish failure")
+RuntimeError: synthetic publish failure
+
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 0 succeeded, 1 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case_s01b
+[2026-10-25 23:22:15] Created case_s01b, but import receipt could not be written: synthetic receipt failure
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case_s01
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 0 failed.
+[2026-10-25 23:22:15] Background Mimics batch process started.
+[2026-10-25 23:22:15] Creating 1 .mcs file(s).
+[2026-10-25 23:22:15] [1/1] Creating: case_f30
+[2026-10-25 23:22:15] Created: <synthetic-tmp>
+[2026-10-25 23:22:15] No pending manifests and producer marked the queue done; exiting.
+[2026-10-25 23:22:15] Background creation finished: 1 succeeded, 0 failed.
+Starting background Mimics queue worker.
+Background Mimics stopped during case case_bad; continuing the remaining queue.
+Starting background Mimics queue worker.
+ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 2.109s
+
+OK

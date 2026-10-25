@@ -1,0 +1,57 @@
+test_launchers_are_ascii_and_target_the_repair_script (test_all.TestGpuRepairLauncher.test_launchers_are_ascii_and_target_the_repair_script) ... ok
+test_restore_on_default_is_idempotent (test_all.TestGpuRepairLauncher.test_restore_on_default_is_idempotent)
+R85-2: 在已是默认 cu124 的环境上运行 restore 必须是无操作—— ... ok
+test_restore_refuses_while_env_in_use (test_all.TestGpuRepairLauncher.test_restore_refuses_while_env_in_use)
+R91-7: restore 与 switch 使用相同占用预检——被进程锁住的 DLL ... ok
+test_restore_rejects_partial_backup_and_keeps_working_variant (test_all.TestGpuRepairLauncher.test_restore_rejects_partial_backup_and_keeps_working_variant)
+R91-7: 部分备份（只剩元数据/仅 torch/缺 torchvision 元数据/目录 ... ok
+test_restore_removes_variant_and_restores_default (test_all.TestGpuRepairLauncher.test_restore_removes_variant_and_restores_default)
+R85-2: cu118/cu128 活动状态 + 完整 cu124 备份时，restore 换回 ... ok
+test_restore_without_backup_keeps_working_variant (test_all.TestGpuRepairLauncher.test_restore_without_backup_keeps_working_variant)
+变体活动但 .bak 备份丢失（部署目录被外部回退/覆盖）时，restore ... ok
+test_switch_pip_failure_rolls_back_to_default (test_all.TestGpuRepairLauncher.test_switch_pip_failure_rolls_back_to_default)
+R91-7: 切换中途 pip 安装失败必须回滚到默认 cu124——旧流程先删 ... ok
+test_switch_script_matches_repo_layout (test_all.TestGpuRepairLauncher.test_switch_script_matches_repo_layout) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.030s
+
+OK
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu124', 'torchvision': 'cu124'}
+当前已是默认版本（cu124），无需恢复。
+当前 GPU 状态: {"avail": true, "torch": "test"}
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 以下进程正在使用本环境，请先全部关闭（Mimics、拖拽导入小窗口等）再运行：
+   PID 4242: python.exe ...MIMICS_SCRIPTS...
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 无法检查进程占用
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份不完整（缺: torch/ 目录备份、torchvision/ 目录备份），无法恢复默认。为避免毁坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份不完整（缺: torchvision/ 目录备份、torchvision 的 dist-info 元数据备份），无法恢复默认。为避免毁坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份不完整（缺: torchvision 的 dist-info 元数据备份），无法恢复默认。为避免毁坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份不完整（缺: torch/ 备份目录损坏（缺 __init__.py）），无法恢复默认。为避免毁坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+已恢复默认 cu124: ['<synthetic-tmp>', '<synthetic-tmp>', '<synthetic-tmp>', '<synthetic-tmp>']
+恢复后检查: {"avail": true, "torch": "test"}
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu118', 'torchvision': 'cu118'}
+!! 当前使用 cu118，但默认版本（cu124）的备份不完整（缺: torch/ 目录备份、torch 的 dist-info 元数据备份、torchvision/ 目录备份、torchvision 的 dist-info 元数据备份），无法恢复默认。为避免毁坏环境，本次不做任何改动。
+   请重新拷贝/解压一份完整部署包覆盖本目录，或先用对应修复 bat 重装后再运行本脚本 restore。
+site-packages: <synthetic-tmp>
+当前 torch 版本: {'torch': 'cu124', 'torchvision': 'cu124'}
+!! 缺少离线 wheel: ['torch', 'torchvision']（应位于 <repo>/repair/cu118）

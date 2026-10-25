@@ -1,0 +1,91 @@
+test_get_image_affine_normalized (test_all.TestMimicsBridgeNiftiNormalization.test_get_image_affine_normalized) ... ok
+test_in_plane_shear_is_the_geometry_that_requires_resampling (test_all.TestMimicsBridgeNiftiNormalization.test_in_plane_shear_is_the_geometry_that_requires_resampling) ... ok
+test_mask_nifti_publish_is_atomic_and_preserves_existing_on_failure (test_all.TestMimicsBridgeNiftiNormalization.test_mask_nifti_publish_is_atomic_and_preserves_existing_on_failure) ... ok
+test_mask_nifti_publish_sets_qform_and_sform (test_all.TestMimicsBridgeNiftiNormalization.test_mask_nifti_publish_sets_qform_and_sform) ... ok
+test_mhd_drive_relative_data_ref_is_repaired_on_read (test_all.TestMimicsBridgeNiftiNormalization.test_mhd_drive_relative_data_ref_is_repaired_on_read) ... skipped 'requires a drive-lettered path'
+test_never_resample_rejects_unrepresentable_in_plane_shear (test_all.TestMimicsBridgeNiftiNormalization.test_never_resample_rejects_unrepresentable_in_plane_shear) ... ok
+test_normalize_both_codes_zero (test_all.TestMimicsBridgeNiftiNormalization.test_normalize_both_codes_zero) ... ok
+test_normalize_preserves_oblique_affine (test_all.TestMimicsBridgeNiftiNormalization.test_normalize_preserves_oblique_affine) ... ok
+test_normalize_qform_zero_to_valid (test_all.TestMimicsBridgeNiftiNormalization.test_normalize_qform_zero_to_valid) ... ok
+test_oblique_import_export_roundtrip_returns_exact_source_grid (test_all.TestMimicsBridgeNiftiNormalization.test_oblique_import_export_roundtrip_returns_exact_source_grid) ... ok
+test_oblique_prediction_buffer_matches_import_buffer_with_axis_mapping (test_all.TestMimicsBridgeNiftiNormalization.test_oblique_prediction_buffer_matches_import_buffer_with_axis_mapping)
+Import and inference must produce the same Mimics buffer for one physical mask. ... ok
+test_prepare_preserves_original_oblique_source_shape_metadata (test_all.TestMimicsBridgeNiftiNormalization.test_prepare_preserves_original_oblique_source_shape_metadata)
+Source metadata must not be replaced by the axial Mimics import grid. ... ok
+test_read_nifti_mask_with_affine_normalized (test_all.TestMimicsBridgeNiftiNormalization.test_read_nifti_mask_with_affine_normalized) ... ok
+test_regular_gantry_tilt_is_encoded_without_resampling (test_all.TestMimicsBridgeNiftiNormalization.test_regular_gantry_tilt_is_encoded_without_resampling) ... ok
+test_single_case_worker_canonicalizes_project_root_to_cli_root (test_all.TestMimicsBridgeNiftiNormalization.test_single_case_worker_canonicalizes_project_root_to_cli_root) ... ok
+test_single_case_worker_creates_missing_output_dir_or_fails_closed (test_all.TestMimicsBridgeNiftiNormalization.test_single_case_worker_creates_missing_output_dir_or_fails_closed) ... ERROR
+test_sitk_retry_uses_temporary_header_copy_without_modifying_source (test_all.TestMimicsBridgeNiftiNormalization.test_sitk_retry_uses_temporary_header_copy_without_modifying_source) ... ok
+test_supported_volume_suffixes_include_compressed_nrrd (test_all.TestMimicsBridgeNiftiNormalization.test_supported_volume_suffixes_include_compressed_nrrd) ... ok
+test_affine_close (test_all.TestMimicsBridgeBufferMapping.test_affine_close) ... ok
+test_affine_is_usable (test_all.TestMimicsBridgeBufferMapping.test_affine_is_usable) ... ok
+test_apply_buffer_mapping_flip_axis0 (test_all.TestMimicsBridgeBufferMapping.test_apply_buffer_mapping_flip_axis0) ... ok
+test_apply_buffer_mapping_flip_axis1 (test_all.TestMimicsBridgeBufferMapping.test_apply_buffer_mapping_flip_axis1) ... ok
+test_convert_can_write_to_job_scoped_segmentations (test_all.TestMimicsBridgeBufferMapping.test_convert_can_write_to_job_scoped_segmentations) ... ok
+test_convert_canonical_source_mask_bypasses_corrupt_mcs_buffer (test_all.TestMimicsBridgeBufferMapping.test_convert_canonical_source_mask_bypasses_corrupt_mcs_buffer) ... ok
+test_convert_canonical_source_mask_rejects_bad_shape_affine_and_values (test_all.TestMimicsBridgeBufferMapping.test_convert_canonical_source_mask_rejects_bad_shape_affine_and_values) ... ok
+test_convert_degraded_export_uses_mimics_grid_without_source_geometry (test_all.TestMimicsBridgeBufferMapping.test_convert_degraded_export_uses_mimics_grid_without_source_geometry) ... ok
+test_convert_multi_format_writes_nrrd_and_mha_with_same_geometry (test_all.TestMimicsBridgeBufferMapping.test_convert_multi_format_writes_nrrd_and_mha_with_same_geometry) ... ok
+test_convert_rejects_unsupported_export_format (test_all.TestMimicsBridgeBufferMapping.test_convert_rejects_unsupported_export_format) ... ok
+test_convert_resamples_mimics_mask_back_to_source_image_grid (test_all.TestMimicsBridgeBufferMapping.test_convert_resamples_mimics_mask_back_to_source_image_grid) ... ok
+test_convert_restores_source_grid_from_metadata_when_file_missing (test_all.TestMimicsBridgeBufferMapping.test_convert_restores_source_grid_from_metadata_when_file_missing) ... ok
+test_convert_strict_source_export_refuses_missing_source_geometry (test_all.TestMimicsBridgeBufferMapping.test_convert_strict_source_export_refuses_missing_source_geometry) ... ok
+test_convert_uses_mimics_grid_affine_from_manifest (test_all.TestMimicsBridgeBufferMapping.test_convert_uses_mimics_grid_affine_from_manifest) ... ok
+test_custom_export_does_not_overwrite_existing_mask (test_all.TestMimicsBridgeBufferMapping.test_custom_export_does_not_overwrite_existing_mask) ... ok
+test_derived_dicom_kill_mid_slices_leaves_unpublished_residue_and_rerun_recovers (test_all.TestMimicsBridgeBufferMapping.test_derived_dicom_kill_mid_slices_leaves_unpublished_residue_and_rerun_recovers) ... ok
+test_derived_dicom_validation_rejects_incomplete_series (test_all.TestMimicsBridgeBufferMapping.test_derived_dicom_validation_rejects_incomplete_series) ... ok
+test_empty_source_image_path_never_scans_cwd (test_all.TestMimicsBridgeBufferMapping.test_empty_source_image_path_never_scans_cwd)
+An empty source_image_path must not treat cwd as a DICOM folder. ... ok
+test_export_manifest_roundtrips_chinese_mask_names_as_utf8 (test_all.TestMimicsBridgeBufferMapping.test_export_manifest_roundtrips_chinese_mask_names_as_utf8)
+F-8: export manifests must be written (and read back) as UTF-8. ... ok
+test_inverse_buffer_mapping_roundtrip (test_all.TestMimicsBridgeBufferMapping.test_inverse_buffer_mapping_roundtrip) ... ok
+test_mask_header_geometry_fallback_is_explicit (test_all.TestMimicsBridgeBufferMapping.test_mask_header_geometry_fallback_is_explicit) ... ok
+test_mask_nifti_kill_mid_write_never_publishes_partial_file (test_all.TestMimicsBridgeBufferMapping.test_mask_nifti_kill_mid_write_never_publishes_partial_file) ... ok
+test_mask_resample_default_is_nearest_and_discrete_flip_is_exact (test_all.TestMimicsBridgeBufferMapping.test_mask_resample_default_is_nearest_and_discrete_flip_is_exact) ... ok
+test_mr_mhd_float_intensity_survives_derived_dicom_scaling (test_all.TestMimicsBridgeBufferMapping.test_mr_mhd_float_intensity_survives_derived_dicom_scaling) ... ok
+test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers (test_all.TestMimicsBridgeBufferMapping.test_multilabel_mhd_mask_splits_into_visible_nonempty_buffers) ... ok
+test_nifti_to_derived_dicom_shape (test_all.TestMimicsBridgeBufferMapping.test_nifti_to_derived_dicom_shape) ... ok
+test_prepare_supports_mhd_and_preserves_source_geometry (test_all.TestMimicsBridgeBufferMapping.test_prepare_supports_mhd_and_preserves_source_geometry) ... ok
+test_read_mask_labels_rejects_nonfinite_values (test_all.TestMimicsBridgeBufferMapping.test_read_mask_labels_rejects_nonfinite_values)
+F23: the multi-label entry point keeps rejecting NaN/Inf labels. ... ok
+test_read_nifti_mask_accepts_trailing_singleton_channel (test_all.TestMimicsBridgeBufferMapping.test_read_nifti_mask_accepts_trailing_singleton_channel) ... ok
+test_read_nifti_mask_integer_valued_float_passes_all_readers (test_all.TestMimicsBridgeBufferMapping.test_read_nifti_mask_integer_valued_float_passes_all_readers)
+F23: float dtype with integral values (0/1, 0/255) stays accepted. ... ok
+test_read_nifti_mask_non_3d_raises (test_all.TestMimicsBridgeBufferMapping.test_read_nifti_mask_non_3d_raises) ... ok
+test_read_nifti_mask_rejects_fractional_probability_map (test_all.TestMimicsBridgeBufferMapping.test_read_nifti_mask_rejects_fractional_probability_map)
+F23: an undeclared probability map must not be silently thresholded. ... ok
+test_read_nifti_mask_rejects_nonfinite_values (test_all.TestMimicsBridgeBufferMapping.test_read_nifti_mask_rejects_nonfinite_values)
+F23: NaN/Inf voxels must not become foreground via != 0. ... ok
+test_resample_image_to_grid_matches_target_shape (test_all.TestMimicsBridgeBufferMapping.test_resample_image_to_grid_matches_target_shape) ... ok
+test_resample_mask_to_image_grid_different_affine_identity (test_all.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_different_affine_identity)
+When affines are identity (pixdim-only), resample should be identity. ... ok
+test_resample_mask_to_image_grid_rejects_singular_affine (test_all.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_rejects_singular_affine) ... ok
+test_resample_mask_to_image_grid_same_affine (test_all.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_same_affine) ... ok
+test_resample_mask_to_image_grid_unusable_affine_fallback (test_all.TestMimicsBridgeBufferMapping.test_resample_mask_to_image_grid_unusable_affine_fallback)
+When mask affine is zero (unusable), should return mask as-is. ... ok
+test_unit_axis (test_all.TestMimicsBridgeBufferMapping.test_unit_axis) ... ok
+test_unit_axis_zero_spacing_raises (test_all.TestMimicsBridgeBufferMapping.test_unit_axis_zero_spacing_raises) ... ok
+test_valid_identity_affine_is_not_silently_voxel_aligned (test_all.TestMimicsBridgeBufferMapping.test_valid_identity_affine_is_not_silently_voxel_aligned) ... ok
+
+======================================================================
+ERROR: test_single_case_worker_creates_missing_output_dir_or_fails_closed (test_all.TestMimicsBridgeNiftiNormalization.test_single_case_worker_creates_missing_output_dir_or_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tests/test_all.py", line 1032, in test_single_case_worker_creates_missing_output_dir_or_fails_closed
+    rc = worker.run(
+        Path(selection_path), Path(status_path),
+        Path(self.tmp, "stop.json"), Path(self.tmp, "log.txt"),
+    )
+  File "<repo>/tools/single_case_import_worker.py", line 535, in run
+    bridge_python = batch_cli.resolve_bridge_python(None)
+  File "<repo>/tools/mimics_batch_cli.py", line 92, in resolve_bridge_python
+    raise RuntimeError(
+        "The nninteractive_env Python was not found. Run setup_offline.bat or pass --python explicitly."
+    )
+RuntimeError: The nninteractive_env Python was not found. Run setup_offline.bat or pass --python explicitly.
+
+----------------------------------------------------------------------
+Ran 59 tests in 0.451s
+
+FAILED (errors=1, skipped=1)

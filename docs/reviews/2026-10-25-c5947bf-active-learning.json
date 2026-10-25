@@ -1,0 +1,479 @@
+{
+  "review_date": "2026-10-25",
+  "reviewed_source": "c5947bf681647c295e11a7096163733986bc9ba9",
+  "baseline": "a62109359a3c2e3f58940d189dc77732f9dff5d6",
+  "implementation_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+  "scope": {
+    "baseline": "a62109359a3c2e3f58940d189dc77732f9dff5d6",
+    "reviewed_source": "c5947bf681647c295e11a7096163733986bc9ba9",
+    "implementation_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+    "new_commit_count": 29,
+    "changed_remote_file_count": 29,
+    "commits": [
+      {
+        "sha": "8d56f8ca618d9682446366865ddab6ffe5d8eff5",
+        "subject": "docs: R88 SLIP 独立审查发现入账——2 项 P2 + 4 项 P3"
+      },
+      {
+        "sha": "b188a7d32531fb1cf4e3fe07834231bda2616c90",
+        "subject": "fix: SLIP 多模态启用 + R88 审查问题修复"
+      },
+      {
+        "sha": "cf9bcafa078fd669c55679c1429d1aae66984f33",
+        "subject": "docs: R88-1..R88-5 入账已解决 + R89 轮次登记 + 复杂度账本"
+      },
+      {
+        "sha": "9765ba770a2d87b761a71b95e8ea95c8fb84e9d5",
+        "subject": "docs: R90-1 入账——SLIP 点击包含/排除不符预期的根因核验"
+      },
+      {
+        "sha": "23e7f7955d0702e63f4efd9240f52643c6bb5dbe",
+        "subject": "Merge remote review a621093: eee725b SLIP integration revalidation"
+      },
+      {
+        "sha": "396f48cb3c63358016c4e9060814c6353e744187",
+        "subject": "docs: R91 入账——外部评审 a621093（eee725b SLIP 复审）8 卡登记"
+      },
+      {
+        "sha": "d89f2cb4c7bfc566ee92fa6d18ebcebce8a732f0",
+        "subject": "fix(slip): reset 回执到达前的人工编辑不得被静默覆盖（R91-1 / SL01）"
+      },
+      {
+        "sha": "28c42509e177dbe947123819d2ead031afd60a5c",
+        "subject": "fix(slip): 撤销到零条提示时恢复会话基线而非应用空输出（R91-3 / SL03）"
+      },
+      {
+        "sha": "aa9283068d6557b76866fc72e0e4510a39bd2e30",
+        "subject": "fix(slip): gpu.lock 被自己的 worker 持有时入口改为取回会话（R91-2 / SL02）"
+      },
+      {
+        "sha": "bcff48c8af3c5487d9fccbc86b4684e7396cc0b5",
+        "subject": "fix(slip): 预测发布失败后的重试不再重复累计提示（R91-4 / SL04）"
+      },
+      {
+        "sha": "ada23f3fea5a2a5d5245bc294ef7482de7dc30f8",
+        "subject": "fix(pack): SLIP 分发包补齐桥接脚本与模型资源校验（R91-5 / SL05）"
+      },
+      {
+        "sha": "8538d920f1e393b8c37d7683c7f3fbc1dc5f5d47",
+        "subject": "fix(slip): 无 CUDA 时在创建草稿/导出缓冲前明确拒绝（R91-6 / SL06）"
+      },
+      {
+        "sha": "2f6c6eee186ae13c18de05f26827b5d9de5ac82e",
+        "subject": "fix(repair): GPU 恢复校验备份完整性与进程占用，暂存式换回不再先删当前安装（R91-7 / N01）"
+      },
+      {
+        "sha": "7d74720f18430ac1bff998109a4a42bae344867d",
+        "subject": "fix(tools): 进度窗口识别新一次运行并重置显示，陈旧终态不再锁定基线（R91-8 / N02）"
+      },
+      {
+        "sha": "46184ad9782fd77a2846937f73b352c319390976",
+        "subject": "fix(tests): 语法回归 walk 跳过 python_env，消除 full 门禁 0xCFFFFFFF 挂起终止（R92-1）"
+      },
+      {
+        "sha": "f55b29a7a912078a043501113e08b1161f3adcf4",
+        "subject": "fix(tests): 语法 walk 改纯内存编译，不再写 .pyc（R92-1 续）"
+      },
+      {
+        "sha": "07c2e7ec6948a61d2f898d874a244c8044eb6cc8",
+        "subject": "docs: R91 八卡销项入账 + R92-1 根因修正（docs only）"
+      },
+      {
+        "sha": "889f7e62caa12c1555fa8455b2a57c435634ec51",
+        "subject": "fix(tests): test_all 模块级锁定离屏平台，消除真实置顶弹窗（R92-2）"
+      },
+      {
+        "sha": "36eb23fd1a1ffd98a5a534e832b5cffcda55bdbd",
+        "subject": "docs: R92-2 弹窗问题入账 + R92-1 根因最终修正（docs only）"
+      },
+      {
+        "sha": "01c4d2e6a178edec93e0428c729e01456f9b37e3",
+        "subject": "feat(nnunet): easy_predict 新增 use_folds 参数 + R93 账本登记（nnU-Net 主动学习）"
+      },
+      {
+        "sha": "f9e698b572095f80029c925beabf23aacaaaad31",
+        "subject": "refactor(al): 提取 active_learning_common 共享模块（R93 步骤 2）"
+      },
+      {
+        "sha": "4bdf816118a527a5ab741b389415d58a6d341e9c",
+        "subject": "feat(nnunet): run_active_learning 阶段机 + job 分发（R93 步骤 3+4）"
+      },
+      {
+        "sha": "fee88ea836c8cc97b9e54db6bd8da2541756421d",
+        "subject": "feat(al): 复核窗口泛化双后端——nnU-Net 模式接入（R93 步骤 5）"
+      },
+      {
+        "sha": "5d6fcf783d4909bfa00124bfa31fefbdef70494d",
+        "subject": "fix(test): 入口脚本计数 28→29——补 D20 新增 nnU-Net 批量预测入口漏更"
+      },
+      {
+        "sha": "69737c6d7f4f594aeac5050aa4f3eefe7560cf0f",
+        "subject": "refactor(al): 提取 runtime_py35 共享 AL 监控/应用模块（R93 步骤 6）"
+      },
+      {
+        "sha": "dbd4dabb97b582b961f0e8f22d8e573f8a4ff912",
+        "subject": "feat(nnunet): 主动学习审核入口脚本 + 文档（R93 步骤 7）"
+      },
+      {
+        "sha": "2669f5f6a3deb1d64d25b3df373ec28ac3717db5",
+        "subject": "feat(test): AL 失败路径与 nnU-Net 模式 UI 冒烟测试（R93 步骤 8）"
+      },
+      {
+        "sha": "b8177c85f153209fbda281120e5f5916bd423567",
+        "subject": "fix(test): R76 AL 扫描线程测试桩补 list_jobs 形参"
+      },
+      {
+        "sha": "c5947bf681647c295e11a7096163733986bc9ba9",
+        "subject": "docs: R93 收口——账本销项 + 复杂度台账 + L5 验收项登记"
+      }
+    ],
+    "changed_remote_files": [
+      "CONFIG_REFERENCE.md",
+      "docs/03_Review/complexity_ledger.md",
+      "docs/03_Review/improvement_backlog.md",
+      "docs/MIMICS_PROJECT_ARCHITECTURE_CN.md",
+      "docs/TEST_STRATEGY.md",
+      "docs/flexict_mimics.md",
+      "integrations/nnunet_segmentation_workflow/Action4_Predict.py",
+      "repair/cu118/switch_gpu_torch.py",
+      "runtime_py35/active_learning_apply.py",
+      "runtime_py35/flexict_mimics.py",
+      "runtime_py35/nnunet_mimics.py",
+      "runtime_py35/slip_mimics.py",
+      "scripting_library/02_AI/nnUNet/05_Active_Learning_Review.py",
+      "slip_bridge.py",
+      "tests/test_all.py",
+      "tests/test_gui_smoke.py",
+      "tests/test_nnunet_integration.py",
+      "tests/test_slip_bridge_reconcile.py",
+      "tests/test_slip_mimics.py",
+      "tests/test_ui_workflow_regressions.py",
+      "tools/active_learning_common.py",
+      "tools/flexict_active_learning_ui.py",
+      "tools/flexict_pipeline.py",
+      "tools/nnunet_common.py",
+      "tools/nnunet_jobs.py",
+      "tools/nnunet_pipeline.py",
+      "tools/package_portable.py",
+      "tools/run_regression_matrix.py",
+      "tools/setup_progress_window.py"
+    ],
+    "implementation_files": [
+      "mimics_bridge.py",
+      "runtime_py35/active_learning_apply.py",
+      "runtime_py35/create_mcs_batch.py",
+      "tests/test_active_learning_review_regressions.py",
+      "tests/test_all.py",
+      "tests/test_flexict_integration.py",
+      "tests/test_gui_smoke.py",
+      "tools/active_learning_common.py",
+      "tools/flexict_active_learning_ui.py",
+      "tools/flexict_status_viewer.py",
+      "tools/nnunet_common.py",
+      "tools/nnunet_jobs.py",
+      "tools/nnunet_pipeline.py",
+      "tools/nnunet_status_viewer.py",
+      "tools/run_regression_matrix.py"
+    ],
+    "provenance": "SHA/topology relative to last self-pushed a621093; physical pusher is not inferred from shared author identity"
+  },
+  "fixes": [
+    {
+      "id": "AL01",
+      "priority": "P1",
+      "title": "多器官共识转换后无法应用",
+      "file": "runtime_py35/active_learning_apply.py",
+      "line": 597,
+      "symbol": "_al_verify_conversion_buffers",
+      "before": "转换器输出 al_0_label1/2，旧消费者只查 al_0，任务失败。",
+      "change": "接收并逐个校验拆分标签，拒绝重复/未知输出；按任务标签命名，各器官保持独立。",
+      "test": "ConsensusContracts.test_multiorgan_consensus_reaches_both_hosts_with_correct_names_and_voxels",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "让真实转换器输出与应用协议一致，避免多器官任务全部失败。",
+      "acceptance": [
+        "双后端共识经真实 NIfTI 转换后各器官名称与体素一致；第二器官损坏时任何 Mask 都不得创建。"
+      ]
+    },
+    {
+      "id": "AL02",
+      "priority": "P1",
+      "title": "同一 Image 改变网格后仍接收旧转换结果",
+      "file": "runtime_py35/active_learning_apply.py",
+      "line": 647,
+      "symbol": "_al_target_still_matches",
+      "before": "原有完成校验只检查项目与对象 GUID；同对象配准改变物理网格后，转换结果仍属于旧网格。矩阵 NaN 也可绕过旧比较。",
+      "change": "记录启动时网格，完成时复核形状和物理矩阵；非有限坐标拒绝。",
+      "test": "ConsensusContracts.test_same_image_guid_with_changed_physical_grid_is_rejected",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "异步结果必须属于提交时的物理空间；对象 GUID 不能证明网格未变化。",
+      "acceptance": [
+        "相同 GUID 的平移/网格变化拒绝；NaN/Inf 矩阵不能判为相等。"
+      ]
+    },
+    {
+      "id": "S01",
+      "priority": "P1",
+      "title": "回拨时钟导致错误回执被认定补写完成",
+      "file": "runtime_py35/create_mcs_batch.py",
+      "line": 369,
+      "symbol": "flush_pending_receipts",
+      "before": "旧问题：不同事务仅比较 created_at_epoch，时钟回拨可清空待补写记录而保留旧 GUID 证据。",
+      "change": "依据当前工程路径/内容指纹决定记录；冲突保留 pending，不以时间裁决；替换前归档旧回执，仍遵循既有 30 天清理规则。",
+      "test": "ReceiptContracts.test_clock_rollback_uses_current_project_identity_and_keeps_previous_receipt",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "时钟顺序不是工程/导入事务身份的可靠证据。",
+      "acceptance": [
+        "回拨时钟时根据当前工程匹配事务并归档旧回执；两个不同事务同时匹配时保持 pending。"
+      ]
+    },
+    {
+      "id": "S02",
+      "priority": "P1",
+      "title": "两个结果发布可同时越过版本检查",
+      "file": "tools/nnunet_pipeline.py",
+      "line": 1977,
+      "symbol": "publish_prediction_output",
+      "before": "旧问题：检查和替换分离，两个任务都能通过目标缺失检查并依次覆盖。",
+      "change": "目标旁共享锁覆盖最终比较、备份与替换，恢复使用同一锁并在锁内读回状态；输家保留 candidate。",
+      "test": "PublicationContracts.test_concurrent_publish_has_one_commit_and_preserves_losing_candidate",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "唯一 staging 名称不能保证对最终目标的比较与交换互斥。",
+      "acceptance": [
+        "并发实际发布仅一个提交，另一个保留候选并报告冲突；恢复也持有相同目标锁。"
+      ]
+    },
+    {
+      "id": "S06",
+      "priority": "P1",
+      "title": "单层 DICOM 跳过方向校验",
+      "file": "mimics_bridge.py",
+      "line": 1694,
+      "symbol": "_validate_dicom_slice_grid",
+      "before": "旧问题：不足两层时在 IOP 单位/正交检查之前返回，非法方向可形成剪切网格。",
+      "change": "单幅方向检查完成后才跳过层间步长；位置必须恰为三个有限数。",
+      "test": "SingleSliceGeometry.test_single_slice_rejects_skew_and_nonunit_iop_through_public_helpers",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "单层图像同样需要可信的平面方向。",
+      "acceptance": [
+        "单层非正交/非单位方向拒绝，合法倾斜方向保持可用；公共几何读取路径覆盖。"
+      ]
+    },
+    {
+      "id": "V01",
+      "priority": "P1",
+      "title": "正常关窗可能中断恢复文件交换",
+      "file": "tools/nnunet_status_viewer.py",
+      "line": 267,
+      "symbol": "_close_event",
+      "before": "旧问题：恢复线程为 daemon，关窗停止回执轮询并退出，可停在 current→backup 后。FlexiCT 同样受影响。",
+      "change": "恢复工作线程不再为 daemon；交换中关闭请求保持事件循环，成功提交后才关闭，失败仍可见。",
+      "test": "QtContracts.test_close_during_actual_restore_waits_for_completed_file_exchange",
+      "status": "normal_close_fixed_offline_restart_recovery_pending",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "恢复任务的数据提交生命周期必须跨越正常关窗请求。",
+      "acceptance": [
+        "两窗口在实际首个 rename 后关闭仍等待，最终当前结果、备份、状态摘要一致；强制退出恢复另待验证。"
+      ]
+    },
+    {
+      "id": "T04",
+      "priority": "P2",
+      "title": "进度标记保存失败仍被算作排空成功",
+      "file": "tools/flexict_active_learning_ui.py",
+      "line": 1419,
+      "symbol": "_close_event",
+      "before": "旧问题：finally 只减 pending，写失败后关窗返回零未保存，错误在退出后不可见。",
+      "change": "记录失败集合并提供 FIFO 重试；正常关闭等待回执，失败保留窗口，只有明确放弃才能关闭。",
+      "test": "QtContracts.test_failed_marking_close_keeps_window_and_retry_persists",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "请求完成并不等于进度标记已经持久化。",
+      "acceptance": [
+        "拒写后关闭保留窗口和未保存数量；重试后实际状态文件更新，FIFO 顺序保持。"
+      ]
+    },
+    {
+      "id": "AL03",
+      "priority": "P2",
+      "title": "按文件个数误报两条分歧带相同",
+      "file": "tools/active_learning_common.py",
+      "line": 214,
+      "symbol": "write_uncertainty_bands",
+      "before": "两条带各有相同数量文件，并不表示体素相同；多折多等级情况下原判断可误导。",
+      "change": "计算实际逐体素相等元数据；确实相同时只叠加一组，旧任务仅阈值相同才可确定。",
+      "test": "BandContracts.test_file_counts_do_not_prove_same_voxels",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "文件计数不包含逐体素位置与内容信息。",
+      "acceptance": [
+        "文件数相等但区域不同不视为重合；真正相同的双模型带只叠加一组。"
+      ]
+    },
+    {
+      "id": "AL04",
+      "priority": "P2",
+      "title": "零分歧病例被报告为叠加文件丢失",
+      "file": "runtime_py35/active_learning_apply.py",
+      "line": 401,
+      "symbol": "_al_apply_request",
+      "before": "一致预测不会生成非空辅助带，旧入口把正常空带与文件缺失一律报错。",
+      "change": "完整核对病例、Image 和网格后，把明确零分歧记录为已查看并说明一致不代表正确；非零分歧缺文件仍失败。",
+      "test": "ConsensusContracts.test_zero_disagreement_is_valid_view_but_missing_nonzero_bands_are_not",
+      "status": "fixed_offline",
+      "limitations": "Synthetic contract regression; no actual Windows/Mimics/GPU or clinical validation",
+      "why": "明确的零分歧是一种合法结果，不能等同于文件损坏，也不等于分割正确。",
+      "acceptance": [
+        "身份和网格验证通过后零分歧可完成查看；非零分歧缺辅助带仍明确失败。"
+      ]
+    }
+  ],
+  "research_sources": [
+    {
+      "title": "Deep Bayesian Active Learning with Image Data",
+      "url": "https://proceedings.mlr.press/v70/gal17a.html",
+      "use": "Bayesian uncertainty / repeated stochastic predictions; not equivalent to hard-mask disagreement"
+    },
+    {
+      "title": "Core-Set Approach",
+      "url": "https://arxiv.org/abs/1708.00489",
+      "use": "Representative/diverse batch selection; general CNN evidence, not a guarantee in medical segmentation"
+    },
+    {
+      "title": "BatchBALD",
+      "url": "https://arxiv.org/abs/1906.08158",
+      "use": "Joint information acquisition to reduce batch redundancy"
+    },
+    {
+      "title": "nnActive",
+      "url": "https://arxiv.org/abs/2511.19183",
+      "use": "3D medical segmentation evaluation; foreground-aware random baselines and annotation-cost measurement"
+    },
+    {
+      "title": "ClaSP PE",
+      "url": "https://arxiv.org/abs/2601.13677",
+      "use": "Class-stratified scheduled power predictive entropy, evaluated by authors in nnActive; not implemented or reproduced here"
+    },
+    {
+      "title": "nnActive official implementation",
+      "url": "https://github.com/MIC-DKFZ/nnActive",
+      "use": "Primary benchmark/framework reference; no dependencies installed or training run"
+    }
+  ],
+  "ui_improvements": [
+    "Original case name with internal identity retained",
+    "Case/source-path search, pending-only filter, Alt+N next pending, Ctrl+F search",
+    "Preserve selected case and job through refresh",
+    "Long-value/header tooltips and column widths at 820 px",
+    "Explain raw disagreement score and manual save/training boundary",
+    "Backend-specific remembered dataset settings and Chinese stage names"
+  ],
+  "conclusion": "Engineering review/prioritization MVP supported by offline contracts; annotation-efficiency and complete scientific AL loop not established",
+  "limitations": [
+    "No real patient processing, GPU model inference, training, or environment repair",
+    "Qt screenshots use synthetic files; Mimics API is substituted in consumer tests",
+    "Windows native locking/DPI integration still needs deployment validation",
+    "No claim of superiority over random or of calibrated error probabilities",
+    "Saving project/exporting confirmed labels/retraining/evaluating a new model remain explicit steps",
+    "Pool does not automatically exclude training or frozen validation/test patients",
+    "Initial core suite dependency discovery error and a setup-test exit-139 are retained separately; fixes/explicit environment recorded"
+  ],
+  "validation_summary": "2026-10-25-c5947bf-evidence/validation-summary.json",
+  "prior_issue_statuses": [
+    {
+      "id": "SL01",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "SL02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "SL03",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "SL04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "SL05",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "SL06",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "N01",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "N02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-22-eee725b-revalidation.json",
+      "resolved_by": "upstream commits within c5947bf681647c295e11a7096163733986bc9ba9",
+      "remaining": "Native Mimics/Windows/GPU validation"
+    },
+    {
+      "id": "S01",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-18-e325e3a-revalidation.json",
+      "resolved_by": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+      "remaining": "Native Windows/Mimics validation; ambiguous receipt identity stays pending intentionally"
+    },
+    {
+      "id": "S02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-18-e325e3a-revalidation.json",
+      "resolved_by": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+      "remaining": "Native Windows/Mimics validation; ambiguous receipt identity stays pending intentionally"
+    },
+    {
+      "id": "S06",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-18-e325e3a-revalidation.json",
+      "resolved_by": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+      "remaining": "Native Windows/Mimics validation; ambiguous receipt identity stays pending intentionally"
+    },
+    {
+      "id": "T04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-18-e325e3a-revalidation.json",
+      "resolved_by": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+      "remaining": "Native Windows/Mimics validation; ambiguous receipt identity stays pending intentionally"
+    },
+    {
+      "id": "V01",
+      "status": "partially_resolved",
+      "previous_report": "2026-10-18-e325e3a-revalidation.json",
+      "resolved_by": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+      "remaining": "Forced termination/power failure restart journal and target-platform validation"
+    }
+  ]
+}

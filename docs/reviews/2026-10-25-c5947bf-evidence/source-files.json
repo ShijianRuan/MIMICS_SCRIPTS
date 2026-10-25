@@ -1,0 +1,26 @@
+{
+  "source_commit": "4af03938284e59ac2673746c65ed70dfdbc47c44",
+  "sha256": {
+    "mimics_bridge.py": "980a8ed4278882d19dc55a80e1f40ec93b8caa12a70debcb28ec247c9fb3649e",
+    "repair/cu118/switch_gpu_torch.py": "850b472622b295f1aaddb77fba619b79f438da3e190c6f5500f1e1f150d2a041",
+    "runtime_py35/active_learning_apply.py": "2b83cf3b2f4d72e47ff1ff6a326c054e6d57fff3440ad0a6b141358cb08c786b",
+    "runtime_py35/create_mcs_batch.py": "a4fe719a08cc9a71c334353999679efc9339dc98019ec624c1c274320af477b7",
+    "runtime_py35/flexict_mimics.py": "f304df0faeb16d27e21c5910cffc2f80a4e5f44fc03cecf2f4f31f66b67d0e15",
+    "runtime_py35/nnunet_mimics.py": "a7f3b13497a09e333ebc798c76e49b0814ac27169e959f95759610adf2be9ea9",
+    "runtime_py35/slip_mimics.py": "0dc1755605501b50eae03fb655eb4364fa7a26039135b7d1d4a96c4fcbaaf4b5",
+    "scripting_library/02_AI/nnUNet/05_Active_Learning_Review.py": "2f29d1efcd24f05d947a1ba56b6d3879f1459848a530bc857cc579d35663f2f6",
+    "slip_bridge.py": "5f7b7e3bbd05fc5007fc4426b40edc7d6a25c0c5339fc2f170e2c9996ab73a5f",
+    "tests/test_active_learning_review_regressions.py": "6f0c879a7d1d05e5fc670644b3ff265612b77200e1c61d823870752590e9c2c2",
+    "tests/test_all.py": "b749891c4ccfb402188bbdead5860176cb75ace9df6ea4b52c9c27171625c3b7",
+    "tests/test_flexict_integration.py": "0f7be568e0481b02b7d339f804069452191a260ce36289ba8e13a12100d4c39b",
+    "tests/test_gui_smoke.py": "6396c078fa4ea1b184031d5b06ed0085fed12366ef782834a2efdfd8b446171a",
+    "tools/active_learning_common.py": "56a87e1420d6f71317db60cf8def4e8fd6215de41ec5a26a231aec41de65bcc6",
+    "tools/flexict_active_learning_ui.py": "264bb81dbdbc3aadad960a71c9c7dfe7abb733d7d8691e4c5c385c8f5fba25ca",
+    "tools/flexict_status_viewer.py": "fbf769fb7b584e77ed9098c68533393baa786fa285ba39c600c4fdcd3598ef4a",
+    "tools/nnunet_common.py": "cbfa16ec2af386a1c8f7d0491abdc488a03c300e317dad4420af90576b05ae38",
+    "tools/nnunet_jobs.py": "9639d742947a4938caebc4116bbe2a2aff9a320fdaff3c417682e12f224c1a9b",
+    "tools/nnunet_pipeline.py": "fb262077c877c71beb64fbb446daaa9f3af27f66a1d3808fb63122ae8b5e2566",
+    "tools/nnunet_status_viewer.py": "9a2b166415d734c0eec086e6bf0c0d83af52a2ddb4347969b12437f23961e07b",
+    "tools/run_regression_matrix.py": "54bf09eb71f6f2f747a45ba8ea6752bb2eb6929163ec13fbfb2b3dee3a235fb3"
+  }
+}

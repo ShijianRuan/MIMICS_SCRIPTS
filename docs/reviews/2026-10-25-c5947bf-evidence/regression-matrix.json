@@ -1,0 +1,153 @@
+{
+  "schema": "regression_matrix.v1",
+  "profile": "fast",
+  "started_at": "2026-10-25T23:23:15",
+  "total_suites": 12,
+  "failed_suites": 0,
+  "results": [
+    {
+      "name": "flexict_integration",
+      "command": [
+        "<existing-python>",
+        "tests/test_flexict_integration.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 7.2,
+      "output_tail": "No patient_group info: case-level split behavior must be exactly ... ok\ntest_two_case_minimum (__main__.TestTrainValSplit.test_two_case_minimum) ... ok\ntest_val_at_least_one (__main__.TestTrainValSplit.test_val_at_least_one) ... ok\ntest_val_cases_count_respected (__main__.TestTrainValSplit.test_val_cases_count_respected) ... ok\ntest_val_never_exceeds_half_minus (__main__.TestTrainValSplit.test_val_never_exceeds_half_minus) ... ok\ntest_environment_caps_blas_threads_every_stage (__main__.TestWorkerEnvironment.test_environment_caps_blas_threads_every_stage)\nFlexiCT stages must cap BLAS threads (same A10 fix as nnunet). ... ok\ntest_environment_carries_trainer_contract (__main__.TestWorkerEnvironment.test_environment_carries_trainer_contract) ... ok\ntest_gpu_id_forwarded (__main__.TestWorkerEnvironment.test_gpu_id_forwarded) ... ok\ntest_infer_environment_caps_blas_threads (__main__.TestWorkerEnvironment.test_infer_environment_caps_blas_threads)\nFlexiCT inference workers replace _worker_environment too. ... ok\ntest_mirror_axes_forwarded (__main__.TestWorkerEnvironment.test_mirror_axes_forwarded) ... ok\ntest_nnunet_roots_point_at_workspace (__main__.TestWorkerEnvironment.test_nnunet_roots_point_at_workspace) ... ok\ntest_windows_forces_single_process_da_train_stage_only (__main__.TestWorkerEnvironment.test_windows_forces_single_process_da_train_stage_only)\nWindows TRAIN workers must pin nnUNet_n_proc_DA=0. ... ok\n\n----------------------------------------------------------------------\nRan 149 tests in 6.623s\n\nOK\n\n全部 3 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0\n\n差异最大（不确定度最大且区域最大）的病例: case00\n  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0\n  文件: <synthetic-tmp> <synthetic-tmp> Mask 'Liver' was edited while prediction was running (content changed at the same volume); creating a copy instead.\n[FlexiCT] Mask 'Liver' changed while prediction was running; creating a copy instead.\n[FlexiCT] FlexiCT status: Abandoned | \n[FlexiCT] FlexiCT status: Failed | ",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "flexict_common",
+      "command": [
+        "<existing-python>",
+        "tests/test_flexict_common.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.1,
+      "output_tail": "test_config_file_matches_defaults_shape (__main__.TestConfig.test_config_file_matches_defaults_shape) ... ok\ntest_load_config_defaults_are_complete (__main__.TestConfig.test_load_config_defaults_are_complete) ... ok\ntest_band_isolated_from_nnunet_ids (__main__.TestDatasetIdBand.test_band_isolated_from_nnunet_ids) ... ok\ntest_suggest_respects_band_ceiling (__main__.TestDatasetIdBand.test_suggest_respects_band_ceiling) ... ok\ntest_suggest_skips_used_ids (__main__.TestDatasetIdBand.test_suggest_skips_used_ids) ... ok\ntest_suggest_starts_at_750 (__main__.TestDatasetIdBand.test_suggest_starts_at_750) ... ok\ntest_minimal_request_gets_defaults (__main__.TestNormalizeRequest.test_minimal_request_gets_defaults) ... ok\ntest_pair_configuration_accepted (__main__.TestNormalizeRequest.test_pair_configuration_accepted) ... ok\ntest_rejects_bad_configuration (__main__.TestNormalizeRequest.test_rejects_bad_configuration) ... ok\ntest_rejects_empty_label (__main__.TestNormalizeRequest.test_rejects_empty_label) ... ok\ntest_rejects_no_cases (__main__.TestNormalizeRequest.test_rejects_no_cases) ... ok\ntest_single_case_rejected (__main__.TestNormalizeRequest.test_single_case_rejected) ... ok\ntest_val_cases_clamped_to_case_count (__main__.TestNormalizeRequest.test_val_cases_clamped_to_case_count) ... ok\ntest_missing_weights_error_points_at_config_editor (__main__.TestPretrainedWeights.test_missing_weights_error_points_at_config_editor)\nAUD 2.1: the annotator gets a GUI path (99_Admin → Environment → ... ok\ntest_resolve_pretrained_dir_finds_repo_weights (__main__.TestPretrainedWeights.test_resolve_pretrained_dir_finds_repo_weights) ... ok\ntest_resolve_pretrained_dir_rejects_bad_override (__main__.TestPretrainedWeights.test_resolve_pretrained_dir_rejects_bad_override) ... ok\ntest_load_models_flags_missing_dir (__main__.TestRegistry.test_load_models_flags_missing_dir) ... ok\ntest_load_pair (__main__.TestRegistry.test_load_pair) ... ok\ntest_model_usability (__main__.TestRegistry.test_model_usability) ... ok\ntest_recommended_model (__main__.TestRegistry.test_recommended_model) ... ok\ntest_register_and_load_roundtrip (__main__.TestRegistry.test_register_and_load_roundtrip) ... ok\ntest_register_replaces_same_id (__main__.TestRegistry.test_register_replaces_same_id) ... ok\ntest_workspace_default_is_rooted_at_repo (__main__.TestWorkspacePaths.test_workspace_default_is_rooted_at_repo) ... ok\ntest_workspace_paths_layout (__main__.TestWorkspacePaths.test_workspace_paths_layout) ... ok\n\n----------------------------------------------------------------------\nRan 24 tests in 0.034s\n\nOK",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "flexict_pkg",
+      "command": [
+        "<existing-python>",
+        "integrations/flexict-finetune/tests/test_flexict_pkg.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 7.0,
+      "output_tail": "#######################################################################\n\n开始批量计算：共 2 例...\n\n批量进度 |###############---------------|  50.0%  1/2  已用 0.2s  剩余 0.2s\n批量进度 |##############################| 100.0%  2/2  已用 0.2s  剩余 0.0s\n批量完成：成功 2/2 例，耗时 0.2s。\n\n开始统计分析：共 2 例，逐例读取并计算指标...\n\n分析进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s\n分析进度 |##############################| 100.0%  2/2  已用 0.0s  剩余 0.0sok\ntest_run_batch_rejects_same_shape_mismatched_affine (__main__.TestUncertainty.test_run_batch_rejects_same_shape_mismatched_affine)\nR15 失败路径：同 shape 但 affine 不同的两份预测不得进入排名。 ... \n全部 2 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case001                            72.0            144.0     0.5000   0.5000           70.5        141.0\n   2  case002                            72.0            144.0     0.5000   0.5000           70.5        141.0\n\n差异最大（不确定度最大且区域最大）的病例: case001\n  积分不确定度=72.0  不确定体积=144.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=141.0 mm^3  均值=0.5000  积分=70.5\n  文件: <synthetic-tmp> <synthetic-tmp> 2 例...\n\n批量进度 |###############---------------|  50.0%  1/2  已用 0.0s  剩余 0.0s\n批量进度 |##############################| 100.0%  2/2  已用 0.1s  剩余 0.0sok\n\n----------------------------------------------------------------------\nRan 10 tests in 6.533s\n\nOK (skipped=1)\n\n批量完成：成功 1/2 例，耗时 0.1s。\n日志已写入: <synthetic-tmp>",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "nnunet_integration",
+      "command": [
+        "<existing-python>",
+        "tests/test_nnunet_integration.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 11.2,
+      "output_tail": "test_create_job_dispatches_local_active_learning (__main__.TestNNUNetActiveLearningLifecycle.test_create_job_dispatches_local_active_learning) ... ok\ntest_create_job_rejects_remote_active_learning (__main__.TestNNUNetActiveLearningLifecycle.test_create_job_rejects_remote_active_learning)\n首期 AL 仅本机执行：远程后端在创建边界就被拒绝，绝不留下一个 ... ok\ntest_live_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_live_jobs_never_pruned) ... ok\ntest_models_and_cache_untouched (__main__.TestSweepExpiredJobs.test_models_and_cache_untouched)\nRegistered models and caches must never be swept. ... ok\ntest_old_terminal_jobs_are_pruned_keeping_status (__main__.TestSweepExpiredJobs.test_old_terminal_jobs_are_pruned_keeping_status) ... ok\ntest_reattaching_remote_jobs_never_pruned (__main__.TestSweepExpiredJobs.test_reattaching_remote_jobs_never_pruned) ... ok\ntest_recent_jobs_kept (__main__.TestSweepExpiredJobs.test_recent_jobs_kept) ... ok\ntest_zero_retention_disables (__main__.TestSweepExpiredJobs.test_zero_retention_disables) ... ok\ntest_cache_task_tree_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_cache_task_tree_of_running_job_is_kept) ... ok\ntest_dataset_of_running_job_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_of_running_job_is_kept) ... ok\ntest_dataset_referenced_by_registered_model_is_kept (__main__.TestSweepRuntimeAndCache.test_dataset_referenced_by_registered_model_is_kept) ... ok\ntest_expired_cache_case_removed_and_empty_task_dir_dropped (__main__.TestSweepRuntimeAndCache.test_expired_cache_case_removed_and_empty_task_dir_dropped) ... ok\ntest_expired_unreferenced_dataset_removed_in_all_runtime_dirs (__main__.TestSweepRuntimeAndCache.test_expired_unreferenced_dataset_removed_in_all_runtime_dirs) ... ok\ntest_models_dir_never_touched (__main__.TestSweepRuntimeAndCache.test_models_dir_never_touched) ... ok\ntest_recent_dataset_is_kept (__main__.TestSweepRuntimeAndCache.test_recent_dataset_is_kept) ... ok\ntest_registry_row_without_dataset_name_is_rebuilt (__main__.TestSweepRuntimeAndCache.test_registry_row_without_dataset_name_is_rebuilt) ... ok\ntest_zero_retention_disables_both_sweeps (__main__.TestSweepRuntimeAndCache.test_zero_retention_disables_both_sweeps) ... ok\n\n----------------------------------------------------------------------\nRan 154 tests in 10.965s\n\nOK\n\n全部 3 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0\n\n差异最大（不确定度最大且区域最大）的病例: case00\n  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0\n  文件: <synthetic-tmp> <synthetic-tmp>",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "slip_mimics",
+      "command": [
+        "<existing-python>",
+        "tests/test_slip_mimics.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 1.6,
+      "output_tail": "test_undo_to_zero_with_empty_base_empties_mask (__main__.SlipHandleResultTests.test_undo_to_zero_with_empty_base_empties_mask) ... ok\ntest_undo_to_zero_with_nonempty_base_restores_base (__main__.SlipHandleResultTests.test_undo_to_zero_with_nonempty_base_restores_base) ... ok\ntest_unexpected_result_status_raises (__main__.SlipHandleResultTests.test_unexpected_result_status_raises) ... ok\ntest_load_job_ignores_closed_worker (__main__.SlipJobStateTests.test_load_job_ignores_closed_worker) ... ok\ntest_load_job_ignores_terminal_state (__main__.SlipJobStateTests.test_load_job_ignores_terminal_state) ... ok\ntest_load_job_resumes_active_state (__main__.SlipJobStateTests.test_load_job_resumes_active_state) ... ok\ntest_save_job_strips_private_keys (__main__.SlipJobStateTests.test_save_job_strips_private_keys) ... ok\ntest_busy_monitor_is_skipped (__main__.SlipMonitorTickTests.test_busy_monitor_is_skipped) ... ok\ntest_timeout_marks_done_and_shows_failure (__main__.SlipMonitorTickTests.test_timeout_marks_done_and_shows_failure) ... ok\ntest_main_without_active_image_shows_error (__main__.SlipRunRefusalTests.test_main_without_active_image_shows_error) ... ok\ntest_run_refused_when_own_session_target_not_on_image (__main__.SlipRunRefusalTests.test_run_refused_when_own_session_target_not_on_image) ... ok\ntest_run_refused_while_gpu_lock_is_held (__main__.SlipRunRefusalTests.test_run_refused_while_gpu_lock_is_held) ... ok\ntest_run_refused_while_mask_buffer_is_busy (__main__.SlipRunRefusalTests.test_run_refused_while_mask_buffer_is_busy) ... ok\ntest_run_refused_without_cuda_before_any_draft_or_export (__main__.SlipRunRefusalTests.test_run_refused_without_cuda_before_any_draft_or_export) ... ok\ntest_run_resumes_own_session_when_own_worker_holds_gpu_lock (__main__.SlipRunRefusalTests.test_run_resumes_own_session_when_own_worker_holds_gpu_lock) ... ok\ntest_ai_draft_source_is_used_in_place_without_asking (__main__.SlipSelectTargetTests.test_ai_draft_source_is_used_in_place_without_asking) ... ok\ntest_empty_source_is_used_in_place_without_asking (__main__.SlipSelectTargetTests.test_empty_source_is_used_in_place_without_asking) ... ok\ntest_existing_slip_session_resumes_in_place (__main__.SlipSelectTargetTests.test_existing_slip_session_resumes_in_place) ... ok\ntest_manual_mask_creates_derived_draft (__main__.SlipSelectTargetTests.test_manual_mask_creates_derived_draft) ... ok\ntest_manual_mask_update_in_place (__main__.SlipSelectTargetTests.test_manual_mask_update_in_place) ... ok\ntest_mask_from_another_image_is_rejected (__main__.SlipSelectTargetTests.test_mask_from_another_image_is_rejected) ... ok\ntest_multiple_selections_are_rejected (__main__.SlipSelectTargetTests.test_multiple_selections_are_rejected) ... ok\ntest_nninteractive_session_conflict_is_rejected (__main__.SlipSelectTargetTests.test_nninteractive_session_conflict_is_rejected) ... ok\ntest_no_selection_auto_creates_draft (__main__.SlipSelectTargetTests.test_no_selection_auto_creates_draft) ... ok\ntest_missing_deps_dir_fails_before_any_directory (__main__.SlipStartJobFailureTests.test_missing_deps_dir_fails_before_any_directory)\nA half-copied deployment (checkpoint without deps) fails fast. ... ok\ntest_missing_external_python_fails_before_any_directory (__main__.SlipStartJobFailureTests.test_missing_external_python_fails_before_any_directory) ... ok\ntest_ct_export_uses_hu_inverse (__main__.SlipValidationTests.test_ct_export_uses_hu_inverse) ... ok\ntest_int8_buffer_is_rejected (__main__.SlipValidationTests.test_int8_buffer_is_rejected) ... ok\ntest_missing_hu_mapping_is_rejected_for_ct (__main__.SlipValidationTests.test_missing_hu_mapping_is_rejected_for_ct) ... ok\ntest_mr_export_uses_source_intensity_mapping (__main__.SlipValidationTests.test_mr_export_uses_source_intensity_mapping) ... ok\ntest_mr_export_without_mapping_passes_gv_through (__main__.SlipValidationTests.test_mr_export_without_mapping_passes_gv_through) ... ok\ntest_mr_modality_is_accepted_without_hu_mapping (__main__.SlipValidationTests.test_mr_modality_is_accepted_without_hu_mapping) ... ok\ntest_other_modality_export_passes_gv_through (__main__.SlipValidationTests.test_other_modality_export_passes_gv_through) ... ok\ntest_valid_ct_image_passes (__main__.SlipValidationTests.test_valid_ct_image_passes) ... ok\n\n----------------------------------------------------------------------\nRan 65 tests in 1.502s\n\nOK",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "slip_bridge",
+      "command": [
+        "<existing-python>",
+        "tests/test_slip_bridge_reconcile.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.6,
+      "output_tail": "test_inference_exception_poisons_session (__main__.SlipBridgeReconcileTests.test_inference_exception_poisons_session) ... ok\ntest_open_rejects_cpu_device_before_any_setup (__main__.SlipBridgeReconcileTests.test_open_rejects_cpu_device_before_any_setup) ... ok\ntest_predict_publish_failure_different_click_drops_orphan (__main__.SlipBridgeReconcileTests.test_predict_publish_failure_different_click_drops_orphan) ... ok\ntest_predict_publish_failure_same_click_retry_keeps_history (__main__.SlipBridgeReconcileTests.test_predict_publish_failure_same_click_retry_keeps_history) ... ok\ntest_predict_publish_failure_then_undo_targets_client_prompt (__main__.SlipBridgeReconcileTests.test_predict_publish_failure_then_undo_targets_client_prompt) ... ok\ntest_predict_publish_failure_twice_keeps_pending (__main__.SlipBridgeReconcileTests.test_predict_publish_failure_twice_keeps_pending) ... ok\ntest_reset_absorbs_pending_orphan (__main__.SlipBridgeReconcileTests.test_reset_absorbs_pending_orphan) ... ok\ntest_undo_of_only_prompt_publish_failure_replays_it (__main__.SlipBridgeReconcileTests.test_undo_of_only_prompt_publish_failure_replays_it) ... ok\ntest_undo_publish_failure_next_predict_replays_click (__main__.SlipBridgeReconcileTests.test_undo_publish_failure_next_predict_replays_click) ... ok\ntest_undo_publish_failure_next_undo_republishes_once (__main__.SlipBridgeReconcileTests.test_undo_publish_failure_next_undo_republishes_once) ... ok\ntest_undo_with_no_history_refuses_cleanly (__main__.SlipBridgeReconcileTests.test_undo_with_no_history_refuses_cleanly) ... ok\ntest_validation_error_does_not_poison (__main__.SlipBridgeReconcileTests.test_validation_error_does_not_poison) ... ok\n\n----------------------------------------------------------------------\nRan 12 tests in 0.384s\n\nOK",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "geometry_manifest_regressions",
+      "command": [
+        "<existing-python>",
+        "tests/test_geometry_manifest_regressions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.2,
+      "output_tail": "......\n----------------------------------------------------------------------\nRan 6 tests in 0.015s\n\nOK",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "review_workflow_regressions",
+      "command": [
+        "<existing-python>",
+        "tests/test_review_workflow_regressions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.2,
+      "output_tail": "...........\n----------------------------------------------------------------------\nRan 11 tests in 0.028s\n\nOK\nStarted 2 prediction job(s) with model m.\nOutput directory: <synthetic-tmp>  病例乙: status.json\n  病例甲: status.json\nfound 1 mask(s)\nselected 0 mask(s) by filter\nManifest saved: <synthetic-tmp> masks to: <synthetic-tmp> 2 mask(s)\nselected 1 mask(s) by filter\nimage dimensions: [3, 4, 5]\nexporting mask: target\n  -> target\nManifest saved: <synthetic-tmp> masks to: <synthetic-tmp> 2 mask(s)\nselected 1 mask(s) by filter\nimage dimensions: [3, 4, 5]\nexporting mask: target\n  -> target\nManifest saved: <synthetic-tmp> 2 mask(s)\nselected 1 mask(s) by filter\nimage dimensions: [3, 4, 5]\nexporting mask: target\n  -> target\nManifest saved: <synthetic-tmp>",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "active_learning_review",
+      "command": [
+        "<existing-python>",
+        "tests/test_active_learning_review_regressions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 1.5,
+      "output_tail": "..........qt.qpa.fonts: Populating font family aliases took 61 ms. Replace uses of missing font family \"Sans Serif\" with one that exists to avoid this cost. \n......\n----------------------------------------------------------------------\nRan 16 tests in 1.200s\n\nOK\n[2026-10-25 23:23:44] 补写导入回执成功：<synthetic-tmp>",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "gui_smoke",
+      "command": [
+        "<existing-python>",
+        "tests/test_gui_smoke.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 4.4,
+      "output_tail": "test_batch_viewer_collect_error_does_not_break_window (__main__.TestViewerNonBlockingRefresh.test_batch_viewer_collect_error_does_not_break_window) ... ok\ntest_closed_viewer_windows_stop_their_refreshers (__main__.TestViewerNonBlockingRefresh.test_closed_viewer_windows_stop_their_refreshers)\nR75 P1: a closed viewer window must stop collecting. The hidden ... ok\ntest_flexict_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_collects_on_worker_thread) ... ok\ntest_flexict_viewer_previous_output_entry (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_previous_output_entry)\nS02：FlexiCT 状态页与 nnU-Net 状态页同一契约——替换过的任务 ... ok\ntest_flexict_viewer_shows_model_source (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_shows_model_source)\nR62-9: same contract for the FlexiCT status viewer. ... ok\ntest_flexict_viewer_shows_training_curve (__main__.TestViewerNonBlockingRefresh.test_flexict_viewer_shows_training_curve) ... ok\ntest_hidden_viewer_slows_periodic_ticks_but_request_stays_direct (__main__.TestViewerNonBlockingRefresh.test_hidden_viewer_slows_periodic_ticks_but_request_stays_direct)\nHidden/minimized windows poll at the heartbeat rate, not 2s. ... ok\ntest_nnunet_validation_dice_reads_fold_summary (__main__.TestViewerNonBlockingRefresh.test_nnunet_validation_dice_reads_fold_summary)\nAUD 5.1: the models tab must surface the fold validation Dice ... ok\ntest_nnunet_viewer_collects_on_worker_thread (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_collects_on_worker_thread) ... ok\ntest_nnunet_viewer_previous_output_entry (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_previous_output_entry)\nS02：替换过旧结果的任务在结果页直接给出「旧结果…」入口和替换 ... ok\ntest_nnunet_viewer_shows_model_source (__main__.TestViewerNonBlockingRefresh.test_nnunet_viewer_shows_model_source)\nR62-9: the models tab must distinguish remote-trained downloads ... ok\ntest_shown_viewer_keeps_fast_interval (__main__.TestViewerNonBlockingRefresh.test_shown_viewer_keeps_fast_interval)\nA visible (or non-widget) parent keeps the configured interval. ... ok\ntest_al_refresh_scans_off_gui_thread (__main__.TestWindowClampedToSmallScreen.test_al_refresh_scans_off_gui_thread)\nR76: find_al_jobs stats every job directory — it must run on a ... ok\ntest_al_window_opens_on_small_screen (__main__.TestWindowClampedToSmallScreen.test_al_window_opens_on_small_screen)\nThe AL window itself must construct with its minimum clamped to ... ok\ntest_clamp_keeps_minimum_on_large_screen (__main__.TestWindowClampedToSmallScreen.test_clamp_keeps_minimum_on_large_screen) ... ok\ntest_clamp_lowerers_minimum_to_available_geometry (__main__.TestWindowClampedToSmallScreen.test_clamp_lowerers_minimum_to_available_geometry) ... ok\ntest_secondary_windows_clamp_on_small_screen (__main__.TestWindowClampedToSmallScreen.test_secondary_windows_clamp_on_small_screen)\nP2-1：nnU-Net/FlexiCT 状态、批量状态窗口的硬最小尺寸都要 ... ok\ntest_status_viewers_speak_chinese (__main__.TestWindowClampedToSmallScreen.test_status_viewers_speak_chinese)\nP3-1：状态窗口的实时标记和作业状态词必须是中文—— ... ok\ntest_closed_viewer_garbage_does_not_corrupt_heap (__main__.TestWindowCloseTeardown.test_closed_viewer_garbage_does_not_corrupt_heap) ... ok\ntest_setup_close_without_submit_writes_cancelled_status (__main__.TestWindowCloseTeardown.test_setup_close_without_submit_writes_cancelled_status) ... ok\ntest_viewer_close_stops_timers (__main__.TestWindowCloseTeardown.test_viewer_close_stops_timers) ... ok\ntest_preset_editor_builds_and_shows_current_presets (__main__.TestWindowLevelPresetEditor.test_preset_editor_builds_and_shows_current_presets) ... ok\ntest_preset_editor_edit_updates_row (__main__.TestWindowLevelPresetEditor.test_preset_editor_edit_updates_row) ... ok\n\n----------------------------------------------------------------------\nRan 102 tests in 4.275s\n\nOK (skipped=3)",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "ui_quality",
+      "command": [
+        "<existing-python>",
+        "tests/test_ui_quality.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.3,
+      "output_tail": "qt.qpa.fonts: Populating font family aliases took 66 ms. Replace uses of missing font family \"Sans Serif\" with one that exists to avoid this cost. \n.....\n----------------------------------------------------------------------\nRan 5 tests in 0.165s\n\nOK",
+      "_started_at": "2026-10-25T23:23:15"
+    },
+    {
+      "name": "cross_workflow",
+      "command": [
+        "<existing-python>",
+        "tests/test_cross_workflow_transitions.py"
+      ],
+      "status": "pass",
+      "exit_code": 0,
+      "duration_seconds": 0.4,
+      "output_tail": "test_retrained_model_supersedes_in_al (__main__.CrossWorkflowTransitionTests.test_retrained_model_supersedes_in_al)\nThe workflow-switch seam: after retraining, AL must resolve the ... ok\ntest_train_infer_al_overlay_handoffs (__main__.CrossWorkflowTransitionTests.test_train_infer_al_overlay_handoffs) ... 开始批量计算：共 4 例...\n\n批量进度 |########----------------------|  25.0%  1/4  已用 0.0s  剩余 0.0s\n批量进度 |###############---------------|  50.0%  2/4  已用 0.0s  剩余 0.0s\n批量进度 |######################--------|  75.0%  3/4  已用 0.0s  剩余 0.0s\n批量进度 |##############################| 100.0%  4/4  已用 0.0s  剩余 0.0s\n批量完成：成功 4/4 例，耗时 0.0s。\n日志已写入: <synthetic-tmp> 4 例，逐例读取并计算指标...\n\n分析进度 |########----------------------|  25.0%  1/4  已用 0.0s  剩余 0.0s\n分析进度 |###############---------------|  50.0%  2/4  已用 0.0s  剩余 0.0s\n分析进度 |######################--------|  75.0%  3/4  已用 0.0s  剩余 0.0s\n分析进度 |##############################| 100.0%  4/4  已用 0.0s  剩余 0.0sok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.345s\n\nOK\n\n全部 4 例读取+计算完成，耗时 0.0s。\n\n==== 不确定度排序（按 integrated 从高到低）====\nrank  case                         integrated    uncertain_vol    mean_nz      max  cc_integrated       cc_vol\n--------------------------------------------------------------------------------------------------------------\n   1  case00                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   2  case01                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   3  case02                             56.0            112.0     0.5000   0.5000            0.0          0.0\n   4  case03                             56.0            112.0     0.5000   0.5000            0.0          0.0\n\n差异最大（不确定度最大且区域最大）的病例: case00\n  积分不确定度=56.0  不确定体积=112.0 mm^3  最大不确定度=0.5000\n  最大连通域: 体积=0.0 mm^3  均值=0.0000  积分=0.0\n  文件: <synthetic-tmp> <synthetic-tmp>",
+      "_started_at": "2026-10-25T23:23:15"
+    }
+  ]
+}
