@@ -17,6 +17,35 @@
 
 ### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）
 
+- [x] **R92-2【P1】每次跑回归测试都会弹出一个"导入数据"置顶窗口，必须
+  手动处理（用户 2026-10-25 报告）**：test_all 单进程跑全部测试，Qt 平台
+  插件在**第一个** QApplication 构造时锁定。unittest 按字母序执行：
+  `TestConfigEditor.test_broken_config_file_never_rewritten_by_save` 是
+  全进程最先构造 QApplication 的测试（构造点无 offscreen setdefault，
+  且 "broken" < "config"，排在带 setdefault 的
+  `test_config_editor_window_renders_offscreen` 之前），于是整个 test_all
+  进程跑在真实 windows 平台；此后所有测试内的
+  `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")` 全部失效。
+  `test_offscreen_window_renders_and_registers` 里 `dw.run()`（tools/
+  import_drop_window.py，WindowStaysOnTopHint | Qt.Tool）就把真实置顶
+  窗口弹上屏幕，且后续无事件循环，窗口无法响应关闭，每次回归都挂着
+  等人工处理。**该真实顶层窗口同时是 R92-1 挂起终止的暴露面**（窗口
+  进程主线程 ≥5s 停顿 → Event 1002）。
+  根因：缺少模块级平台锁定；各测试内的 setdefault 依赖执行顺序，而
+  unittest 的字母序恰好把无保护用例排在最前。影响视角：开发（测试门禁
+  干扰使用中工作站的用户，实质违背铁律 1 的精神）。严重度：P1。
+  验收标准（写入后不放宽）：test_all.py 以脚本方式启动（`python
+  tests/test_all.py`）时，进程内第一个 QApplication 必为离屏平台——
+  即在模块级导入副作用之前锁定 `QT_QPA_PLATFORM=offscreen`，且回归
+  期间屏幕上不出现任何真实置顶窗口。
+  〔R92 当轮解决，commit `889f7e6`：tests/test_all.py 模块级
+  `os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")`，与
+  test_gui_smoke.py / test_ui_quality.py / test_ui_workflow_regressions.py
+  既有做法一致。验证：探针证实首个 QApplication 锁定 windows 后
+  setdefault 失效（platformName: windows）；修复后单进程按字母序连跑
+  最先构造的 GUI 用例 + 弹窗用例 3 项全过，模块导入即 offscreen。
+  新增维护面：0（无新文件/函数/配置/依赖/UI 入口，+7 行测试代码）。〕
+
 - [ ] **R92-1【P2】full 矩阵 test_all 间歇性以退出码 0xCFFFFFFF（3489660927）
   崩溃，full 门禁无法确定性全绿**：仅 `--profile full` 的 test_all 套件受影响，
   其余 33 套件全部正常。根因（Windows 事件日志 + 工件历史实证，非本轮改动
@@ -39,15 +68,19 @@
   且每次都有匹配的 1002 事件（14:13:34 / 13:39:25）——当天该共享工作站
   被另一会话的重负载任务压满（explorer.exe 01:35 崩溃重启、他人在跑
   网络共享数据转换批任务、435 进程），套件内随机停顿仍可跨过 5 秒
-  挂起阈值。结论：修复消除了主要暴露面，剩余风险是共享工作站的
-  负载相关性环境噪声，代码层无法根治。**
+  挂起阈值。**
+  **2026-10-25 根因最终修正（R92-2 同轮）：进程持有真实顶层窗口本身
+  就是挂起终止的暴露面——R92-2 证实 test_all 因字母序用例顺序一直在
+  真实 windows 平台上弹真实置顶窗口（见上条）。commit `889f7e6` 在
+  模块级锁定离屏平台后，进程不再持有任何真实顶层窗口，挂起检测
+  失去作用目标，负载相关性环境噪声的结论相应作废——此前"代码层
+  无法根治"为误判。**
   影响视角：开发（full 门禁红灯是环境噪声，掩盖真实回归）。严重度：P2。
   验收标准（写入后不放宽）：full 矩阵中 test_all 的语法 walk 不再编译
   `python_env/` 与 `nninteractive_env/` 两个 vendored 环境树（单跑该用例
   从 ~20 分钟降到秒级）——**已达成**（`46184ad` + `f55b29a`，TestSyntax
-  43.3s）；且 full 矩阵连跑两轮 test_all 均 pass、退出码 0——**待工作站
-  空闲窗口验证（2026-10-25 当天 4 次 full 均被负载相关的挂起终止杀掉，
-  非修复缺陷）**。
+  43.3s）；且 full 矩阵连跑两轮 test_all 均 pass、退出码 0——**待验证
+  （R92-2 修复 `889f7e6` 后重跑，此前 4 次失败均在修复前）**。
 
 ### R91（2026-10-23 外部评审 a621093：eee725b SLIP 集成复审 8 卡入账）
 
