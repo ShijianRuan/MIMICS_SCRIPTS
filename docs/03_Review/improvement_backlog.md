@@ -99,6 +99,37 @@
   annotation_state.json 回流核对。发现的产品缺口见 D13。〕
 
 
+### R94（2026-10-26 用户指示：远程合并代码核查 + 原图依赖审计）
+
+- [x] **R94-1【P2】归档回执遮蔽撤销发现：S01 归档件被当撤销候选**：
+  远程修复轮（4af0393）的 S01 让 `create_mcs_batch.flush_pending_receipts`
+  在回执身份冲突时把旧回执归档为 `.<case>.previous-<digest>.import_
+  receipt.json`，但 `import_undo_mimics.find_latest_receipt` 按后缀
+  `.import_receipt.json` 扫描候选，归档件也被收进来。在 S01 自己防御的
+  时钟回拨场景下归档件 `created_at_epoch` 最新，单取最新即遮蔽真实当前
+  回执 → 正确撤销不可达（旧回执指纹校验必失败，用户被引导按过期清单
+  回滚）。根因：写侧引入新命名（`.previous-` 中缀）时读侧发现逻辑未同步
+  排除。影响视角：标注者（撤销入口在冲突+时钟回拨交集场景下失效）。
+  严重度：P2（触发需要身份冲突与时钟回拨同时发生）。
+  验收标准（写入后不放宽）：存在归档回执且其 created_at_epoch 最新时，
+  `find_latest_receipt` 仍返回当前回执；归档证据文件保留且 30 天 prune
+  清理不变；失败路径测试进回归套件。
+  〔R94 当轮解决，commit `08efce7`：读侧跳过含 ".previous-" 的归档名
+  （保留 prune_import_receipts 对归档件的 30 天清理路径不变）；
+  测试 ReceiptContracts.test_archived_receipt_never_shadows_current_
+  receipt_for_undo（时钟回拨场景构造归档件+当前件断言发现结果）；
+  套件 17/17、smoke 9/9、fast 33/33（20261026T002945_fast.json，
+  Windows 本机验证——远程轮仅在 macOS 验证过）。〕
+
+- [ ] **R94-2【审计】全功能"原图依赖"审计（用户场景：他人转好 mcs 分发到
+  无原图的机子，任何功能因缺原图不可用都不合理）**：nnInteractive 已有
+  元数据网格回退（mcs 元数据存 source_image_shape + source_voxel_to_ras_
+  matrix，源文件缺失时恢复精确源网格）；审计所有其他功能（nnU-Net
+  推理/AL、FlexiCT、导出、撤销、复核开病例等）对源图像**文件**的硬依赖，
+  逐项判定：可无原图工作 / 降级有引导 / 硬失败是否合理。审计结论与修复
+  待登记。〔进行中〕
+
+
 ### R92（2026-10-25 门禁调查：full 门禁 test_all 间歇性被 Windows 挂起检测终止）
 
 - [x] **R92-2【P1】每次跑回归测试都会弹出一个"导入数据"置顶窗口，必须
