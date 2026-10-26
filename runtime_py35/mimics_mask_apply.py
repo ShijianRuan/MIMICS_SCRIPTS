@@ -578,6 +578,12 @@ def _export_project_image_for_prediction(setup_root, snapshot):
         return None
     if not result or not result.get("shape") or not result.get("sha256"):
         return None
+    # runtime_common's custody format prefixes the digest; the tools-side
+    # custody (job creator + materializer) compares bare hexdigests.
+    sha = str(result["sha256"])
+    if sha.startswith("sha256:"):
+        sha = sha[len("sha256:"):]
+    result["sha256"] = sha
     return result
 
 

@@ -7714,6 +7714,104 @@ class TestSourceImagePathEquivalence(unittest.TestCase):
         self.assertEqual(0.03125, mapping["slope"])
         self.assertEqual(-17.5, mapping["intercept"])
 
+    def test_project_buffer_export_carries_intensity_recovery_for_ct_and_mr(self):
+        """D20: the in-project voxel export for prediction must carry the
+        intensity recovery contract — CT from the live HU2GV transform, MR
+        from the import-time rescale metadata — so the pipelines can rebuild
+        true source values from the distributed project's GV buffer."""
+        import hashlib
+        import mimics_mask_apply
+        import nninteractive_mimics as nnint
+
+        data = np.arange(24, dtype=np.uint16).reshape((2, 3, 4))
+        identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+
+        class _Meta:
+            def __init__(self, values):
+                self._values = values
+
+            def find(self, name):
+                if name not in self._values:
+                    return None
+                return type("Item", (), {"value": self._values[name]})()
+
+        def make_image(values):
+            class _Image:
+                guid = "d20-project-image"
+                metadata = _Meta(values)
+
+                def get_voxel_buffer(self):
+                    return memoryview(data)
+
+            return _Image()
+
+        setup_root = os.path.join(self.tmp, "setup")
+        os.makedirs(setup_root)
+        snapshot = {
+            "source_shape": [2, 3, 4],
+            "source_voxel_to_ras_matrix": identity,
+        }
+
+        # CT: the live Mimics GV transform is HU*2+100, so the buffer must
+        # record the inverted recovery (GV-100)/2 for the pipeline to undo.
+        ct_image = make_image({
+            nnint.SOURCE_IMAGE_KIND_METADATA: "nifti",
+            nnint.SOURCE_IMAGE_MODALITY_METADATA: "CT",
+            nnint.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: json.dumps(identity),
+        })
+        with mock.patch.object(
+            _mock_mimics.segment, "HU2GV",
+            side_effect=lambda hu: hu * 2 + 100,
+        ), mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=ct_image,
+        ):
+            ct = mimics_mask_apply._export_project_image_for_prediction(
+                setup_root, snapshot)
+        self.assertIsNotNone(ct)
+        self.assertEqual(0.5, ct["buffer_to_source_slope"])
+        self.assertEqual(-50.0, ct["buffer_to_source_intercept"])
+        self.assertEqual("mimics_hu_gv", ct["source_intensity_recovery_basis"])
+        self.assertEqual("CT", ct["source_modality"])
+
+        # MR: the recovery comes from the project's import-time rescale
+        # metadata instead — no HU2GV transform may be consulted.
+        mr_image = make_image({
+            nnint.SOURCE_IMAGE_KIND_METADATA: "nifti",
+            nnint.SOURCE_IMAGE_MODALITY_METADATA: "MR",
+            nnint.MIMICS_VOXEL_TO_RAS_MATRIX_METADATA: json.dumps(identity),
+            nnint.SOURCE_INTENSITY_ENCODING_METADATA:
+                "dicom_uint16_linear_rescale_v1",
+            nnint.SOURCE_INTENSITY_RESCALE_SLOPE_METADATA: "0.125",
+            nnint.SOURCE_INTENSITY_RESCALE_INTERCEPT_METADATA: "-200.0",
+        })
+        with mock.patch.object(
+            _mock_mimics.segment, "HU2GV",
+            side_effect=AssertionError("HU2GV must not be used for MR"),
+        ), mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=mr_image,
+        ):
+            mr = mimics_mask_apply._export_project_image_for_prediction(
+                setup_root, snapshot)
+        self.assertIsNotNone(mr)
+        self.assertEqual(0.125, mr["buffer_to_source_slope"])
+        self.assertEqual(-200.0, mr["buffer_to_source_intercept"])
+        self.assertAlmostEqual(0.062500125, mr["buffer_to_source_zero_tolerance"])
+        self.assertEqual("mcs_metadata", mr["source_intensity_recovery_basis"])
+
+        # Both exports hand over the same custody: raw bytes streamed to a
+        # file under the setup root, hashed and gridded for materialization.
+        expected_sha = hashlib.sha256(data.tobytes()).hexdigest()
+        for payload in (ct, mr):
+            self.assertEqual([2, 3, 4], payload["shape"])
+            self.assertEqual("uint16", payload["dtype"])
+            self.assertEqual(expected_sha, payload["sha256"])
+            self.assertEqual(identity, payload["mimics_voxel_to_ras_matrix"])
+            raw = payload["path"]
+            self.assertTrue(raw.startswith(setup_root), raw)
+            self.assertTrue(raw.endswith(".raw"), raw)
+            self.assertEqual(48, os.path.getsize(raw))
+
     def test_mri_rescale_restoration_preserves_negative_background_contract(self):
         from nninteractive_finetune.data import normalize_like_nninteractive
 
