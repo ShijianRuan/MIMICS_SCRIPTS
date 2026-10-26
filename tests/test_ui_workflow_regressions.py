@@ -198,6 +198,11 @@ class TestUiWorkflow(unittest.TestCase):
             w._rows = [{'case': 'caseA'}]
             w.table.setRowCount(1)
             w.table.setItem(0, 0, QtWidgets.QTableWidgetItem('1'))
+            # The row population contract (4af0393): the case id lives in the
+            # column-1 item's UserRole — _selected_case reads it from there.
+            case_item = QtWidgets.QTableWidgetItem('caseA')
+            case_item.setData(QtCore.Qt.UserRole, 'caseA')
+            w.table.setItem(0, 1, case_item)
             w._set_actions_enabled(True)
             self.assertTrue(w.export_button.isEnabled())
             self.assertFalse(w.open_button.isEnabled())
