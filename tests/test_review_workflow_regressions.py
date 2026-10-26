@@ -291,4 +291,185 @@ class TestPortableGridExport(unittest.TestCase):
             self.assertEqual(expected, contexts[0]['source_portable_grid'])
             self.assertEqual(str(self.dead_source), contexts[0]['source_initial'])
 
+class TestProjectBufferPrediction(unittest.TestCase):
+    """D20：无原图机子上的预测。分发出去的 .mcs 没有源文件，但工程自带的
+    体素 buffer + 导入时网格快照可以取代它。失败路径优先：远程必须在任何
+    job 工件产生之前拒绝；sha256 失守不得留下半 custody 任务目录；buffer
+    模式回写不得再依赖数据集根（挂死修复）；无快照工程报错逐字不变。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.grid = {
+            'target_shape': [2, 2, 2],
+            'target_voxel_to_ras_matrix': [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+        }
+        self.snapshot = {
+            'source_image_path': str(self.root / 'importer_machine' / 'ct.nii.gz'),
+            'source_shape': [2, 2, 2],
+            'source_modality': 'CT',
+            'source_voxel_to_ras_matrix': [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+        }
+
+    def write_raw(self, sha=None):
+        import hashlib
+        data = b'\x01' * 16
+        raw = self.root / 'setup' / 'case_raw.raw'
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes(data)
+        payload = {
+            'path': str(raw),
+            'shape': [2, 2, 2],
+            'dtype': 'int16',
+            'sha256': sha or hashlib.sha256(data).hexdigest(),
+            'mimics_voxel_to_ras_matrix': [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+        }
+        return payload, raw
+
+    def test_buffer_remote_rejected_before_any_job_artifact(self):
+        import flexict_pipeline
+        for creator in (jobs.create_job, flexict_pipeline.create_flexict_job):
+            values = {
+                'workspace': self.tmp.name, 'operation': 'infer',
+                'execution_backend': 'remote', 'remote_profile_id': 'srv',
+                'job_id': 'bad_buffer_remote',
+                'project_image_export': {'path': str(self.root / 'never.raw')},
+            }
+            with mock.patch('subprocess.Popen') as popen:
+                with self.assertRaises(RuntimeError) as ctx:
+                    creator(values)
+            self.assertIn('仅支持本机执行', str(ctx.exception))
+            self.assertEqual([], list(self.root.rglob('bad_buffer_remote*')))
+            popen.assert_not_called()
+
+    def test_buffer_sha256_mismatch_leaves_no_half_custody_job(self):
+        payload, raw = self.write_raw(sha='deadbeef')
+        values = {
+            'workspace': self.tmp.name, 'operation': 'infer',
+            'job_id': 'custody_bad', 'project_image_export': payload,
+        }
+        with mock.patch.object(jobs, '_launch',
+                               return_value=types.SimpleNamespace(pid=1234)):
+            with self.assertRaises(RuntimeError) as ctx:
+                jobs.create_job(values)
+        self.assertIn('sha256', str(ctx.exception))
+        self.assertEqual([], list(self.root.rglob('custody_bad*')))
+        self.assertTrue(raw.exists(), 'the setup raw must stay for a retry')
+
+    def test_buffer_custody_moves_raw_into_job_input(self):
+        import json
+        payload, raw = self.write_raw()
+        values = {
+            'workspace': self.tmp.name, 'operation': 'infer',
+            'job_id': 'custody_ok', 'project_image_export': payload,
+        }
+        with mock.patch.object(jobs, '_launch',
+                               return_value=types.SimpleNamespace(pid=1234)):
+            result = jobs.create_job(values)
+        self.assertFalse(raw.exists())
+        request = json.loads(
+            (Path(result['job_dir']) / 'request.json').read_text())
+        moved = Path(request['project_image_export']['path'])
+        self.assertEqual(
+            moved, Path(result['job_dir']) / 'input' / 'project_image.raw')
+        self.assertTrue(moved.exists())
+
+    def test_monitor_buffer_mode_skips_dataset_root_check(self):
+        import mimics_mask_apply
+        monitor = {
+            'project_image_export': {'path': 'x.raw'}, 'ts_root': '',
+            'case_id': 's0001',
+            'launch_project_path': str(self.root / 's0001.mcs'),
+            'target_grid': dict(self.grid),
+        }
+        def boom(value):
+            raise AssertionError(
+                'buffer mode must not infer the case from an empty ts_root')
+        with mock.patch.object(mimics_mask_apply, '_infer_case_id',
+                               side_effect=boom), \
+                mock.patch.object(mimics_mask_apply, '_current_project_path',
+                                  return_value=str(self.root / 's0001.mcs')), \
+                mock.patch.object(mimics_mask_apply, '_active_live_grid_payload',
+                                  return_value=dict(self.grid)):
+            self.assertEqual((True, ''),
+                             mimics_mask_apply._monitor_target_is_open(monitor))
+        with mock.patch.object(mimics_mask_apply, '_infer_case_id',
+                               side_effect=boom), \
+                mock.patch.object(mimics_mask_apply, '_current_project_path',
+                                  return_value=str(self.root / 'other.mcs')), \
+                mock.patch.object(mimics_mask_apply, '_active_live_grid_payload',
+                                  return_value=dict(self.grid)):
+            ok, message = mimics_mask_apply._monitor_target_is_open(monitor)
+        self.assertFalse(ok)
+        self.assertIn('original project', message)
+
+    def test_monitor_non_buffer_mode_still_requires_the_source_case(self):
+        import mimics_mask_apply
+        monitor = {
+            'ts_root': str(self.root / 'ts'), 'case_id': 's0001',
+            'launch_project_path': '', 'target_grid': {},
+        }
+        with mock.patch.object(mimics_mask_apply, '_infer_case_id',
+                               return_value='s0002'):
+            ok, message = mimics_mask_apply._monitor_target_is_open(monitor)
+        self.assertFalse(ok)
+        self.assertIn('Open the source case', message)
+
+    def context_patches(self, module, export_side_effect, snapshot=True):
+        stack = __import__('contextlib').ExitStack()
+        add = stack.enter_context
+        add(mock.patch.object(module, '_selected_masks', return_value=[]))
+        add(mock.patch.object(module, '_setup_root',
+                              return_value=str(self.root / 'setup')))
+        add(mock.patch.object(module, '_active_image_masks', return_value=[]))
+        add(mock.patch.object(module.mimics_mask_apply,
+                              '_resolve_prediction_context',
+                              return_value=('', 's0001', '')))
+        add(mock.patch.object(
+            module.mimics_mask_apply, '_active_source_geometry_payload',
+            return_value=dict(self.snapshot) if snapshot else None))
+        add(mock.patch.object(module.mimics_mask_apply,
+                              '_export_project_image_for_prediction',
+                              side_effect=export_side_effect))
+        add(mock.patch.object(module.mimics_mask_apply, '_active_live_grid_payload',
+                              return_value=dict(self.grid)))
+        add(mock.patch.object(module.mimics_mask_apply, '_current_project_path',
+                              return_value=str(self.root / 's0001.mcs')))
+        return stack
+
+    def test_dead_source_with_snapshot_falls_back_to_project_buffer(self):
+        import flexict_mimics
+        import nnunet_mimics
+        for module in (nnunet_mimics, flexict_mimics):
+            calls = []
+            def fake_export(setup_root, snapshot):
+                calls.append((setup_root, snapshot))
+                return {'path': str(self.root / 'setup' / 'case.raw')}
+            with self.context_patches(module, fake_export):
+                context = module._prediction_context()
+            self.assertEqual([str(self.root / 'setup')],
+                             [call[0] for call in calls])
+            self.assertEqual(dict(self.snapshot), calls[0][1])
+            self.assertEqual({'path': str(self.root / 'setup' / 'case.raw')},
+                             context['project_image_export'])
+            self.assertEqual(self.snapshot['source_shape'],
+                             context['source_geometry_expected']['source_shape'])
+            self.assertEqual('', context['source_image_path'])
+
+    def test_dead_source_without_snapshot_keeps_original_error(self):
+        import flexict_mimics
+        import nnunet_mimics
+        for module in (nnunet_mimics, flexict_mimics):
+            calls = []
+            def fake_export(setup_root, snapshot):
+                calls.append((setup_root, snapshot))
+                return None
+            with self.context_patches(module, fake_export, snapshot=False):
+                with self.assertRaises(RuntimeError) as ctx:
+                    module._prediction_context()
+            self.assertEqual([], calls, 'no raw may be exported without a snapshot')
+            self.assertIn('原始源影像', str(ctx.exception))
+            self.assertIn('01_Import_Data', str(ctx.exception))
+
 if __name__=='__main__':unittest.main()

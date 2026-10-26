@@ -4565,6 +4565,133 @@ class MimicsRuntimeTests(unittest.TestCase):
         self.assertFalse(self.module._managed_job_process_stopped(status))
 
 
+class ProjectBufferMaterializationTests(unittest.TestCase):
+    """D20: the in-project voxel buffer replaces an unreachable source file.
+
+    materialize_project_image_buffer must rebuild a NIfTI on the live Mimics
+    grid, undo the Mimics GV display transform, and land on the import-time
+    snapshot grid so validate_materialized_source_geometry — and everything
+    downstream — sees exactly what a reachable source file would have
+    produced. Failure paths first: a truncated or tampered raw must never
+    produce a usable input image.
+    """
+
+    def setUp(self):
+        import numpy as np
+
+        self.np = np
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.shape = [4, 4, 4]
+        # A live grid shifted +2mm from the snapshot grid, so resampling has
+        # real coverage holes to fill (snapshot voxels at x=0,1 fall outside).
+        self.snapshot_affine = np.eye(4)
+        self.live_affine = np.eye(4)
+        self.live_affine[0, 3] = 2.0
+
+    def payload(self, path, affine, modality="CT", basis="mimics_hu_gv",
+                slope=1.0, intercept=0.0, zero_tolerance=None):
+        import hashlib
+
+        np = self.np
+        data = (np.arange(64, dtype="<i2") * 3 + 10).reshape(self.shape)
+        Path(path).write_bytes(data.tobytes())
+        payload = {
+            "path": str(path),
+            "shape": list(self.shape),
+            "dtype": "int16",
+            "sha256": hashlib.sha256(data.tobytes()).hexdigest(),
+            "mimics_voxel_to_ras_matrix": affine.tolist(),
+            "source_modality": modality,
+            "source_intensity_recovery_basis": basis,
+            "buffer_to_source_slope": slope,
+            "buffer_to_source_intercept": intercept,
+        }
+        if zero_tolerance is not None:
+            payload["buffer_to_source_zero_tolerance"] = zero_tolerance
+        return data, payload
+
+    def test_identity_grid_passes_validation_with_restored_intensity(self):
+        import nibabel as nib
+
+        np = self.np
+        data, payload = self.payload(
+            self.root / "input.raw", self.snapshot_affine,
+            slope=2.0, intercept=-1024.0)
+        # .nii.gz mirrors the real pipeline path (input/source_image.nii.gz).
+        output = self.root / "case.nii.gz"
+        pipeline.materialize_project_image_buffer(
+            payload, output, {"case_id": "s0001"})
+        pipeline.validate_materialized_source_geometry(
+            output, {
+                "source_shape": self.shape,
+                "source_voxel_to_ras_matrix": self.snapshot_affine.tolist(),
+            })
+        image = nib.load(str(output))
+        np.testing.assert_allclose(
+            np.asarray(image.dataobj), data * 2.0 - 1024.0, rtol=0, atol=1e-3)
+
+    def test_live_grid_drift_resamples_onto_snapshot_grid(self):
+        import nibabel as nib
+
+        np = self.np
+
+        for modality, fill in (("CT", -1024.0), ("MR", 0.0)):
+            with self.subTest(modality=modality):
+                _, payload = self.payload(
+                    self.root / ("input_%s.raw" % modality),
+                    self.live_affine, modality=modality,
+                    slope=2.0, intercept=-1024.0 if modality == "CT" else 0.0)
+                output = self.root / ("case_%s.nii.gz" % modality)
+                pipeline.materialize_project_image_buffer(
+                    payload, output,
+                    {"case_id": "s0001",
+                     "source_geometry_expected": {
+                         "source_shape": self.shape,
+                         "source_voxel_to_ras_matrix":
+                             self.snapshot_affine.tolist(),
+                     }})
+                pipeline.validate_materialized_source_geometry(
+                    output, {
+                        "source_shape": self.shape,
+                        "source_voxel_to_ras_matrix":
+                            self.snapshot_affine.tolist(),
+                    })
+                data = np.asarray(nib.load(str(output)).dataobj)
+                self.assertIn(
+                    fill, data, "coverage holes must use the %s fill" % modality)
+                self.assertTrue((data != fill).any())
+
+    def test_truncated_raw_is_rejected(self):
+        _, payload = self.payload(
+            self.root / "input.raw", self.snapshot_affine)
+        raw = Path(payload["path"])
+        raw.write_bytes(raw.read_bytes()[:-8])
+        with self.assertRaisesRegex(RuntimeError, "字节数不符"):
+            pipeline.materialize_project_image_buffer(
+                payload, self.root / "case.nii.gz", {"case_id": "s0001"})
+
+    def test_tampered_raw_fails_sha256_custody(self):
+        _, payload = self.payload(
+            self.root / "input.raw", self.snapshot_affine)
+        payload["sha256"] = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "sha256"):
+            pipeline.materialize_project_image_buffer(
+                payload, self.root / "case.nii.gz", {"case_id": "s0001"})
+        self.assertFalse((self.root / "case.nii.gz").exists())
+
+    def test_missing_raw_reports_readable_error(self):
+        payload = {
+            "path": str(self.root / "gone.raw"), "shape": self.shape,
+            "dtype": "int16", "sha256": "0" * 64,
+            "mimics_voxel_to_ras_matrix": self.snapshot_affine.tolist(),
+        }
+        with self.assertRaisesRegex(RuntimeError, "无法读取"):
+            pipeline.materialize_project_image_buffer(
+                payload, self.root / "case.nii.gz", {"case_id": "s0001"})
+
+
 if __name__ == "__main__":
     # Isolate real lock acquisitions (dataset lock, GPU lock) to a temp
     # dir: per-run temp workspace paths hash to new lock names and would

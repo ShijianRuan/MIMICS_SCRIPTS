@@ -358,6 +358,87 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertIn('都不可用', w.status_label.text())
         self.assertIn('模型路径已移动', w.table.item(0, 1).toolTip())
 
+    def test_project_buffer_prediction_submits_local_job_without_source_file(self):
+        # D20: with the source image unreachable but the project carrying a
+        # voxel snapshot, both prediction UIs must submit without touching
+        # the dead path — local execution only, buffer payload handed over.
+        import flexict_pipeline
+        import nnunet_prediction_setup_ui as single
+        import flexict_prediction_setup_ui as flex
+        payload = {
+            'path': 'setup/s0001_ab12cd34.raw', 'sha256': 'a' * 64,
+            'shape': [2, 2, 2], 'dtype': 'int16',
+            'mimics_voxel_to_ras_matrix': [[1, 0, 0, 0], [0, 1, 0, 0],
+                                           [0, 0, 1, 0], [0, 0, 0, 1]],
+        }
+        for mod, ctor in ((single, single.PredictionWindow),
+                          (flex, flex.PredictionWindow)):
+            with self.subTest(window=mod.__name__):
+                ctx = {
+                    'workspace': str(self.root / mod.__name__),
+                    'case_id': 's0001',
+                    'source_image_path': str(self.root / 'gone' / 'source.nii'),
+                    'project_image_export': dict(payload),
+                    'setup_status_path': str(self.root / 'setup-status.json'),
+                }
+                w = self.keep(ctor(ctx, QT))
+                w._loading_models = False
+                row = dict(task_id='Task001', task_name='肝脏', model_id='m1',
+                           configuration='3d_fullres', created_at_epoch=1,
+                           labels=[{'name': 'Liver'}], label_names=['Liver'],
+                           label_name='Liver', dataset_id=1,
+                           manifest_path=str(self.root / 'm.json'))
+                with mock.patch.object(mod, 'model_usability', return_value=(True, '')):
+                    w._apply_models([row], '')
+                self.assertFalse(w.remote_selector.group.isEnabled())
+                self.assertIn('仅支持本机执行', w.remote_selector.hint.text())
+                labels = [l.text() for l in w.window.findChildren(QtWidgets.QLabel)]
+                self.assertIn('工程内体素（原始影像文件不可达）', labels)
+                captured = []
+
+                def fake_create(request):
+                    captured.append(request)
+                    return {'job_id': 'j1',
+                            'status_path': str(self.root / 'job-status.json')}
+
+                patch_target = (mock.patch.object(mod, 'create_job', fake_create)
+                                if mod is single else
+                                mock.patch.object(flexict_pipeline,
+                                                  'create_flexict_job', fake_create))
+                with patch_target:
+                    w._submit()
+                    wait_until(lambda: w.submitted)
+                request = captured[0]
+                self.assertEqual(payload, request['project_image_export'])
+                self.assertEqual('local', request['execution_backend'])
+                self.assertEqual('', request['remote_profile_id'])
+                # Placeholder only — buffer mode never touches the dead path.
+                self.assertEqual(str(Path('')), request['image_path'])
+
+    def test_prediction_without_buffer_still_requires_reachable_source(self):
+        # D20 negative path: no buffer payload → the dead source path must
+        # still block submission exactly as before.
+        import nnunet_prediction_setup_ui as ui
+        dead_path = str(self.root / 'gone' / 'source.nii')
+        ctx = {
+            'workspace': str(self.root / 'nn'),
+            'case_id': 's0001',
+            'source_image_path': dead_path,
+            'setup_status_path': str(self.root / 'setup-status.json'),
+        }
+        w = self.keep(ui.PredictionWindow(ctx, QT))
+        w._loading_models = False
+        row = dict(task_id='Task001', task_name='肝脏', model_id='m1',
+                   configuration='3d_fullres', created_at_epoch=1,
+                   labels=[{'name': 'Liver'}],
+                   manifest_path=str(self.root / 'm.json'))
+        w._apply_models([row], '')
+        with mock.patch.object(ui, 'create_job') as create:
+            w._submit()
+            wait_until(lambda: '不可用' in w.status_label.text())
+            create.assert_not_called()
+        self.assertIn(dead_path, w.status_label.text())
+
     def test_export_small_screen_has_scroll_and_visible_primary_action(self):
         import io_path_setup_ui as ui
         seen = []
