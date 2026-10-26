@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -72,6 +74,47 @@ def _status_process_matches(status: dict[str, Any], key: str) -> bool:
     return process_matches(pid, status.get("{}_start_marker".format(key)))
 
 
+def adopt_project_image_buffer(values: dict[str, Any], job_dir: Path) -> None:
+    """D20: move the in-project voxel buffer into the job's custody.
+
+    Buffer-mode inference (source file unreachable, project carries its
+    import-time grid snapshot) exports a temporary raw file before any job
+    exists. Move it under job_dir/input/, verify it against the recorded
+    sha256, and rewrite the path inside ``values['project_image_export']``.
+    Any failure raises before request.json is written, so the caller can
+    remove the half-created job folder — never a half custody.
+    """
+    payload = values.get("project_image_export") or {}
+    raw_path = str(payload.get("path") or "").strip()
+    if not raw_path:
+        raise RuntimeError("工程体素导出不完整：缺少 raw 文件路径，无法创建任务。")
+    try:
+        data = Path(raw_path).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            "无法读取工程体素导出文件 {0}：{1}".format(raw_path, exc)
+        ) from exc
+    expected = str(payload.get("sha256") or "")
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise RuntimeError(
+            "工程体素导出文件 {0} 校验失败（sha256 不一致），"
+            "请重新发起预测。".format(raw_path)
+        )
+    target = job_dir / "input" / "project_image.raw"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(raw_path, target)
+    except OSError:
+        try:
+            shutil.copyfile(raw_path, target)
+            os.remove(raw_path)
+        except OSError as exc:
+            raise RuntimeError(
+                "无法把工程体素导出文件 {0} 移入任务目录：{1}".format(raw_path, exc)
+            ) from exc
+    payload["path"] = str(target)
+
+
 def create_job(request: dict[str, Any]) -> dict[str, Any]:
     values = dict(request or {})
     values.setdefault(
@@ -91,11 +134,25 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
         # 首期主动学习仅本机执行：折间分歧推理 + 排序都在本地 GPU 完成。
         raise RuntimeError(
             "主动学习任务首期仅支持本机执行，暂不支持远程训练服务器。")
+    if (
+        values.get("project_image_export")
+        and values.get("execution_backend") == "remote"
+    ):
+        # D20 首期仅本机执行：远程上传路径尚未覆盖工程体素 raw 文件。
+        raise RuntimeError(
+            "工程体素模式（源影像文件不可达）首期仅支持本机执行，"
+            "暂不支持远程训练服务器。")
     paths = workspace_paths(values["workspace"])
     job_dir = paths["jobs"] / safe_identifier(values["job_id"])
     if job_dir.exists():
         raise RuntimeError("nnU-Net job already exists: {}".format(job_dir))
     job_dir.mkdir(parents=True)
+    if values.get("project_image_export"):
+        try:
+            adopt_project_image_buffer(values, job_dir)
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
     if values["operation"] == "infer" and not str(values.get("output_path") or "").strip():
         values["output_path"] = str(job_dir / "prediction.nii.gz")
     request_path = job_dir / "request.json"

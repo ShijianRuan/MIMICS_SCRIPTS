@@ -78,6 +78,7 @@ from nnunet_pipeline import (  # noqa: E402
     _runtime_roots,
     _spawn_worker,
     build_training_data_profile,
+    materialize_project_image_buffer,
     path_signature,
     prepare_source_grid_cases,
     publish_prediction_output,
@@ -1350,14 +1351,22 @@ def run_inference(job_dir: Path) -> int:
     try:
         if not manifest or not model_dir.is_dir():
             raise RuntimeError("Selected FlexiCT model is missing or invalid.")
-        if not image_path.exists():
-            raise RuntimeError(
-                "Prediction image does not exist: {}".format(image_path))
-        from tools.mimics_label_export import materialize_source_image as _materialize_source_image
-
         inference_input = job_dir / "input" / "source_image.nii.gz"
         inference_input.parent.mkdir(parents=True, exist_ok=True)
-        _materialize_source_image(image_path, inference_input)
+        if request.get("project_image_export"):
+            # D20: this machine has no source file — the in-project voxel
+            # buffer (already adopted into job_dir/input/) replaces it.
+            materialize_project_image_buffer(
+                request["project_image_export"], inference_input, request
+            )
+        else:
+            if not image_path.exists():
+                raise RuntimeError(
+                    "Prediction image does not exist: {}".format(image_path))
+            from tools.mimics_label_export import (
+                materialize_source_image as _materialize_source_image)
+
+            _materialize_source_image(image_path, inference_input)
         validate_materialized_source_geometry(
             inference_input, request.get("source_geometry_expected")
         )
@@ -1779,11 +1788,27 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
         uuid.uuid4().hex[:8],
     )
     request["job_id"] = job_id
+    if (
+        request.get("project_image_export")
+        and request.get("execution_backend") == "remote"
+    ):
+        # D20 首期仅本机执行：远程上传路径尚未覆盖工程体素 raw 文件。
+        raise RuntimeError(
+            "工程体素模式（源影像文件不可达）首期仅支持本机执行，"
+            "暂不支持远程训练服务器。")
     paths = workspace_paths(request.get("workspace"))
     job_dir = paths["jobs"] / safe_identifier(job_id)
     if job_dir.exists():
         raise RuntimeError("FlexiCT job already exists: {}".format(job_dir))
     job_dir.mkdir(parents=True)
+    if request.get("project_image_export"):
+        from nnunet_jobs import adopt_project_image_buffer
+
+        try:
+            adopt_project_image_buffer(request, job_dir)
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
     if request["operation"] == "infer" and not str(
         request.get("output_path") or ""
     ).strip():

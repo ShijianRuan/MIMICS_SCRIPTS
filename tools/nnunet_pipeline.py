@@ -1893,6 +1893,133 @@ def validate_materialized_source_geometry(
         )
 
 
+def _restore_project_buffer_intensity(
+    volume: "np.ndarray", payload: dict[str, Any]
+) -> "np.ndarray":
+    """Undo the Mimics GV display transform recorded in the export payload.
+
+    Mirrors nninteractive_bridge._apply_buffer_model_intensity_transform:
+    identity fast path, then slope/intercept, then the MR zero clamp.
+    """
+    import numpy as np
+
+    basis = str(payload.get("source_intensity_recovery_basis") or "")
+    if not basis or basis == "unavailable":
+        return np.asarray(volume, dtype=np.float32)
+    slope = float(payload.get("buffer_to_source_slope") or 1.0)
+    intercept = float(payload.get("buffer_to_source_intercept") or 0.0)
+    if slope == 1.0 and intercept == 0.0:
+        result = np.asarray(volume, dtype=np.float32)
+    else:
+        result = np.asarray(volume, dtype=np.float32) * slope + intercept
+    tolerance = payload.get("buffer_to_source_zero_tolerance")
+    if tolerance is not None:
+        value = abs(float(tolerance))
+        if value > 0.0:
+            result = np.asarray(result, dtype=np.float32).copy()
+            result[np.abs(result) <= value] = 0.0
+    return result
+
+
+def materialize_project_image_buffer(
+    payload: dict[str, Any], output_path: str | Path, request: dict[str, Any]
+) -> Path:
+    """D20: build the inference NIfTI from the in-project voxel buffer.
+
+    The raw file was moved into job_dir/input/ by the job creator (sha256
+    verified there). It is rebuilt into a NIfTI on the live Mimics grid,
+    intensity-restored to source units, and — when the live grid drifted
+    from the import-time snapshot — resampled onto the snapshot grid, so
+    validate_materialized_source_geometry and everything downstream sees
+    exactly what a reachable source file would have produced.
+    """
+    import hashlib
+
+    import nibabel as nib
+    import numpy as np
+
+    case_id = str(request.get("case_id") or "")
+    raw_path = Path(str(payload.get("path") or "")).expanduser()
+    shape = tuple(int(value) for value in payload.get("shape") or [])
+    dtype_text = str(payload.get("dtype") or "")
+    if len(shape) != 3 or not dtype_text:
+        raise RuntimeError(
+            "工程体素导出信息不完整（病例 {0}），无法准备预测输入：{1}".format(
+                case_id, raw_path
+            )
+        )
+    try:
+        dtype = np.dtype(dtype_text)
+    except TypeError as exc:
+        raise RuntimeError(
+            "工程体素导出的数据类型无法识别（病例 {0}）：{1}".format(
+                case_id, dtype_text
+            )
+        ) from exc
+    try:
+        data = raw_path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            "无法读取工程体素导出文件 {0}：{1}".format(raw_path, exc)
+        ) from exc
+    expected_bytes = int(np.prod(shape)) * dtype.itemsize
+    if len(data) != expected_bytes:
+        raise RuntimeError(
+            "工程体素导出文件 {0}（病例 {1}）字节数不符：期望 {2}，实际 {3}，"
+            "请重新发起预测。".format(raw_path, case_id, expected_bytes, len(data))
+        )
+    if hashlib.sha256(data).hexdigest() != str(payload.get("sha256") or ""):
+        raise RuntimeError(
+            "工程体素导出文件 {0}（病例 {1}）校验失败（sha256 不一致），"
+            "请重新发起预测。".format(raw_path, case_id)
+        )
+    affine = np.asarray(payload.get("mimics_voxel_to_ras_matrix"), dtype=float)
+    if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+        raise RuntimeError(
+            "工程体素导出缺少有效的网格矩阵（病例 {0}），无法准备预测输入。".format(
+                case_id
+            )
+        )
+    volume = _restore_project_buffer_intensity(
+        np.frombuffer(data, dtype=dtype).reshape(shape), payload
+    )
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image = nib.Nifti1Image(volume, affine)
+    image.set_qform(affine, code=1)
+    image.set_sform(affine, code=1)
+    nib.save(image, str(output))
+    expected_grid = dict(request.get("source_geometry_expected") or {})
+    expected_shape = tuple(
+        int(value) for value in expected_grid.get("source_shape") or []
+    )
+    expected_affine = expected_grid.get("source_voxel_to_ras_matrix")
+    if (
+        len(expected_shape) == 3
+        and expected_affine is not None
+        and (
+            expected_shape != shape
+            or not np.allclose(
+                affine,
+                np.asarray(expected_affine, dtype=float),
+                atol=1e-4,
+                rtol=0.0,
+            )
+        )
+    ):
+        from mimics_bridge import resample_image_to_grid
+
+        modality = str(payload.get("source_modality") or "").upper()
+        resample_image_to_grid(
+            str(output),
+            [int(value) for value in expected_shape],
+            np.asarray(expected_affine, dtype=float).tolist(),
+            str(output),
+            default_value=-1024.0 if modality == "CT" else 0.0,
+        )
+    return output
+
+
 def validate_prediction_nifti(prediction_path: str | Path) -> None:
     """R10/S03: a published prediction must be a fully readable 3D integer
     segmentation.
@@ -2552,13 +2679,24 @@ def run_inference(job_dir: Path) -> int:
     try:
         if not manifest or not model_dir.is_dir():
             raise RuntimeError("Selected nnU-Net model is missing or invalid.")
-        if not image_path.exists():
-            raise RuntimeError("Prediction image does not exist: {}".format(image_path))
-        from tools.mimics_label_export import materialize_source_image as _materialize_source_image
-
         inference_input = job_dir / "input" / "source_image.nii.gz"
         inference_input.parent.mkdir(parents=True, exist_ok=True)
-        _materialize_source_image(image_path, inference_input)
+        if request.get("project_image_export"):
+            # D20: this machine has no source file — the in-project voxel
+            # buffer (already adopted into job_dir/input/) replaces it.
+            materialize_project_image_buffer(
+                request["project_image_export"], inference_input, request
+            )
+        else:
+            if not image_path.exists():
+                raise RuntimeError(
+                    "Prediction image does not exist: {}".format(image_path)
+                )
+            from tools.mimics_label_export import (
+                materialize_source_image as _materialize_source_image,
+            )
+
+            _materialize_source_image(image_path, inference_input)
         validate_materialized_source_geometry(
             inference_input, request.get("source_geometry_expected")
         )
