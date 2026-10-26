@@ -466,12 +466,13 @@ def _export_mcs_labels(
     staging_root: Path,
     status_path: Path,
     control_path: Path,
-) -> Path:
+) -> tuple[Path, dict[str, str]]:
     from tools import mimics_label_export
 
     mcs_dir = Path(str(request.get("mcs_dir") or "")).expanduser().resolve()
     if not mcs_dir.is_dir():
         raise RuntimeError("Saved .mcs folder does not exist: {}".format(mcs_dir))
+    project_voxels = str(request.get("label_source") or "") == "project_voxels"
     aliases = []
     for row in request["labels"]:
         aliases.extend(row["aliases"])
@@ -483,7 +484,10 @@ def _export_mcs_labels(
         progress_percent=3,
     )
     result = mimics_label_export.launch_mimics_export(
-        Path(request["dataset_root"]).expanduser().resolve(),
+        # project_voxels has no source image dataset; the .mcs directory is
+        # the only root. An empty dataset_root would resolve to the CWD, so
+        # never pass it through in that mode (D28).
+        mcs_dir if project_voxels else Path(request["dataset_root"]).expanduser().resolve(),
         set(case_ids),
         request.get("mimics_exe"),
         Path(request["workspace"]).expanduser().resolve(),
@@ -498,6 +502,7 @@ def _export_mcs_labels(
         mcs_output_dir=mcs_dir,
         skip_projects_without_requested_mask=False,
         skip_invalid_projects=True,
+        export_project_images=project_voxels,
     )
     batch = result.get("batch_status") or {}
     failed = (
@@ -513,7 +518,18 @@ def _export_mcs_labels(
             )
         )
     _raise_if_cancelled(control_path)
-    return staging_root
+    runtime_skips: dict[str, str] = {}
+    if project_voxels:
+        # Per-case skip reasons recorded by the runtime (e.g. a project
+        # without the import-time grid snapshot) so the pipeline can name
+        # the real cause instead of a generic "missing export".
+        skip_report = read_json(
+            Path(str(result.get("job_runtime") or "")) / "_skipped_exports.json", {}
+        ) or {}
+        for row in skip_report.get("skipped") or []:
+            if row.get("case_id") and row.get("reason"):
+                runtime_skips[str(row["case_id"])] = str(row["reason"])
+    return staging_root, runtime_skips
 
 
 def _label_content_signature(path: Path) -> dict[str, Any]:
@@ -527,7 +543,9 @@ def _label_content_signature(path: Path) -> dict[str, Any]:
     gzip header in .nii.gz embeds no timestamp, so identical voxel data and
     affine produce identical files. Images are not hashed — they are
     write-once dataset sources, never re-exported, and hashing every image
-    would turn a cheap stat into a multi-GB read per run.
+    would turn a cheap stat into a multi-GB read per run. (Project-voxel
+    images are the exception — they are hashed; see
+    ``_case_source_signature``.)
     """
     stat = path.stat()
     digest = hashlib.sha256()
@@ -542,11 +560,18 @@ def _label_content_signature(path: Path) -> dict[str, Any]:
 
 
 def _case_source_signature(
-    image: Path, labels: list[list[Path]], request: dict[str, Any]
+    image: Path | None,
+    labels: list[list[Path]],
+    request: dict[str, Any],
+    image_signature: dict[str, Any] | None = None,
 ) -> str:
+    # D28 project-voxel mode signs the image by its raw-buffer sha256: the
+    # .mcs export is regenerable, so a path/mtime signature would invalidate
+    # (or mismatch) the cache on every re-export. All other modes keep the
+    # path signature byte-for-byte, so contract v4 caches stay valid.
     return stable_digest(
         {
-            "image": path_signature(image),
+            "image": image_signature if image_signature is not None else path_signature(image),
             "labels": [
                 [_label_content_signature(path) if path else None
                  for path in source_group]
@@ -562,12 +587,14 @@ def _case_source_signature(
 
 def _materialize_case(
     case_id: str,
-    image_source: Path,
+    image_source: Path | None,
     label_sources: list[list[Path]],
     request: dict[str, Any],
     cache_root: Path,
     control_path: Path | None = None,
     case_key: str | None = None,
+    image_payload: dict[str, Any] | None = None,
+    image_signature: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     import nibabel as nib
     import numpy as np
@@ -579,7 +606,9 @@ def _materialize_case(
     )
     from tools.mimics_label_export import materialize_source_image as _materialize_source_image
 
-    fingerprint = _case_source_signature(image_source, label_sources, request)
+    fingerprint = _case_source_signature(
+        image_source, label_sources, request, image_signature=image_signature
+    )
     case_cache = cache_root / (case_key or safe_identifier(case_id, "case"))
     metadata_path = case_cache / "metadata.json"
     image_path = case_cache / "image.nii.gz"
@@ -626,7 +655,22 @@ def _materialize_case(
     try:
         if control_path is not None:
             _raise_if_cancelled(control_path)
-        if image_source.is_file() and image_source.name.lower().endswith(".nii.gz"):
+        if image_payload is not None:
+            # D28 project-voxel mode: rebuild the image from the streamed
+            # project buffer onto the snapshot grid the labels were resampled
+            # to (identical grids take the identity fast path — no resample
+            # loss). Byte count and sha256 are verified inside.
+            payload = dict(image_payload)
+            expected_grid = payload.pop("expected_grid", None) or {}
+            materialize_project_image_buffer(
+                payload,
+                staging / "image.nii.gz",
+                {
+                    "case_id": case_id,
+                    "source_geometry_expected": expected_grid,
+                },
+            )
+        elif image_source.is_file() and image_source.name.lower().endswith(".nii.gz"):
             # Keep the cache independent of the user's source. Hardlinks both
             # share writable bytes and change the source's ctime on POSIX,
             # invalidating the signature computed just above.
@@ -735,17 +779,40 @@ def prepare_source_grid_cases(
     control_path: Path,
 ) -> list[dict[str, Any]]:
     request = normalize_request(request)
-    dataset_root = Path(str(request.get("dataset_root") or "")).expanduser().resolve()
     requested = selected_case_ids(request.get("cases"))
-    case_dirs = _case_directories(dataset_root, requested)
-    if not case_dirs:
-        raise RuntimeError("No supported image cases were found in {}.".format(dataset_root))
+    runtime_skips: dict[str, str] = {}
+    if request["label_source"] == "project_voxels":
+        # D28: there is no source image dataset. The cases ARE the *.mcs
+        # projects in the saved-project folder; both image voxels and labels
+        # are exported from them by the runtime into the staging layout.
+        mcs_dir = Path(str(request.get("mcs_dir") or "")).expanduser().resolve()
+        if not mcs_dir.is_dir():
+            raise RuntimeError("Saved .mcs folder does not exist: {}".format(mcs_dir))
+        case_names: list[str] = []
+        seen: set[str] = set()
+        for path in sorted(mcs_dir.glob("*.mcs")):
+            name = path.stem
+            if name in seen or (requested and name not in requested):
+                continue
+            seen.add(name)
+            case_names.append(name)
+        if not case_names:
+            raise RuntimeError("No .mcs projects were found in {}.".format(mcs_dir))
+        case_entries: list[tuple[str, Path | None]] = [
+            (name, None) for name in case_names
+        ]
+    else:
+        dataset_root = Path(str(request.get("dataset_root") or "")).expanduser().resolve()
+        case_dirs = _case_directories(dataset_root, requested)
+        if not case_dirs:
+            raise RuntimeError("No supported image cases were found in {}.".format(dataset_root))
+        case_entries = [(path.name, path) for path in case_dirs]
     label_root: Path
     export_root = output_root / "fresh_mcs_labels"
-    if request["label_source"] == "mcs_refresh":
-        label_root = _export_mcs_labels(
+    if request["label_source"] in {"mcs_refresh", "project_voxels"}:
+        label_root, runtime_skips = _export_mcs_labels(
             request,
-            [path.name for path in case_dirs],
+            [name for name, _ in case_entries],
             export_root,
             status_path,
             control_path,
@@ -761,7 +828,7 @@ def prepare_source_grid_cases(
     rows = []
     skipped = []
     cache_hits = 0
-    total = len(case_dirs)
+    total = len(case_entries)
     # Optional case_id -> patient group mapping (F16): same patient's
     # multi-phase/follow-up scans share one group so they never straddle
     # train/val. Absent/empty means case-level independence is assumed.
@@ -774,15 +841,35 @@ def prepare_source_grid_cases(
     # names would otherwise share one cache dir and one output/input dir
     # (F22). No collisions keeps the plain slug, so caches stay stable.
     case_keys = unique_case_keys(
-        [path.name for path in case_dirs], fallback="case"
+        [name for name, _ in case_entries], fallback="case"
     )
-    for index, case_dir in enumerate(case_dirs, start=1):
+    for index, (case_id, case_dir) in enumerate(case_entries, start=1):
         _raise_if_cancelled(control_path)
-        case_id = case_dir.name
-        image = _find_case_image(case_dir)
-        if image is None:
-            skipped.append({"case_id": case_id, "reason": "image_not_found"})
-            continue
+        image_payload: dict[str, Any] | None = None
+        image_signature: dict[str, Any] | None = None
+        if case_dir is not None:
+            image = _find_case_image(case_dir)
+            if image is None:
+                skipped.append({"case_id": case_id, "reason": "image_not_found"})
+                continue
+        else:
+            # project_voxels: the runtime staged the image buffer next to the
+            # labels. A missing/incomplete manifest means the runtime already
+            # recorded why it skipped this case (or the export never landed),
+            # so surface that reason instead of failing the whole scan.
+            payload = read_json(label_root / case_id / "image_export.json", None)
+            if not isinstance(payload, dict) or not payload:
+                reason = runtime_skips.get(case_id) or "project_image_export_missing"
+                skipped.append({"case_id": case_id, "reason": reason})
+                continue
+            image_payload = payload
+            # Content-addressed cache key (trap 7): the .mcs export is
+            # regenerable, so path/mtime would permanently mismatch the cache.
+            image_signature = {
+                "kind": "project_buffer_content",
+                "sha256": str(payload.get("sha256") or ""),
+            }
+            image = label_root / case_id / "image.raw"
         label_files = []
         missing = []
         for label in request["labels"]:
@@ -839,6 +926,8 @@ def prepare_source_grid_cases(
             cache_root,
             control_path=control_path,
             case_key=case_keys[case_id],
+            image_payload=image_payload,
+            image_signature=image_signature,
         )
         if row["foreground_voxels"] == 0 and str(request.get("empty_case_policy") or "skip") == "skip":
             skipped.append({"case_id": case_id, "reason": "empty_label"})
