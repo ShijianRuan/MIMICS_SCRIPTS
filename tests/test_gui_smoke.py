@@ -639,6 +639,58 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
                 [], missing,
                 "{} 缺少中文状态标签：{}".format(module_name, missing))
 
+    def test_viewers_render_skipped_case_reasons_in_chinese(self):
+        """R97 P2-4：训练准备时跳过的病例必须在状态页按例列出，原因翻成
+        中文。只显示"失败"而不说明哪例为何被跳过，标注者无从补救。"""
+        _AppFixture.app()
+        import flexict_status_viewer as flexict_viewer
+        import nnunet_status_viewer as nnunet_viewer
+
+        skipped = [
+            {"case_id": "case_a", "reason": "labels_not_found"},
+            {"case_id": "case_b", "reason": "export_failed: disk full"},
+        ]
+        # nnU-Net 查看器需要当前选中的任务名。
+        window = nnunet_viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            with mock.patch.object(window, "_selected_task",
+                                   return_value="liver"):
+                window.refresh({
+                    "jobs": [
+                        {"task_id": "liver", "task_name": "Liver",
+                         "status_path": "x.json", "status": "failed",
+                         "created_at_epoch": 1.0, "kind": "train",
+                         "message": "boom",
+                         "skipped_case_details": skipped},
+                    ],
+                    "models": [],
+                })
+                text = window.detail_label.text()
+                self.assertIn("跳过 2 例", text)
+                self.assertIn("case_a：未找到标签文件", text)
+                self.assertIn("case_b：导出失败：disk full", text)
+        finally:
+            window.window.close()
+        window = flexict_viewer.StatusWindow({"workspace": ""}, QT)
+        try:
+            window.refresh({
+                "jobs": [
+                    {"status_path": "x.json", "status": "failed",
+                     "created_at_epoch": 1.0, "kind": "train",
+                     "message": "boom",
+                     "skipped_case_details": skipped},
+                ],
+                "models": [],
+                "pair": (None, None),
+                "recommended": None,
+            })
+            text = window.detail_label.text()
+            self.assertIn("跳过 2 例", text)
+            self.assertIn("case_a：未找到标签文件", text)
+            self.assertIn("case_b：导出失败：disk full", text)
+        finally:
+            window.window.close()
+
     def test_nnunet_validation_dice_reads_fold_summary(self):
         """AUD 5.1: the models tab must surface the fold validation Dice
         (summary.json foreground_mean), not just creation time/usability."""

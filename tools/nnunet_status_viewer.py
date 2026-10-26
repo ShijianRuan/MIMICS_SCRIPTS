@@ -80,6 +80,17 @@ _STATUS_LABELS = {
     "abandoned": "已放弃",
     "unknown": "未知",
 }
+# R97 P2-4：训练准备阶段跳过病例的机器原因码 → 标注者可读的中文。
+# 未列出的原因原样显示（例如运行时写下的具体错误文本）。
+_SKIP_REASON_LABELS = {
+    "image_not_found": "未找到原始图像",
+    "labels_not_found": "未找到标签文件",
+    "empty_label": "标签为空（无前景体素）",
+    "project_image_export_missing": "工程图像导出缺失",
+    "no saved mask matched": "工程中没有所请求的已保存 Mask",
+    "image_export_unavailable": "工程缺少可用的图像导出",
+    "source_geometry_unavailable": "工程缺少导入时的网格快照",
+}
 from viewer_refresh import BackgroundRefresh, read_log_tail  # noqa: E402
 
 
@@ -482,6 +493,25 @@ class StatusWindow:
             self.detail_label.setText(
                 "{}\n本次预测替换了旧结果（{}）。旧结果已保留，可用「旧结果…」打开或恢复。".format(
                     self.detail_label.text(), replaced_time
+                )
+            )
+        # R97 P2-4：被跳过的病例必须连同原因一起可见——"少了几例"而不说明
+        # 原因是标注者无法处理的谜。机器原因码翻成中文后展示。
+        skipped_rows = status.get("skipped_case_details") or []
+        if skipped_rows:
+            lines = []
+            for row in skipped_rows[:8]:
+                reason = str(row.get("reason") or "")
+                if reason.startswith("export_failed: "):
+                    text = "导出失败：" + reason[len("export_failed: "):]
+                else:
+                    text = _SKIP_REASON_LABELS.get(reason, reason)
+                lines.append("{}：{}".format(row.get("case_id") or "?", text))
+            if len(skipped_rows) > 8:
+                lines.append("……共 {} 例被跳过".format(len(skipped_rows)))
+            self.detail_label.setText(
+                "{}\n训练准备时跳过 {} 例：\n{}".format(
+                    self.detail_label.text(), len(skipped_rows), "\n".join(lines)
                 )
             )
         scrollbar = self.log_view.verticalScrollBar()
