@@ -261,7 +261,20 @@ def _prediction_context():
     selected = _selected_masks()
     selected_mask = selected[0] if len(selected) == 1 else None
     ts_root, case_id, source_path = mimics_mask_apply._resolve_prediction_context()
-    if not case_id or not source_path:
+    project_image_export = None
+    if not source_path and case_id:
+        # D20: the source file is unreachable (a .mcs distributed to a machine
+        # without the dataset). A project created by the import pipeline is
+        # self-sufficient: its voxel buffer plus the import-time grid snapshot
+        # replace the missing source file.
+        snapshot = mimics_mask_apply._active_source_geometry_payload() or {}
+        if snapshot.get("source_shape") and snapshot.get("source_voxel_to_ras_matrix"):
+            project_image_export = (
+                mimics_mask_apply._export_project_image_for_prediction(
+                    _setup_root(), snapshot
+                )
+            )
+    if not case_id or (not source_path and not project_image_export):
         raise RuntimeError(
             "当前工程无法关联到其原始源影像，因此预测未启动。\n\n"
             "请打开病例导入时创建的工程（01_Data > 01_Import_Data）。"
@@ -273,7 +286,7 @@ def _prediction_context():
         raise RuntimeError(
             "无法验证当前影像的物理网格，预测未启动。"
         )
-    return {
+    context = {
         "selected_mask_name": str(getattr(selected_mask, "name", "") or "") if selected_mask else "",
         "case_id": case_id,
         "ts_root": ts_root,
@@ -284,6 +297,9 @@ def _prediction_context():
         "prediction_target": _mask_snapshot(selected_mask) if selected_mask else {},
         "matching_masks": [_mask_snapshot(mask) for mask in _active_image_masks()],
     }
+    if project_image_export:
+        context["project_image_export"] = project_image_export
+    return context
 
 
 def start_prediction():
@@ -455,6 +471,7 @@ def _resume_pending_inference_monitors():
             "launch_project_path": request.get("launch_project_path") or "",
             "matching_masks": request.get("matching_masks") or [],
             "prediction_target": request.get("prediction_target") or {},
+            "project_image_export": request.get("project_image_export") or None,
         }
         _start_monitor(monitor, 1.0)
 

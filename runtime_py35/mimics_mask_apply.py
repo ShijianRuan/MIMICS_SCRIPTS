@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 
 import mimics
 
@@ -468,8 +469,12 @@ def _same_path(left, right):
 
 
 def _monitor_target_is_open(monitor):
-    if _infer_case_id(monitor.get("ts_root")) != monitor.get("case_id"):
-        return False, "Open the source case {0} to apply this result.".format(monitor.get("case_id"))
+    if not monitor.get("project_image_export"):
+        # Buffer-mode jobs (D20) have no dataset root — ts_root is empty and
+        # _infer_case_id("") would raise. Identity is guaranteed by the two
+        # checks below: the launch project path and the live grid.
+        if _infer_case_id(monitor.get("ts_root")) != monitor.get("case_id"):
+            return False, "Open the source case {0} to apply this result.".format(monitor.get("case_id"))
     launch_project = monitor.get("launch_project_path")
     if launch_project and not _same_path(_current_project_path(), launch_project):
         return False, "Open the original project to apply this result: {0}".format(launch_project)
@@ -536,6 +541,44 @@ def _active_source_geometry_payload():
         "source_modality": _metadata_get(image, SOURCE_IMAGE_MODALITY_METADATA, ""),
         "source_voxel_to_ras_matrix": matrix,
     }
+
+
+def _export_project_image_for_prediction(setup_root, snapshot):
+    """D20: a distributed project may outlive its source image file.
+
+    When the recorded source path is unreachable but the project carries its
+    import-time grid snapshot, stream the active image's voxel buffer to a
+    temporary raw file; the prediction pipelines materialize that buffer on
+    the snapshot grid instead of reading the missing source file. Returns the
+    export payload, or None when the buffer cannot be exported (the caller
+    falls back to the original source-missing error).
+    """
+    if not (snapshot or {}).get("source_shape"):
+        return None
+    if not (snapshot or {}).get("source_voxel_to_ras_matrix"):
+        return None
+    try:
+        image = mimics.data.images.get_active()
+    except Exception:
+        image = None
+    if image is None:
+        return None
+    try:
+        # Lazy import: nninteractive_mimics is heavier than this module and
+        # must not be pulled in by the non-prediction callers.
+        import nninteractive_mimics
+        raw_path = os.path.join(
+            setup_root,
+            "{0}_{1}.raw".format(
+                _safe_slug(_current_case_id() or "case"), uuid.uuid4().hex[:8]
+            ),
+        )
+        result = nninteractive_mimics._export_image(image, raw_path)
+    except Exception:
+        return None
+    if not result or not result.get("shape") or not result.get("sha256"):
+        return None
+    return result
 
 
 def _global_model_registry_path():
