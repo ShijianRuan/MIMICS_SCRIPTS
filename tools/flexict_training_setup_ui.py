@@ -210,24 +210,40 @@ class TrainingSetupWindow:
             self.modality_combo.addItem(label, value)
         form.addWidget(QtWidgets.QLabel("成像模态"), 1, 0)
         form.addWidget(self.modality_combo, 1, 1)
+        self.source_combo = QtWidgets.QComboBox()
+        self.source_combo.addItem("数据集目录（图像 + Mask 文件）", "dataset_masks")
+        self.source_combo.addItem("工程体素（图像+标签均取自 .mcs）", "project_voxels")
+        self.source_combo.currentIndexChanged.connect(self._refresh_source)
+        form.addWidget(QtWidgets.QLabel("数据来源"), 2, 0)
+        form.addWidget(self.source_combo, 2, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.dataset_edit.setPlaceholderText(
             "每个病例一个子文件夹的目录"
         )
-        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 2, 0)
-        form.addWidget(
-            self._path_row(self.dataset_edit, "选择原始图像数据集"), 2, 1
+        self.dataset_label = QtWidgets.QLabel("原始图像数据集 *")
+        form.addWidget(self.dataset_label, 3, 0)
+        self.dataset_widget = self._path_row(
+            self.dataset_edit, "选择原始图像数据集"
         )
+        form.addWidget(self.dataset_widget, 3, 1)
         self.dataset_edit.textChanged.connect(self._refresh_cases)
+        self.mcs_edit = QtWidgets.QLineEdit()
+        self.mcs_label = QtWidgets.QLabel("已保存 .mcs 文件夹 *")
+        self.mcs_widget = self._path_row(self.mcs_edit, "选择已保存的 .mcs 工程")
+        form.addWidget(self.mcs_label, 4, 0)
+        form.addWidget(self.mcs_widget, 4, 1)
+        self.mcs_label.hide()
+        self.mcs_widget.hide()
+        self.mcs_edit.textChanged.connect(self._refresh_cases)
         layout.addWidget(project)
 
         cases, cases_layout = self._surface("病例与验证")
-        hint = QtWidgets.QLabel(
+        self.cases_hint = QtWidgets.QLabel(
             "每个病例文件夹需要原始图像和一个以目标命名的 Mask 文件（例如 kidney_left.nii.gz）。其余用于训练；验证病例按层位均匀抽取。"
         )
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        cases_layout.addWidget(hint, 0, 0, 1, 2)
+        self.cases_hint.setObjectName("hint")
+        self.cases_hint.setWordWrap(True)
+        cases_layout.addWidget(self.cases_hint, 0, 0, 1, 2)
         self.case_table = QtWidgets.QTableWidget(0, 4)
         self.case_table.setHorizontalHeaderLabels(
             ['病例', '用于训练', '用于验证', '状态']
@@ -444,6 +460,9 @@ class TrainingSetupWindow:
         self.dataset_edit.setText(
             str(self.context.get("dataset_root") or remembered.get("dataset_root") or "")
         )
+        self.mcs_edit.setText(
+            str(self.context.get("mcs_dir") or remembered.get("mcs_dir") or "")
+        )
         selected = [
             str(value) for value in self.context.get("selected_mask_names") or []
         ]
@@ -452,12 +471,12 @@ class TrainingSetupWindow:
         elif remembered.get("label_name"):
             self.label_edit.setText(str(remembered["label_name"]))
         self._refresh_models_async()
-        # An empty case table on a pre-filled dataset path reads as "the path
-        # is wrong" - it usually just means nobody pressed Rescan yet. Run
-        # the existing background scan once when both path and label are
-        # already known (C6-6).
+        # An empty case table on a pre-filled path reads as "the path is
+        # wrong" - it usually just means nobody pressed Rescan yet. Run
+        # the existing background scan once when both the current data
+        # source's path and the label are already known (C6-6).
         if (
-            self.dataset_edit.text().strip()
+            self._source_root()
             and self.label_edit.text().strip()
         ):
             self._rescan_cases_async()
@@ -544,6 +563,52 @@ class TrainingSetupWindow:
             merged.append(row)
         return merged
 
+    def _project_mode(self) -> bool:
+        return (
+            str(self.source_combo.currentData() or "dataset_masks")
+            == "project_voxels"
+        )
+
+    def _source_root(self) -> str:
+        """The path the current data source scans, per source combo."""
+        if self._project_mode():
+            return self.mcs_edit.text().strip()
+        return self.dataset_edit.text().strip()
+
+    def _refresh_source(self):
+        project = self._project_mode()
+        self.dataset_label.setVisible(not project)
+        self.dataset_widget.setVisible(not project)
+        self.mcs_label.setVisible(project)
+        self.mcs_widget.setVisible(project)
+        if project:
+            self.cases_hint.setText(
+                "病例就是已保存的 .mcs 工程：图像与标签都由 Mimics 从工程中导出，"
+                "缺少标签的工程在训练时自动跳过并写明原因。"
+            )
+        else:
+            self.cases_hint.setText(
+                "每个病例文件夹需要原始图像和一个以目标命名的 Mask 文件"
+                "（例如 kidney_left.nii.gz）。其余用于训练；验证病例按层位均匀抽取。"
+            )
+        selector = getattr(self, "remote_selector", None)
+        if selector is not None:
+            if project:
+                # D28 首期仅本机执行：远程上传路径尚未覆盖工程导出的图像
+                # raw。先切回本机，避免禁用后仍带着远程配置提交。
+                selector.combo.setCurrentIndex(0)
+                selector.group.setEnabled(False)
+                selector.hint.setText("工程体素模式首期仅支持本机训练。")
+            else:
+                selector.group.setEnabled(True)
+                selector._refresh_hint()
+        # 旧表来自另一种数据来源：直接提交会把错误模式的病例发给管线，
+        # 清空并按新来源的路径重扫（路径为空则留空表）。
+        self._case_rows = []
+        self._refresh_cases()
+        if self._source_root():
+            self._rescan_cases_async()
+
     def _refresh_cases(self):
         QtWidgets = self.QtWidgets
         QtCore = self.QtCore
@@ -607,7 +672,13 @@ class TrainingSetupWindow:
             if name.strip()
         ]
 
-    def _scan_cases(self, dataset_root: str, label_names: list[str]) -> list[dict]:
+    def _scan_cases(
+        self, dataset_root: str, label_names: list[str], project: bool = False
+    ) -> list[dict]:
+        if project:
+            from flexict_pipeline import scan_flexict_project_cases
+
+            return scan_flexict_project_cases(dataset_root)
         from flexict_pipeline import scan_flexict_cases
 
         return scan_flexict_cases(
@@ -619,14 +690,18 @@ class TrainingSetupWindow:
     def _rescan_cases_async(self):
         if getattr(self, "_scan_pending", False):
             return
+        # 空路径下 Path("") 解析为当前目录（陷阱 6），绝不能扫。
+        dataset_root = self._source_root()
+        if not dataset_root:
+            return
         self._scan_pending = True
         self.rescan_button.setEnabled(False)
-        dataset_root = self.dataset_edit.text().strip()
+        project = self._project_mode()
         label_names = self._label_names()
 
         def scan():
             try:
-                result = self._scan_cases(dataset_root, label_names)
+                result = self._scan_cases(dataset_root, label_names, project)
                 self._dataset_id_results.put(("scan", result, ""))
             except Exception as exc:
                 self._dataset_id_results.put(("scan", None, str(exc)))
@@ -694,15 +769,20 @@ class TrainingSetupWindow:
             return
         try:
             self._set_status("正在提交 FlexiCT 训练...")
+            # 记住的是两个输入框的当前文本而不是请求值：工程体素模式的
+            # dataset_root 是空串，写空串会抹掉上次记住的数据集路径。
+            settings = {
+                "schema_version": "mimics_flexict_settings.v1",
+                "workspace": request["workspace"],
+                "dataset_root": self.dataset_edit.text().strip(),
+                "label_name": request["label_name"],
+                "updated_at_epoch": time.time(),
+            }
+            if self.mcs_edit.text().strip():
+                settings["mcs_dir"] = self.mcs_edit.text().strip()
             write_json_atomic(
                 Path.home() / ".mimics_script" / "flexict_settings.json",
-                {
-                    "schema_version": "mimics_flexict_settings.v1",
-                    "workspace": request["workspace"],
-                    "dataset_root": request["dataset_root"],
-                    "label_name": request["label_name"],
-                    "updated_at_epoch": time.time(),
-                },
+                settings,
             )
             job = create_flexict_job(request)
             self.submitted = True
@@ -737,6 +817,7 @@ class TrainingSetupWindow:
         else:
             val_count = len(val_cases)
         label_names = self._label_names()
+        project = self._project_mode()
         request = {
             "operation": "train",
             "task_name": self.label_edit.text().strip(),
@@ -747,8 +828,12 @@ class TrainingSetupWindow:
                 for index, name in enumerate(label_names)
             ],
             "workspace": self.workspace_edit.text().strip(),
-            "dataset_root": self.dataset_edit.text().strip(),
-            "label_source": "dataset_masks",
+            "dataset_root": (
+                "" if project else self.dataset_edit.text().strip()
+            ),
+            "label_source": (
+                "project_voxels" if project else "dataset_masks"
+            ),
             "modality": str(self.modality_combo.currentData()),
             "configuration": str(self.configuration_combo.currentData()),
             "epochs": int(self.epochs_spin.value()),
@@ -766,6 +851,10 @@ class TrainingSetupWindow:
             "train_case_ids": train_cases,
             "mimics_exe": self.context.get("mimics_exe") or "",
         }
+        if project:
+            # 数据集模式请求逐字节不变（R96-2 验收 ⑥）：mcs_dir 只在
+            # 工程体素模式出现。
+            request["mcs_dir"] = self.mcs_edit.text().strip()
         if self.remote_selector is not None:
             backend, profile_id = self.remote_selector.selection()
             request["execution_backend"] = backend
@@ -839,7 +928,19 @@ class TrainingSetupWindow:
 
             def validate():
                 try:
-                    if not Path(request["dataset_root"]).is_dir():
+                    if request.get("label_source") == "project_voxels":
+                        # Path("") 会解析为当前目录（陷阱 6），空串必须
+                        # 先拦下，绝不能拿它去 is_dir()/glob()。
+                        if not request.get("mcs_dir"):
+                            raise ValueError("请填写已保存 .mcs 的文件夹。")
+                        mcs_dir = Path(request["mcs_dir"])
+                        if not mcs_dir.is_dir() or not any(
+                            mcs_dir.glob("*.mcs")
+                        ):
+                            raise ValueError(
+                                "已保存 .mcs 的文件夹不存在或其中没有 .mcs 工程文件。"
+                            )
+                    elif not Path(request["dataset_root"]).is_dir():
                         raise ValueError("原始图像数据集不存在。")
                     if len(request["cases"]) < 2:
                         # The copy says "at least two"; the pipeline's train/

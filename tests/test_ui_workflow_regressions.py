@@ -505,6 +505,80 @@ class TestUiWorkflow(unittest.TestCase):
             wait_until(lambda: '没有 .mcs 工程文件' in w.status_label.text())
             create.assert_not_called()
 
+    def test_flexict_project_voxels_training_submits_without_dataset(self):
+        # R96-2: FlexiCT 训练窗的第 2 种数据来源用 .mcs 工程当病例——
+        # 数据集行隐藏、远程锁本机、切来源后自动扫描出工程病例、死数据集
+        # 路径既不拦 validate 也不进请求（normalize 强制 dataset_root=""）。
+        import flexict_training_setup_ui as ui
+        mcs_dir = self.root / 'projects'
+        mcs_dir.mkdir()
+        (mcs_dir / 'case_a.mcs').write_bytes(b'project')
+        (mcs_dir / 'case_b.mcs').write_bytes(b'project')
+        w = self.keep(ui.TrainingSetupWindow(
+            {'workspace': str(self.root / 'flex'), 'mcs_dir': str(mcs_dir)},
+            self.root / 'context.json', QT))
+        w.label_edit.setText('kidney')
+        # 默认（dataset_masks）请求逐字节不变：不含 mcs_dir（验收 ⑥）。
+        self.assertTrue(w.dataset_widget.isVisible())
+        self.assertTrue(w.remote_selector.group.isEnabled())
+        self.assertEqual('dataset_masks', w._request()['label_source'])
+        self.assertNotIn('mcs_dir', w._request())
+        # 切到工程体素：行切换、远程锁定、自动扫描出两个工程病例。
+        w.source_combo.setCurrentIndex(1)
+        APP.processEvents()
+        self.assertFalse(w.dataset_label.isVisible())
+        self.assertFalse(w.dataset_widget.isVisible())
+        self.assertTrue(w.mcs_widget.isVisible())
+        self.assertFalse(w.remote_selector.group.isEnabled())
+        self.assertIn('仅支持本机', w.remote_selector.hint.text())
+        wait_until(lambda: [row['case_id'] for row in w._case_rows]
+                   == ['case_a', 'case_b'])
+        # 死数据集路径留在框里，但工程体素模式的 validate 绝不触碰它。
+        w.dataset_edit.setText(str(self.root / 'gone' / 'dataset'))
+        captured = []
+
+        def fake_create(request):
+            captured.append(request)
+            return {'job_id': 'j1', 'status_path': str(self.root / 'job.json')}
+
+        with mock.patch.object(ui, 'create_flexict_job', fake_create):
+            w._submit()
+            wait_until(lambda: w.submitted)
+        request = captured[0]
+        self.assertEqual('project_voxels', request['label_source'])
+        self.assertEqual('', request['dataset_root'])
+        self.assertEqual('local', request['execution_backend'])
+        self.assertEqual('', request['remote_profile_id'])
+        self.assertEqual(str(mcs_dir), request['mcs_dir'])
+        self.assertEqual(['case_a', 'case_b'], request['cases'])
+        # 提交后记住的是输入框文本而非请求值：工程体素模式的
+        # dataset_root 是空串，写空串会抹掉上次记住的数据集路径。
+        settings = json.loads(
+            (self.root / '.mimics_script' / 'flexict_settings.json')
+            .read_text(encoding='utf-8'))
+        self.assertEqual(str(mcs_dir), settings.get('mcs_dir'))
+
+    def test_flexict_project_voxels_training_blocks_submit_without_mcs_files(self):
+        # R96-2 失败路径：空 .mcs 文件夹必须在 validate 阶段以中文原因拦
+        # 下——不创建 job、不调 create_flexict_job。
+        import flexict_training_setup_ui as ui
+        empty_dir = self.root / 'empty'
+        empty_dir.mkdir()
+        w = self.keep(ui.TrainingSetupWindow(
+            {'workspace': str(self.root / 'flex'), 'mcs_dir': str(empty_dir)},
+            self.root / 'context.json', QT))
+        w.label_edit.setText('kidney')
+        w.source_combo.setCurrentIndex(1)
+        APP.processEvents()
+        w._case_rows = [
+            {'case_id': 'case_a', 'checked': True, 'use_train': True, 'use_val': False},
+            {'case_id': 'case_b', 'checked': True, 'use_train': True, 'use_val': False},
+        ]
+        with mock.patch.object(ui, 'create_flexict_job') as create:
+            w._submit()
+            wait_until(lambda: '没有 .mcs 工程文件' in w.status_label.text())
+            create.assert_not_called()
+
     def test_export_small_screen_has_scroll_and_visible_primary_action(self):
         import io_path_setup_ui as ui
         seen = []
