@@ -191,6 +191,25 @@ class TestNormalizeFlexictRequest(unittest.TestCase):
             spacing=[1.5, 1.5, 1.5]))
         self.assertEqual(request["spacing"], [1.5, 1.5, 1.5])
 
+    def test_project_voxels_request_normalizes_without_dataset(self):
+        # R96-2: 工程体素请求走共享 normalize_request 白名单——dataset_root
+        # 强制为空串、mcs_dir 原样保留。FlexiCT 训练数据准备复用 R96-1
+        # 同一条 project_voxels 管线，零管线改动（验收 ②）。
+        with tempfile.TemporaryDirectory() as tmp:
+            request = fp.normalize_flexict_request(_training_request(
+                "X:/dead/dataset", "W:/w", label_source="project_voxels",
+                mcs_dir=tmp))
+            self.assertEqual("project_voxels", request["label_source"])
+            self.assertEqual("", request["dataset_root"])
+            self.assertEqual(tmp, request["mcs_dir"])
+
+    def test_project_voxels_request_requires_mcs_dir(self):
+        # 失败路径：没有 mcs_dir 的工程体素请求必须在 normalize 阶段被
+        # 拒下，不能带着空串走到管线枚举。
+        with self.assertRaises(ValueError):
+            fp.normalize_flexict_request(_training_request(
+                "X:/d", "W:/w", label_source="project_voxels", mcs_dir=""))
+
 
 class TestConfigurationResolution(unittest.TestCase):
     def test_2d_and_3d_are_concrete(self):
@@ -602,6 +621,34 @@ class TestScanFlexictCases(unittest.TestCase):
             (root / "case01" / "prediction.nii.gz").write_bytes(b"x")
             rows = fp.scan_flexict_cases(root, "kidney_left")
             self.assertEqual(Path(rows[0]["image"]).name, "ct.nii.gz")
+
+
+class TestScanFlexictProjectCases(unittest.TestCase):
+    """R96-2: .mcs projects are the training cases (project_voxels mode)."""
+
+    def test_scan_lists_project_files_sorted_and_usable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("liver_b.mcs", "kidney_a.mcs", "notes.txt"):
+                (root / name).write_bytes(b"project")
+            rows = fp.scan_flexict_project_cases(root)
+            self.assertEqual(
+                ["kidney_a", "liver_b"], [row["case_id"] for row in rows])
+            for row in rows:
+                # Case ids are the .mcs stems — exactly what the shared
+                # training pipeline enumerates. Missing masks are skipped
+                # by the runtime at training time, so every project is OK.
+                self.assertTrue(row["checked"])
+                self.assertEqual("OK", row["status"])
+                self.assertTrue(row["use_train"])
+                self.assertFalse(row["use_val"])
+                self.assertTrue(str(row["image"]).endswith(".mcs"))
+
+    def test_scan_rejects_missing_root_with_chinese_reason(self):
+        with self.assertRaises(ValueError) as caught:
+            fp.scan_flexict_project_cases(
+                Path(tempfile.gettempdir()) / "definitely_missing")
+        self.assertIn("已保存 .mcs 的文件夹不存在", str(caught.exception))
 
 
 class TestPreprocessCache(unittest.TestCase):

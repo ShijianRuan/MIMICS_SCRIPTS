@@ -1291,6 +1291,36 @@ def scan_flexict_cases(
     return rows
 
 
+def scan_flexict_project_cases(mcs_dir: "str | Path") -> "list[dict[str, Any]]":
+    """List saved .mcs projects as training cases (project_voxels mode).
+
+    Case ids are the .mcs file stems, exactly what the shared training
+    pipeline enumerates. Image voxels and labels are both exported from the
+    projects at training time -- the runtime skips a project with a readable
+    reason when a mask is missing -- so every project row is OK here. The
+    row shape matches scan_flexict_cases so the training UI renders both
+    modes with the same table code.
+    """
+    root = Path(mcs_dir).expanduser()
+    if not root.is_dir():
+        raise ValueError("已保存 .mcs 的文件夹不存在或不可用：{}".format(root))
+    rows: list[dict[str, Any]] = []
+    for project in sorted(root.glob("*.mcs")):
+        rows.append(
+            {
+                "case_id": project.stem,
+                "image": str(project),
+                "label": "",
+                "labels": {},
+                "checked": True,
+                "use_train": True,
+                "use_val": False,
+                "status": "OK",
+            }
+        )
+    return rows
+
+
 def run_inference(job_dir: Path) -> int:
     """FlexiCT inference on the active case (stages preparing_input ->
     waiting_for_gpu -> predicting -> completed).
