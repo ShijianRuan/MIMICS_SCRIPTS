@@ -15,6 +15,75 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R96（2026-10-26 用户立项：D28 训练侧"工程体素模式"——无原图数据集，从 .mcs 工程取图像+标签训练）
+
+> R95（D20）交付预测侧工程体素模式后，用户追问训练 UI 仍默认要求原图
+> 数据集（"请你解决后查看那些训练UI，好像还在默认需要原图数据集怎么处理？
+> 如果不设置原图路径那么扫描、训练的流程受到影响部分是否都考虑清楚并
+> 解决了"）。审计确认训练链路无任何无原图模式，属 R94-2 审计边界（当时
+> 卡片仅覆盖预测）。用户 2026-10-26 拍板"立项：nnU-Net + FlexiCT 一起"；
+> 按风险不对称原则拆两轮：R96-1 nnU-Net 先行，R96-2 FlexiCT 随后（需
+> 新建 .mcs 标签通道，代价最大）。
+>
+> 审计依赖图（2026-10-26 逐处核验）：
+> - nnU-Net 训练窗（nnunet_training_setup_ui.py）："原始图像数据集"必填，
+>   validate :919-933 目录不存在即拒；三种标签源（dataset_masks /
+>   exported_masks / mcs_refresh）全部以 dataset_root 为根。
+> - nnunet_pipeline.py：`_case_directories` :307 要求 dataset_root.is_dir()；
+>   `prepare_source_grid_cases` 训练图像直接取源文件（`_find_case_image`，
+>   缺失 → skip "image_not_found"，可用例不足 → RuntimeError）；mcs_refresh
+>   标签通道已有快照回退（mimics_export.py:2910-2925，mask 无源文件也可
+>   落源网格）——标签半边已通，图像半边未通。
+> - G10 缓存签名契约（nnunet_pipeline.py:519-560）：图像不哈希的前提
+>   "write-once dataset sources, never re-exported" 被工程导出图像打破
+>   （可再生成 → 必须内容寻址，否则缓存错配）。
+> - FlexiCT 训练窗（flexict_training_setup_ui.py :842-843 校验；`_scan_cases`
+>   → scan_flexict_cases :1226-1291）：完全基于数据集文件，无 .mcs 通道。
+> - FlexiCT AL 未标注池（flexict_active_learning_ui.py :573-581 记忆
+>   dataset_root、:951-953 校验）：池 = 数据集病例，硬依赖。
+> - nnU-Net 批量预测窗为数据集导向本性（单病例预测已由 R95/D20 覆盖），
+>   不算缺口。
+>
+> 可行性（复用 R95 资产，零新算法）：.mcs 自足（体素 + 网格快照 + 强度
+> 恢复元数据，R95 已验证）；图像导出复用 `_export_project_image_for_
+> prediction` + `materialize_project_image_buffer`（CT 活体 HU2GV 反演
+> 必须正确——GV 值训练会静默毁 CT 模型）；标签走既有快照网格导出，
+> `_materialize_case` 的 label→image 网格重采样不变。
+
+- [ ] **R96-1【P1】D28-1 nnU-Net 训练工程体素模式（第一轮）**：
+  痛点：拿到分发 .mcs 的标注者只能预测不能训练/微调，AI 闭环缺一半。
+  根因：训练数据准备只从源文件取图像体素，病例枚举硬绑 dataset_root。
+  影响视角：无原图机器上的标注者（训练入口完全不可用，只能回原机器）。
+  验收标准（写入后不放宽）：
+  ①源数据集不可达 + mcs_dir 内带网格快照 .mcs → 训练窗可扫描出病例
+  清单（枚举自 .mcs 文件名，不触碰 dataset_root）；
+  ②训练图像从打开工程导出体素物料化（复用 R95 导出/物料化链路：
+  CT 恢复 HU、MR 恢复导入期强度）；
+  ③标签走既有 mcs_refresh 快照网格导出，label→image 网格对齐逻辑不变；
+  ④缓存签名对工程导出图像内容寻址（sha256），G10 前提修复；
+  ⑤无快照或无标签病例跳过并在扫描结果中给出原因；全部不可用时中文
+  报错且不创建 job 目录；
+  ⑥远程后端在 job 目录创建之前明确拒绝（体素导出需本机 Mimics）；
+  ⑦既有三种数据源模式行为逐字节不变；
+  ⑧大 buffer 流式分块导出并泵 GUI（铁律 1）。
+- [ ] **R96-2【P1】D28-2 FlexiCT 训练工程体素模式（第二轮，含新建
+  .mcs 标签通道与 AL 池改造）**：FlexiCT 现状完全没有 .mcs 通道，
+  工作量最大。
+  验收标准（写入后不放宽）：
+  ①FlexiCT 训练窗新增从 .mcs 取图像+标签的通道，源数据集不可达时
+  可扫描出病例清单；
+  ②图像体素导出与强度恢复复用 R96-1 同一链路（不克隆第二份实现）；
+  ③标签从打开工程的 mask 导出（快照网格对齐）；
+  ④AL 未标注池在体素模式下有明确定义的来源（或明确拒绝并中文说明），
+  不静默指向不可达数据集；
+  ⑤远程后端在 job 目录创建之前明确拒绝；
+  ⑥既有数据集模式行为不变；
+  ⑦大 buffer 流式分块导出并泵 GUI（铁律 1）。
+- [ ] **R96-3 D28 实机端到端验证（L5 人工项）**：无原图机器上从分发
+  .mcs 完成 nnU-Net 与 FlexiCT 各一轮训练冒烟（代码与门禁层闭环后登记
+  TEST_STRATEGY.md L5 表）。
+- 红线核查：预计无需远程服务器与 Z 盘数据集；python_env 不改动。
+
 ### R95（2026-10-26 用户拍板：D20 无原图机子上的 nnU-Net/FlexiCT 预测）
 
 > D20 卡片用户拍板"要"。设计经两轮代码追踪 + Plan 代理验证：预测落
