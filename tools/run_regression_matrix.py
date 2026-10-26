@@ -71,6 +71,7 @@ SUITES = [
     ("migrate_root", [sys.executable, "tests/test_migrate_root.py"], {"fast", "full"}),
     ("ui_preferences", [sys.executable, "tests/test_ui_preferences.py"], {"fast", "full"}),
     ("gui_smoke", [sys.executable, "tests/test_gui_smoke.py"], {"fast", "full"}),
+    ("ui_workflow_regressions", [sys.executable, "tests/test_ui_workflow_regressions.py"], {"fast", "full"}),
     ("ui_quality", [sys.executable, "tests/test_ui_quality.py"], {"fast", "full"}),
     # -- fake-mimics end-to-end flow tests ------------------------------
     ("flow_imports", [sys.executable, "tests/fake_mimics_flow_test.py", "--only", "imports"], {"smoke", "fast", "full"}),
