@@ -253,10 +253,12 @@ class TrainingSetupWindow:
         form.addWidget(self.modality_combo, 2, 1)
         self.dataset_edit = QtWidgets.QLineEdit()
         self.dataset_edit.setPlaceholderText("每个病例一个子文件夹的目录")
-        form.addWidget(QtWidgets.QLabel("原始图像数据集 *"), 3, 0)
-        form.addWidget(
-            self._path_row(self.dataset_edit, "选择原始图像数据集"), 3, 1
+        self.dataset_label = QtWidgets.QLabel("原始图像数据集 *")
+        form.addWidget(self.dataset_label, 3, 0)
+        self.dataset_widget = self._path_row(
+            self.dataset_edit, "选择原始图像数据集"
         )
+        form.addWidget(self.dataset_widget, 3, 1)
         layout.addWidget(project)
 
         labels, label_layout = self._surface("标签")
@@ -264,6 +266,7 @@ class TrainingSetupWindow:
         self.source_combo.addItem("各病例目录内的 Mask", "dataset_masks")
         self.source_combo.addItem("此前导出的 Mask", "exported_masks")
         self.source_combo.addItem("从已保存的 .mcs 工程刷新", "mcs_refresh")
+        self.source_combo.addItem("工程体素（图像+标签均取自 .mcs）", "project_voxels")
         self.source_combo.currentIndexChanged.connect(self._refresh_source)
         label_layout.addWidget(QtWidgets.QLabel("标签来源"), 0, 0)
         label_layout.addWidget(self.source_combo, 0, 1)
@@ -732,17 +735,36 @@ class TrainingSetupWindow:
     def _refresh_source(self):
         source = str(self.source_combo.currentData() or "dataset_masks")
         exported = source == "exported_masks"
-        mcs = source == "mcs_refresh"
+        mcs = source in {"mcs_refresh", "project_voxels"}
+        project = source == "project_voxels"
         self.label_root_label.setVisible(exported)
         self.label_root_widget.setVisible(exported)
         self.mcs_label.setVisible(mcs)
         self.mcs_widget.setVisible(mcs)
+        self.dataset_label.setVisible(not project)
+        self.dataset_widget.setVisible(not project)
         hints = {
             "dataset_masks": "逐个读取病例文件夹，并匹配其 segmentations 子目录下的文件。",
             "exported_masks": "使用此前导出的原始网格 Mask，不启动 Mimics 导出过程。",
             "mcs_refresh": "只从已保存的工程导出配置的 Mask 名称，再对照每个原始图像校验。",
+            "project_voxels": (
+                "不需要原始图像数据集：病例就是已保存的 .mcs 工程，"
+                "图像与标签都由 Mimics 从工程中导出。"
+            ),
         }
         self.source_hint.setText(hints[source])
+        selector = getattr(self, "remote_selector", None)
+        if selector is None:
+            return
+        if project:
+            # D28 首期仅本机执行：远程上传路径尚未覆盖工程体素 raw 文件。
+            # 先把选择切回本机，避免禁用后仍带着远程配置提交。
+            selector.combo.setCurrentIndex(0)
+            selector.group.setEnabled(False)
+            selector.hint.setText("工程体素模式首期仅支持本机训练。")
+        else:
+            selector.group.setEnabled(True)
+            selector._refresh_hint()
 
     def _refresh_configuration(self):
         configuration = str(self.configuration_combo.currentData() or "3d_fullres")
@@ -918,7 +940,14 @@ class TrainingSetupWindow:
 
             def validate():
                 try:
-                    if not Path(request["dataset_root"]).is_dir():
+                    if request["label_source"] == "project_voxels":
+                        # D28: 没有原始图像数据集——病例就是 .mcs 工程本身。
+                        mcs_dir = Path(request["mcs_dir"])
+                        if not mcs_dir.is_dir() or not any(mcs_dir.glob("*.mcs")):
+                            raise ValueError(
+                                "已保存 .mcs 的文件夹不存在或其中没有 .mcs 工程文件。"
+                            )
+                    elif not Path(request["dataset_root"]).is_dir():
                         raise ValueError("原始图像数据集不存在。")
                     if request["label_source"] == "exported_masks" and not Path(
                         request["label_root"]
