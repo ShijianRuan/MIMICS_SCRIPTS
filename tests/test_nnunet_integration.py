@@ -4864,6 +4864,177 @@ class ProjectVoxelsTrainingTests(unittest.TestCase):
                 self.prepare(request)
         self.assertIn(reason, str(ctx.exception))
 
+    # --- R97 P1-1: a project without the requested saved Mask must skip the
+    # case with its reason (FlexiCT/nnU-Net UI promise), not abort training.
+
+    def launch_stub(self, batch_status, job_runtime=None):
+        """Mock launch_mimics_export, capturing the kwargs it was called with."""
+        import tools.mimics_label_export as label_export
+
+        captured = {}
+
+        def fake_launch(*args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return {
+                "launched": True,
+                "returncode": 0,
+                "job_runtime": job_runtime or "",
+                "batch_status": batch_status,
+            }
+
+        return captured, mock.patch.object(
+            label_export, "launch_mimics_export", side_effect=fake_launch
+        )
+
+    def run_export(self, request):
+        return pipeline._export_mcs_labels(
+            request,
+            ["case_a", "case_b", "case_c"],
+            self.root / "staging",
+            self.root / "job_status.json",
+            self.root / "control.json",
+        )
+
+    def test_missing_mask_project_skips_with_reason_not_fatal(self):
+        runtime_dir = self.root / "runtime"
+        runtime_dir.mkdir()
+        (runtime_dir / "_skipped_exports.json").write_text(
+            json.dumps({
+                "count": 1,
+                "skipped": [{
+                    "case_id": "case_c",
+                    "reason": "image_export_unavailable",
+                }],
+            }),
+            encoding="utf-8",
+        )
+        captured, patcher = self.launch_stub(
+            {
+                "status": "closed",
+                "phase": "completed",
+                "mask_validation_skipped": [{
+                    "case_id": "case_b",
+                    "reason": "no saved mask matched",
+                    "available_masks": ["bone"],
+                }],
+            },
+            job_runtime=str(runtime_dir),
+        )
+        with patcher:
+            _, runtime_skips = self.run_export(self.request())
+        # project_voxels asks the runtime to skip unlabeled projects so one
+        # missing Mask cannot abort the whole training run.
+        self.assertIs(True, captured["skip_projects_without_requested_mask"])
+        # Both skip channels (mask preflight via batch status, staging-time
+        # skips via _skipped_exports.json) must surface per-case reasons.
+        self.assertEqual(
+            {
+                "case_b": "no saved mask matched",
+                "case_c": "image_export_unavailable",
+            },
+            runtime_skips,
+        )
+
+    def test_mcs_refresh_keeps_strict_mask_preflight(self):
+        request = common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "肝脏",
+                "task_id": "liver",
+                "label_source": "mcs_refresh",
+                "dataset_root": str(self.root),
+                "mcs_dir": str(self.mcs_dir),
+                "workspace": str(self.root / "workspace"),
+                "labels": [{"name": "liver", "id": 1}],
+            }
+        )
+        captured, patcher = self.launch_stub({"status": "closed"})
+        with patcher:
+            pipeline._export_mcs_labels(
+                request,
+                ["case_a"],
+                self.root / "staging",
+                self.root / "job_status.json",
+                self.root / "control.json",
+            )
+        # The pre-existing mcs_refresh behavior must stay byte-identical: a
+        # missing saved Mask is a hard preflight failure there.
+        self.assertIs(False, captured["skip_projects_without_requested_mask"])
+
+    def test_all_projects_missing_mask_reports_runtime_verdict(self):
+        verdict = (
+            "None of the selected .mcs projects is usable for the requested "
+            "saved Mask: liver."
+        )
+        captured, patcher = self.launch_stub(
+            {"status": "failed", "phase": "mask_name_preflight", "error": verdict}
+        )
+        with patcher:
+            with self.assertRaisesRegex(RuntimeError, "usable for the requested") as ctx:
+                self.run_export(self.request())
+        # The runtime's own verdict must reach the annotator, not just a
+        # diagnostics path they would have to open manually.
+        self.assertIn("Diagnostics", str(ctx.exception))
+
+    # --- R97 P2-1/P2-2: a per-case export failure must surface its real
+    # error. The runtime records it in _failed_exports/*.json and the batch
+    # still closes with returncode 0, so the tools side has to read that
+    # channel — otherwise the case silently washes down to a generic
+    # "missing export" skip reason.
+
+    def test_failed_case_export_reads_failed_exports_channel(self):
+        failed_dir = self.root / "runtime" / "_failed_exports"
+        failed_dir.mkdir(parents=True)
+        (failed_dir / "case_a_labels.json").write_text(
+            json.dumps({
+                "case_id": "case_a",
+                "phase": "labels",
+                "error": "Mimics ran out of memory",
+            }),
+            encoding="utf-8",
+        )
+        captured, patcher = self.launch_stub(
+            {"status": "closed", "phase": "completed"},
+            job_runtime=str(self.root / "runtime"),
+        )
+        with patcher:
+            _, runtime_skips = self.run_export(self.request())
+        self.assertEqual(
+            {"case_a": "export_failed: Mimics ran out of memory"},
+            runtime_skips,
+        )
+
+    def test_failed_label_export_case_skips_with_real_reason(self):
+        # Image export landed, label export died: the case must be skipped
+        # with the runtime's error, never as a bare "labels_not_found".
+        request = self.request()
+        reason = "export_failed: Mimics ran out of memory"
+
+        def fake(request_, case_ids, staging, status_path, control_path):
+            staging.mkdir(parents=True, exist_ok=True)
+            for case_id in case_ids:
+                self.stage_case(staging, case_id)
+            import shutil
+
+            shutil.rmtree(str(staging / "case_a" / "segmentations"))
+            return staging, {"case_a": reason}
+
+        with mock.patch.object(pipeline, "_export_mcs_labels", side_effect=fake):
+            rows = self.prepare(request)
+        self.assertEqual({"case_b", "case_c"}, {row["case_id"] for row in rows})
+        status = json.loads(
+            (self.root / "out" / "status.json").read_text(encoding="utf-8")
+        )
+        details = status.get("skipped_case_details") or []
+        self.assertTrue(
+            any(
+                item.get("case_id") == "case_a" and item.get("reason") == reason
+                for item in details
+            ),
+            "the real export error must surface, not labels_not_found",
+        )
+
     def test_reexported_identical_raw_hits_content_addressed_cache(self):
         request = self.request()
         with mock.patch.object(

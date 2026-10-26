@@ -585,6 +585,7 @@ class TrainingSetupWindow:
         if project:
             self.cases_hint.setText(
                 "病例就是已保存的 .mcs 工程：图像与标签都由 Mimics 从工程中导出，"
+                "只读取该文件夹顶层的 .mcs（不含子文件夹）；"
                 "缺少标签的工程在训练时自动跳过并写明原因。"
             )
         else:

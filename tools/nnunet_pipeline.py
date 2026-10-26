@@ -500,7 +500,11 @@ def _export_mcs_labels(
         mask_names=aliases,
         target_mask_name=None,
         mcs_output_dir=mcs_dir,
-        skip_projects_without_requested_mask=False,
+        # project_voxels honors the UI promise (FlexiCT training hint): a
+        # project without the requested saved Mask is skipped with a recorded
+        # reason instead of aborting the whole training run. mcs_refresh keeps
+        # the strict preflight so its behavior is unchanged.
+        skip_projects_without_requested_mask=project_voxels,
         skip_invalid_projects=True,
         export_project_images=project_voxels,
     )
@@ -512,23 +516,42 @@ def _export_mcs_labels(
         or str(batch.get("status") or "").lower() in {"failed", "stopping"}
     )
     if failed:
+        # Surface the runtime's own verdict (e.g. "None of the selected .mcs
+        # projects is usable for the requested saved Mask: ...") so the
+        # annotator reads the real cause, not just a diagnostics path.
+        detail = str(batch.get("error") or "").strip()
         raise RuntimeError(
-            "Mimics label export did not complete. Diagnostics: {}".format(
-                result.get("job_runtime") or result.get("log") or staging_root
+            "Mimics label export did not complete. {}Diagnostics: {}".format(
+                detail + " " if detail else "",
+                result.get("job_runtime") or result.get("log") or staging_root,
             )
         )
     _raise_if_cancelled(control_path)
     runtime_skips: dict[str, str] = {}
     if project_voxels:
-        # Per-case skip reasons recorded by the runtime (e.g. a project
-        # without the import-time grid snapshot) so the pipeline can name
-        # the real cause instead of a generic "missing export".
-        skip_report = read_json(
-            Path(str(result.get("job_runtime") or "")) / "_skipped_exports.json", {}
-        ) or {}
+        # Per-case skip reasons recorded by the runtime (a project without the
+        # requested saved Mask or without the import-time grid snapshot) so
+        # the pipeline can name the real cause instead of a generic "missing
+        # export". Mask-preflight skips are reported in the final batch
+        # status; staging-time skips in _skipped_exports.json; per-case export
+        # failures in _failed_exports/*.json (a failed case must not silently
+        # wash down to "missing export" when the batch still closes).
+        for row in batch.get("mask_validation_skipped") or []:
+            if row.get("case_id") and row.get("reason"):
+                runtime_skips[str(row["case_id"])] = str(row["reason"])
+        job_runtime = Path(str(result.get("job_runtime") or ""))
+        skip_report = read_json(job_runtime / "_skipped_exports.json", {}) or {}
         for row in skip_report.get("skipped") or []:
             if row.get("case_id") and row.get("reason"):
                 runtime_skips[str(row["case_id"])] = str(row["reason"])
+        failed_dir = job_runtime / "_failed_exports"
+        if failed_dir.is_dir():
+            for path in sorted(failed_dir.glob("*.json")):
+                row = read_json(path, {}) or {}
+                if row.get("case_id") and (row.get("error") or row.get("phase")):
+                    runtime_skips[str(row["case_id"])] = "export_failed: {}".format(
+                        row.get("error") or row.get("phase")
+                    )
     return staging_root, runtime_skips
 
 
@@ -797,7 +820,10 @@ def prepare_source_grid_cases(
             seen.add(name)
             case_names.append(name)
         if not case_names:
-            raise RuntimeError("No .mcs projects were found in {}.".format(mcs_dir))
+            raise RuntimeError(
+                "No .mcs projects were found in {} (only the folder's top "
+                "level is scanned; .mcs files in subfolders are ignored).".format(mcs_dir)
+            )
         case_entries: list[tuple[str, Path | None]] = [
             (name, None) for name in case_names
         ]
@@ -902,8 +928,11 @@ def prepare_source_grid_cases(
         if missing:
             skipped.append(
                 {
+                    # project_voxels: a case whose export failed mid-way (image
+                    # landed, labels did not) carries the runtime's real error
+                    # in runtime_skips — prefer it over the generic code.
                     "case_id": case_id,
-                    "reason": "labels_not_found",
+                    "reason": runtime_skips.get(case_id) or "labels_not_found",
                     "labels": missing,
                 }
             )

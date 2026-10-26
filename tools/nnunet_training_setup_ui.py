@@ -750,6 +750,7 @@ class TrainingSetupWindow:
             "project_voxels": (
                 "不需要原始图像数据集：病例就是已保存的 .mcs 工程，"
                 "图像与标签都由 Mimics 从工程中导出。"
+                "只读取该文件夹顶层的 .mcs（不含子文件夹）。"
             ),
         }
         self.source_hint.setText(hints[source])
