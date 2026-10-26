@@ -127,23 +127,39 @@ class TestJobPreflight(unittest.TestCase):
 
     def test_project_voxels_remote_training_rejected_before_job_dir(self):
         # D28：远程上传路径尚未覆盖工程导出的图像 raw，必须在任何 job 工件
-        # 产生之前拒绝，不留 launching 幽灵。
+        # 产生之前拒绝，不留 launching 幽灵。nnU-Net 与 FlexiCT 两个创建器
+        # 都要拦（FlexiCT 训练数据准备复用同一条 project_voxels 管线）。
+        import flexict_pipeline
         with tempfile.TemporaryDirectory() as tmp:
             values={'workspace':tmp,'operation':'train','label_source':'project_voxels','mcs_dir':tmp,'labels':[{'name':'target','id':1}],'execution_backend':'remote','remote_profile_id':'srv','job_id':'pv_remote'}
             with mock.patch.object(jobs,'_launch') as launch:
                 with self.assertRaisesRegex(RuntimeError,'工程体素训练模式首期仅支持本机'):jobs.create_job(values)
             self.assertFalse((Path(tmp)/'jobs'/'pv_remote').exists())
             launch.assert_not_called()
+        with tempfile.TemporaryDirectory() as tmp:
+            values={'workspace':tmp,'operation':'train','task_name':'Kidney','label_name':'kidney_left','cases':['case01','case02'],'label_source':'project_voxels','mcs_dir':tmp,'dataset_id':750,'configuration':'2d','epochs':2,'val_cases':1,'mimics_exe':'','execution_backend':'remote','remote_profile_id':'srv'}
+            with mock.patch('flexict_pipeline.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(RuntimeError,'工程体素训练模式首期仅支持本机'):flexict_pipeline.create_flexict_job(values)
+            self.assertEqual([], list(Path(tmp).rglob('*train*')))
+            popen.assert_not_called()
 
     def test_project_voxels_active_learning_rejected_before_job_dir(self):
         # D28：主动学习排序硬性依赖 dataset_root 下的原图病例，工程体素模式
-        # 没有该数据集——同样必须在 mkdir 之前拒绝。
+        # 没有该数据集——同样必须在 mkdir 之前拒绝。FlexiCT 的主动学习
+        # 也走 create_flexict_job，同样必须拦下。
+        import flexict_pipeline
         with tempfile.TemporaryDirectory() as tmp:
             values={'workspace':tmp,'operation':'active_learning','label_source':'project_voxels','mcs_dir':tmp,'execution_backend':'local','job_id':'pv_al'}
             with mock.patch.object(jobs,'_launch') as launch:
                 with self.assertRaisesRegex(RuntimeError,'暂不支持主动学习'):jobs.create_job(values)
             self.assertFalse((Path(tmp)/'jobs'/'pv_al').exists())
             launch.assert_not_called()
+        with tempfile.TemporaryDirectory() as tmp:
+            values={'workspace':tmp,'operation':'active_learning','label_source':'project_voxels','mcs_dir':tmp,'execution_backend':'local'}
+            with mock.patch('flexict_pipeline.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(RuntimeError,'暂不支持主动学习'):flexict_pipeline.create_flexict_job(values)
+            self.assertEqual([], list(Path(tmp).rglob('*active_learning*')))
+            popen.assert_not_called()
 
 class TestBatchJobIdentity(unittest.TestCase):
     def test_cli_chinese_cases_get_distinct_ids_in_same_second(self):
