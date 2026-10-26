@@ -956,6 +956,7 @@ def launch_mimics_export(
     mcs_output_dir=None,
     skip_projects_without_requested_mask=False,
     skip_invalid_projects=False,
+    export_project_images=False,
 ):
     mimics_exe = find_mimics_exe(mimics_exe)
     if not mimics_exe:
@@ -1012,6 +1013,21 @@ def launch_mimics_export(
         export_config["target_mask_name"] = str(target_mask_name).strip()
     if label_staging_dir:
         export_config["label_staging_dir"] = str(label_staging_dir)
+    if export_project_images:
+        # D28 project-voxel training: the source image dataset does not exist,
+        # so the runtime cannot discover case directories under ts_root. Inject
+        # the per-case staging directories instead (the runtime only accepts
+        # mappings that already exist on disk) and ask it to stream each
+        # project's image buffer next to the labels.
+        if not label_staging_dir:
+            raise ValueError("export_project_images requires label_staging_dir.")
+        case_dirs = {}
+        for case_id in sorted(str(name) for name in (cases or [])):
+            case_dir = label_staging_dir / case_id
+            case_dir.mkdir(parents=True, exist_ok=True)
+            case_dirs[case_id] = str(case_dir)
+        export_config["case_dirs"] = case_dirs
+        export_config["project_image_export"] = True
     write_json_atomic(config_path_write, export_config)
     runner = export_root / "run_export_batch.py"
     write_text_atomic(

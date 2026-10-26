@@ -1291,11 +1291,14 @@ def _derive_mimics_voxel_to_ras_matrix(image, image_shape):
 
 
 def export_masks_to_buffers(
-    buffers_dir, mask_names=None, target_mask_name=None, skip_voxel_data=False
+    buffers_dir, mask_names=None, target_mask_name=None, skip_voxel_data=False,
+    image_export_path=None,
 ):
     """Export all masks from current Mimics project as .u8 files.
 
-    Returns manifest dict.
+    Returns manifest dict. With image_export_path, also streams the selected
+    image's voxel buffer to that path and records the export payload under
+    manifest["image_export"] (D28: project-voxel training input).
     """
     if not os.path.isdir(buffers_dir):
         os.makedirs(buffers_dir)
@@ -1346,6 +1349,7 @@ def export_masks_to_buffers(
 
     # A filter can select a later image in a multi-image project. Geometry
     # belongs to the selected masks, not the project's first unrelated mask.
+    img = None
     if selected:
         try:
             img = selected[0].image
@@ -1373,6 +1377,17 @@ def export_masks_to_buffers(
             print("image dimensions: {0}".format(dims))
         except Exception as e:
             print("could not read image dimensions: {0}".format(e))
+            img = None
+
+    if image_export_path and img is not None:
+        # D28 project-voxel training: the image voxels are part of the export
+        # too. Reuse the nnInteractive streaming exporter (16 MB chunks with
+        # GUI pumping) so a large volume never blocks the Mimics UI.
+        import nninteractive_mimics
+
+        manifest["image_export"] = nninteractive_mimics._export_image(
+            img, image_export_path
+        )
 
     # F32: different original names can sanitize to the same file stem
     # ("liver manual" and "liver_manual" both -> liver_manual.u8), silently
@@ -2836,6 +2851,34 @@ def _launch_external_export_setup():
 
 # -- Single case export -------------------------------------------------
 
+def _write_image_export_manifest(manifest, dest_path):
+    """D28: persist the project-voxel image export payload for the tools side.
+
+    The bridge reports the sha256 with a "sha256:" prefix while the tools side
+    compares bare hex, so strip it here. The import-time grid snapshot is
+    stored parsed (shape as int list, matrix as 4x4 float list) — mcs metadata
+    values arrive as JSON text — under "expected_grid", because the training
+    pipeline must materialize the image onto exactly the grid the labels were
+    resampled to.
+    """
+    payload = dict(manifest.get("image_export") or {})
+    sha = str(payload.get("sha256") or "")
+    if sha.startswith("sha256:"):
+        payload["sha256"] = sha[len("sha256:"):]
+    expected_shape = []
+    try:
+        expected_shape = [int(v) for v in json.loads(manifest.get("source_image_shape") or "")]
+    except Exception:
+        expected_shape = []
+    payload["expected_grid"] = {
+        "source_shape": expected_shape,
+        "source_voxel_to_ras_matrix": _parse_matrix_metadata(
+            manifest.get("source_voxel_to_ras_matrix")
+        ),
+    }
+    _write_json_atomic(dest_path, payload)
+
+
 def _export_masks_and_build_params(
     case_dir,
     axes,
@@ -2850,6 +2893,7 @@ def _export_masks_and_build_params(
     source_mask_root=None,
     case_id=None,
     export_formats=None,
+    image_export_path=None,
 ):
     """Export masks to .u8 buffers and build bridge params. Returns (bridge_params, manifest) or None."""
     print("Exporting masks to: {0}".format(case_dir))
@@ -2871,6 +2915,7 @@ def _export_masks_and_build_params(
         mask_names=mask_names,
         target_mask_name=target_mask_name,
         skip_voxel_data=bool(canonical_root),
+        image_export_path=image_export_path,
     )
 
     if not manifest["masks"]:
@@ -3207,6 +3252,7 @@ def run_background_batch_export(config_path):
         mask_names = [mask_names]
     source_mask_root = str(config.get("source_mask_root") or "").strip()
     target_mask_name = str(config.get("target_mask_name") or "").strip()
+    project_image_export = bool(config.get("project_image_export", False))
     export_formats = config.get("export_formats") or []
     if isinstance(export_formats, str):
         export_formats = [export_formats]
@@ -3448,6 +3494,14 @@ def run_background_batch_export(config_path):
                     output_seg_dir = os.path.join(label_staging_dir, case_id, "segmentations")
                 elif label_output_root:
                     output_seg_dir = os.path.join(label_output_root, case_id, "segmentations")
+                image_export_path = None
+                if project_image_export and label_staging_dir:
+                    # D28 project-voxel training: stream the image voxels next
+                    # to the labels in the per-case staging directory.
+                    image_case_dir = os.path.join(label_staging_dir, case_id)
+                    if not os.path.isdir(image_case_dir):
+                        os.makedirs(image_case_dir)
+                    image_export_path = os.path.join(image_case_dir, "image.raw")
                 built = _export_masks_and_build_params(
                     case_dir,
                     axes,
@@ -3462,6 +3516,7 @@ def run_background_batch_export(config_path):
                     source_mask_root=source_mask_root,
                     case_id=case_id,
                     export_formats=export_formats,
+                    image_export_path=image_export_path,
                 )
                 try:
                     mimics.file.close_project()
@@ -3482,6 +3537,49 @@ def run_background_batch_export(config_path):
                         completed += 1
                     continue
                 bridge_params, manifest = built
+                if image_export_path is not None:
+                    # D28: a project without the import-time grid snapshot
+                    # would make the bridge answer source_geometry_unavailable,
+                    # and the batch would then sit in the degraded-confirmation
+                    # wait (7-day timeout) with nobody watching a training-side
+                    # run. The same snapshot defines the grid the image must be
+                    # materialized on, so a missing snapshot or a failed image
+                    # stream skips the case with a recorded reason instead.
+                    snapshot_ready = bool(
+                        str(manifest.get("source_image_shape") or "").strip()
+                        and str(manifest.get("source_voxel_to_ras_matrix") or "").strip()
+                        and _parse_matrix_metadata(
+                            manifest.get("source_voxel_to_ras_matrix")
+                        )
+                        is not None
+                    )
+                    if not snapshot_ready or not manifest.get("image_export"):
+                        reason = (
+                            "image_export_unavailable"
+                            if not manifest.get("image_export")
+                            else "source_geometry_unavailable"
+                        )
+                        skipped_exports.append(
+                            {
+                                "case_id": case_id,
+                                "mask_name": "",
+                                "path": mcs_path,
+                                "reason": reason,
+                                "per_format_action": {},
+                            }
+                        )
+                        _append_export_log(
+                            export_root,
+                            "{0}: skipped project-voxel image export: {1}.".format(
+                                case_id, reason
+                            ),
+                        )
+                        _cleanup_work_dir(work_dir)
+                        continue
+                    _write_image_export_manifest(
+                        manifest,
+                        os.path.join(label_staging_dir, case_id, "image_export.json"),
+                    )
                 result = call_bridge(
                     bridge_params,
                     extra_env={
