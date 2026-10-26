@@ -15,6 +15,80 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R95（2026-10-26 用户拍板：D20 无原图机子上的 nnU-Net/FlexiCT 预测）
+
+> D20 卡片用户拍板"要"。设计经两轮代码追踪 + Plan 代理验证：预测落
+> **快照网格**，下游契约（source_geometry_expected 校验、输出网格检查、
+> publish_prediction_output、桥接回叠、陈旧元数据修复流）全部原封不动，
+> 唯一改变输入 NIfTI 的产生方式。首期仅本机执行，远程后端在任务创建
+> 之前明确拒绝（中文报错，不留半成品 job 目录）。
+
+- [x] **R95-1【P1】D20 分发工程（无原图）无法跑 nnU-Net/FlexiCT 预测**
+  〔用户 2026-10-26 拍板立项，当轮解决〕：
+  痛点：A 用管线转好 .mcs 分发给 B，B 机子源影像文件不可达 → 预测
+  设置 UI 直接拒绝；但预测输入是图像体素，工程内已有完整体素数据，
+  缺原图不应影响预测（"没有原图影响使用是不合理的"）。
+  根因：预测管线只从源**文件**读取输入体素，从未接通"工程内体素"
+  通道。
+  影响视角：拿到分发 mcs 的标注者（AI 预测不可用，只能回 A 机要原图）。
+  验收标准（写入后不放宽）：
+  ①死源路径 + 工程带网格快照（source_image_shape +
+  source_voxel_to_ras_matrix）→ 预测设置 UI 不因源路径不存在拒绝，
+  请求携带 project_image_export 载荷且 execution_backend 仅本机
+  （远程选择器禁用并提示）；②远程后端在 job 目录创建**之前**被拒，
+  无半成品目录；③raw 移入 job_dir/input/project_image.raw 并校验
+  sha256，失配清目录报错；④物料化 NIfTI 落快照网格
+  （validate_materialized_source_geometry 通过），活体网格≠快照时
+  重采样（CT 填 -1024/MR 填 0）；⑤无快照工程（手建）行为逐字节不变
+  （原中文错误文案保留）；⑥buffer 模式预测完成后回写不挂死；⑦大
+  buffer 流式分块导出并泵 GUI（复用 _export_image 16MB 分块）。
+  〔当轮解决，commits `d98e530`（runtime 导出辅助
+  _export_project_image_for_prediction（lazy import 防环、OSError 回落
+  原错误）+ 双 _prediction_context 回退 + 回写门 _monitor_target_is_open
+  buffer 模式跳过 ts_root/case 比对（活体网格与 launch 工程路径两项真
+  安全检查保留）+ 重启恢复 monitor 键）+ `71d08d6`（双 job 创建器：
+  远程在 mkdir 前拒绝 + raw custody 移交 adopt_project_image_buffer；
+  共享物料化 materialize_project_image_buffer：字节数/sha256 双校验 →
+  强度恢复（CT 活体 HU2GV 反演 / MR 导入期 rescale，含 zero_tolerance）
+  → 快照网格 NIfTI，网格恒等走快路、否则 resample_image_to_grid 重采样）
+  + `37b3f22`（双预测 UI：validate 跳过死路径、体素模式标签、远程禁用
+  提示；取消路径由既有 _sweep_stale_setup_files 7 天清扫，零新增清理
+  代码）+ `c00f606`（sha256 custody 格式对齐——runtime_common 摘要带
+  "sha256:" 前缀而 tools 侧比对裸 hexdigest，真实链路会必现"校验失败"；
+  test_all fakes 用例驱动真实导出链路暴露后单点归一化）+ `beee6d6`
+  （测试资产）。
+  测试（失败路径优先）：review_workflow_regressions
+  TestProjectBufferPrediction + TestJobPreflight 扩展（远程拒绝零 job
+  目录、sha256 失配清目录、死源无快照原文案不变、回写门开/关两分支）；
+  nnunet_integration ProjectBufferMaterializationTests（快照网格物料化、
+  活体≠快照重采样填充、短/坏 raw 各自中文报错）；ui_workflow_regressions
+  （双 UI 载荷透传/远程禁用/体素模式标签 + 无 buffer 死路径仍拒）；
+  test_all（CT/MR 强度恢复契约 + raw custody，MR 路径断言 HU2GV 不得
+  被调用）。
+  门禁：smoke 9/9（20261026T115518_smoke.json）、fast 33/33
+  （20261026T120453_fast.json）。实机端到端登记 R95-4。〕
+- [ ] **R95-2【P3】mimics_bridge._force_nifti_affine 对未压缩 .nii 同
+  路径重写失败（Windows/nibabel mmap）**〔R95 当轮发现〕：nib.load 对
+  未压缩 .nii 走 mmap，nib.save 同路径覆盖在 Windows 报 OSError
+  （Errno 22）。唯一调用方 resample_image_to_grid（mimics_bridge.py:1578）
+  的生产调用均传 .nii.gz（gzip 不 mmap，同路径安全），D20 恒等快路测试
+  踩到，属潜伏缺陷非在途 bug。最小方案：_force_nifti_affine 改临时文件
+  写后替换（镜像 publish 语义）；验收：未压缩 .nii 重采样单测通过。
+- [ ] **R95-3【P2】tests/test_ui_workflow_regressions.py 未注册进回归
+  矩阵**〔R95 当轮发现〕：4af0393（2026-10-25）把 _selected_case 契约
+  改为读 column-1 UserRole，当轮即打破该套件 1 项测试；因套件不在
+  run_regression_matrix.py 的 SUITES 名单，门禁零告警逃逸两天，本轮
+  跑全套件才暴露（3877f45 修测试跟契约）。最小方案：SUITES 注册
+  ui_workflow_regressions（fast/full）；验收：--profile fast 名单出现
+  该套件且当轮全绿。
+- [ ] **R95-4 D20 实机端到端验证（RTX 3060 本机，L5 人工项）**：管线
+  创建的 .mcs 复制到脱离数据集的目录、源路径不可达 → nnU-Net 与
+  FlexiCT 预测各自走通（窗口提示体素模式 → 预测完成 → mask 叠加回
+  工程），网格恒等快路无重采样损失。代码与门禁层已闭环，此项需真实
+  Mimics 实例（TEST_STRATEGY.md L5 表已 +1 行）。
+- 红线核查：未用远程服务器；Z 盘数据集未触碰；python_env 未改动。
+- 净代码变化见复杂度账本 R95 行。
+
 ### R93（2026-10-25 用户立项：nnU-Net 路径接入不确定度主动学习 · k 折分歧排序 · 完整闭环）
 
 - [x] **R93-1【P1·功能闭环】通用 nnU-Net 路径没有不确定度主动学习步骤**：
@@ -3499,6 +3573,12 @@ commits `201b516` / `0be6ba5` / `a2d3244` / `afff2bc`，smoke 8/8
   激活工程带网格快照时，走"从工程导出临时 buffer → 按快照网格对齐 →
   喂预测"通道；复用 R94-2 的快照元数据与 `_stream_mask_to_file` 同族
   的体素流；预估 100-200 行，触及预测设置 UI 与两条预测管线。
+  〔✅ 2026-10-26 用户拍板"要"，R95 当轮解决：commits `d98e530` +
+  `71d08d6` + `37b3f22` + `c00f606` + `beee6d6`；预测落快照网格，
+  下游契约全部不动，唯一改变输入 NIfTI 的产生方式；首期仅本机执行，
+  远程在 job 目录创建前拒绝。门禁 smoke 9/9（20261026T115518）、
+  fast 33/33（20261026T120453）。实机端到端登记 R95-4。详见待办区
+  R95-1。〕
 
 ### 需求缺口提案（R1 需求视角审计，均 P2 建议、未立项不实施）
 

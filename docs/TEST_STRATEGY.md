@@ -97,6 +97,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 | SLIP 分发包人工检查（R91-5/SL05） | 打包标准与 with-env 合成包各一并解压 | 包内含根级 slip_bridge.py；完整 SLIP 发布模式含可校验的 slip_models 资源；缺件时解压预检明示缺失项而非报发布成功 |
 | SLIP 无 GPU 机器拒绝路径（R91-6/SL06） | 在无 CUDA 的机器上跑 SLIP/01_Annotate 入口 | 在创建草稿/导出缓冲之前被明确拒绝并提示需要 CUDA GPU，不产生任何半途产物 |
 | nnU-Net AL 端到端（R93-1） | nnU-Net 训练窗对 Totalsegmentator 只读小子集逐折训练 2 折 → `02_AI/nnUNet/05_Active_Learning_Review` 排序未标注池 → 复核窗口双击开病例/叠加不确定度带/标记状态 | ranking.csv 排序合理；不确定度双带出现在 Mimics；annotation_state.json 状态回流；全程不写源数据集路径 |
+| 分发工程预测（D20/R95-4） | 管线创建的 .mcs 复制到脱离数据集的目录（源路径不可达）→ nnU-Net 与 FlexiCT 预测各跑 1 例 | 预测窗口提示体素模式（仅本机）；预测完成 mask 叠加回工程；网格恒等快路无重采样损失；job 目录 input/ 内含 project_image.raw |
 
 ## 资源清单（运行测试需要什么）
 
