@@ -15,6 +15,75 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R97（2026-10-26 用户指令：训练/远程训练/.mcs 工程训练独立审计并自主修复）
+
+> 用户原话："请你好好独立代理检查这些训练功能远程训练mcs是否还有卡点和
+> 痛点或者错误请你优化和解决"、"不用询问我自主解决"。两轮审计：远程训练
+> 侧 6 处（83e6b6d 已闭环）；工程体素（project_voxels）训练侧 9 处，逐处
+> 亲验源码后修复 4 处、判不成立 3 处、登记待办 1 处、信息性 1 处。
+
+**已解决 A：远程训练侧 6 处（commit 83e6b6d，2026-10-26）**
+
+- P3-1/P3-3 create_flexict_job 预检在 status.json 写盘后 + 不拒绝
+  active_learning+remote → launching 幽灵任务。全部拒绝移到 mkdir 前。
+- P3-2 Popen 失败直接抛出，status 停在 launching → 捕获后落
+  failed/launch_failed 再重抛。
+- P2-1 两查看器缺全部远程状态中文标签（16 词）→ 补齐 + 源码级测试锁定
+  （test_remote_controller_statuses_have_chinese_labels）。
+- P3-4/P3-5/P3-6 FlexiCT 计算页异常详情 / 远程拒绝文案出路 / reconcile
+  消息产品名插值。
+- 证据：门禁 4/4（工件 20261026T233926_fast.json）。
+
+**已解决 B：工程体素训练侧 4 处（commit 0d47f24 + 045c91f，2026-10-27）**
+
+- P1-1〔P1〕单个 .mcs 缺所请求 Mask 会中断整轮训练，违背 FlexiCT 训练窗
+  "缺少标签的工程在训练时自动跳过并写明原因"的承诺。根因：
+  `_export_mcs_labels` 对 project_voxels 仍传
+  `skip_projects_without_requested_mask=False` → 运行时 preflight 硬失败
+  → 整轮 RuntimeError。修复：project_voxels 传 True；mcs_refresh 保持
+  False（既有三种模式行为逐字节不变）。验收：单例缺 Mask 被跳过且带原因、
+  mcs_refresh 仍严格（test_missing_mask_project_skips_with_reason_not_fatal、
+  test_mcs_refresh_keeps_strict_mask_preflight）；全不可用时报运行时自己的
+  结论而非仅诊断路径（test_all_projects_missing_mask_reports_runtime_verdict）。
+- P2-1/P2-2〔P2〕单例导出中途失败（图像已落盘、标签未落）时批处理仍
+  returncode 0 关闭，病例被静默洗成泛化的"导出缺失"跳过码。根因：tools 侧
+  不读 `_failed_exports/*.json`。修复：tools 读齐三条通道
+  （mask_validation_skipped / _skipped_exports.json / _failed_exports），标签缺失分支优先采用真实原因。验收：
+  test_failed_case_export_reads_failed_exports_channel、
+  test_failed_label_export_case_skips_with_real_reason（commit 0d47f24）。
+- P2-4〔P2〕跳过原因在两个状态查看器不可见且为英文机器码。修复：状态页
+  按例列出跳过病例与中文原因（`_SKIP_REASON_LABELS`，>8 例折叠）。
+  验收：test_viewers_render_skipped_case_reasons_in_chinese（两查看器，
+  commit 045c91f）。
+- P3-3〔P3〕mcs_dir 只读顶层 .mcs，用户指向含子文件夹的目录时得到
+  "No .mcs projects were found" 无从理解。修复（纯文案）：两训练窗提示 +
+  管线报错均注明"只读取顶层（不含子文件夹）"。
+- 证据：`--profile fast` 34/34（工件 20261027T003840_fast.json）。首轮
+  20261027T002646 gui_smoke 出现一次性 0xC0000005 原生崩溃（崩溃点在
+  TestNNUNetActiveLearningWindow，字母序先于本轮新增测试；单独连跑 4 次
+  105/105 全绿；同类先例 20261017T182401 的 0xC0000409、20261025T205222
+  的负载相关断言失败，均为 R92-1 已登记的共享工作站环境噪声）。
+
+**判不成立（亲验源码后驳回，不修）**
+
+- P2-3 超时不可配：`label_export_timeout_seconds` 已是文档化配置键
+  （CONFIG_REFERENCE.md:262，默认 7200），非硬编码。
+- P3-1 快照 shape 校验：空 shape 只会让几何校验跳过（软降级不崩溃），
+  且损坏快照在 bridge 阶段报错后由本轮 P2-1 通道带原因呈现，无需新代码。
+- P3-2 缓存签名缺 dtype/shape：dtype/shape 是工程图像固有属性，同一
+  case_key 下相同 raw 字节必来自同一工程状态；标签另有内容寻址签名。
+  属防御式编程，按复杂度预算驳回。
+
+**待办（本轮登记不修）**
+
+- P3-4〔P3〕`background_mimics_lock_timeout_seconds` 默认 30s：后台 Mimics
+  被同目录其他批任务占用超过 30s 时训练标签导出失败（失败可见、可重试，
+  低频）。根因：请求路径的旋钮未文档化、UI 不暴露。验收标准（若立项）：
+  CONFIG_REFERENCE.md 记录该键 + 争用时状态页显示等待原因与剩余时间。
+- P3-5〔信息性〕mcs_dir 下与病例同名的子目录会遮蔽注入的 staging
+  case_dir（runtime :3309-3313）：实测良性——image.raw/标签仍写
+  label_staging_dir。不改；记录防将来误判。
+
 ### R96（2026-10-26 用户立项：D28 训练侧"工程体素模式"——无原图数据集，从 .mcs 工程取图像+标签训练）
 
 > R95（D20）交付预测侧工程体素模式后，用户追问训练 UI 仍默认要求原图
