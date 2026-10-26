@@ -89,6 +89,13 @@ class PredictionWindow:
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("case_id") or "-")), 0, 1)
         case_layout.addWidget(QtWidgets.QLabel("所选 Mask 提示"), 1, 0)
         case_layout.addWidget(QtWidgets.QLabel(str(context.get("selected_mask_name") or "-")), 1, 1)
+        if context.get("project_image_export"):
+            # D20: this machine has no source file; the project's own voxel
+            # buffer replaces it — say so instead of showing a dead path.
+            case_layout.addWidget(QtWidgets.QLabel("源影像"), 2, 0)
+            case_layout.addWidget(
+                QtWidgets.QLabel("工程内体素（原始影像文件不可达）"), 2, 1
+            )
         root.addWidget(case)
 
         self.models = []
@@ -111,6 +118,12 @@ class PredictionWindow:
             self.window, (self.QtCore, self.QtGui, self.QtWidgets)
         )
         root.addWidget(self.remote_selector.group)
+        if context.get("project_image_export"):
+            # D20 首期仅本机执行：远程上传路径尚未覆盖工程体素 raw 文件。
+            self.remote_selector.group.setEnabled(False)
+            self.remote_selector.hint.setText(
+                "工程体素模式首期仅支持本机执行。"
+            )
         self.status_label = QtWidgets.QLabel(
             "正在后台加载兼容模型..."
         )
@@ -285,17 +298,27 @@ class PredictionWindow:
                 raise RuntimeError(
                     "所选模型不可用：{0}".format(unusable_reason)
                 )
-            image_path = Path(
-                os.path.abspath(
-                    os.path.expandvars(
-                        os.path.expanduser(
-                            str(self.context.get("source_image_path") or "")
+            buffer_export = self.context.get("project_image_export") or None
+            if buffer_export:
+                # D20 buffer 模式：本机没有源文件，image_path 仅作占位；
+                # 体素 raw 文件随 project_image_export 一并移交任务。
+                image_path = Path("")
+            else:
+                image_path = Path(
+                    os.path.abspath(
+                        os.path.expandvars(
+                            os.path.expanduser(
+                                str(self.context.get("source_image_path") or "")
+                            )
                         )
                     )
                 )
-            )
             workspace = str(self.context.get("workspace") or Path.home() / ".mimics_script" / "nnunet")
-            backend, profile_id = self.remote_selector.selection()
+            if buffer_export:
+                # 远程选择器已禁用；首期仅本机执行。
+                backend, profile_id = "local", ""
+            else:
+                backend, profile_id = self.remote_selector.selection()
             request = {
                 "operation": "infer",
                 "workspace": workspace,
@@ -322,6 +345,8 @@ class PredictionWindow:
                 "target_grid": self.context.get("target_grid") or {},
                 "launch_project_path": self.context.get("launch_project_path") or "",
             }
+            if buffer_export:
+                request["project_image_export"] = buffer_export
             self._submission_generation += 1
             generation = self._submission_generation
             self._submission_deadline = time.time() + 60.0
@@ -333,7 +358,7 @@ class PredictionWindow:
 
             def validate():
                 try:
-                    if not image_path.exists():
+                    if not buffer_export and not image_path.exists():
                         raise RuntimeError(
                             "当前源图像不可用：{}".format(
                                 image_path
