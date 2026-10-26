@@ -50,7 +50,7 @@
 > 必须正确——GV 值训练会静默毁 CT 模型）；标签走既有快照网格导出，
 > `_materialize_case` 的 label→image 网格重采样不变。
 
-- [ ] **R96-1【P1】D28-1 nnU-Net 训练工程体素模式（第一轮）**：
+- [x] **R96-1【P1】D28-1 nnU-Net 训练工程体素模式（第一轮）**：
   痛点：拿到分发 .mcs 的标注者只能预测不能训练/微调，AI 闭环缺一半。
   根因：训练数据准备只从源文件取图像体素，病例枚举硬绑 dataset_root。
   影响视角：无原图机器上的标注者（训练入口完全不可用，只能回原机器）。
@@ -66,9 +66,39 @@
   ⑥远程后端在 job 目录创建之前明确拒绝（体素导出需本机 Mimics）；
   ⑦既有三种数据源模式行为逐字节不变；
   ⑧大 buffer 流式分块导出并泵 GUI（铁律 1）。
-- [ ] **R96-2【P1】D28-2 FlexiCT 训练工程体素模式（第二轮，含新建
+  〔当轮解决，commits `bee1aeb`（normalize 白名单放行 + dataset_root
+  规整空串 + 创建器 mkdir 前拒绝远程/主动学习）+ `9f6ad7b`（桥接层
+  export_project_images 默认 False 其余调用方零改动 + 运行时复用
+  nnInteractive 16MB 分块流式导出落 staging + 缺快照预检跳过，绝不落入
+  无人应答的 7 天 degraded 确认）+ `9ec2cb5`（prepare_source_grid_cases
+  新分支：枚举 .mcs 不触碰 dataset_root + 复用
+  materialize_project_image_buffer 物化到标签快照网格 + 缓存签名改 raw
+  内容 sha256，其余三模式契约 v4 逐字节不变）+ `d457b93`（训练 UI 第 4
+  种标签来源）+ `cbabcac`（四类回归测试）。
+  验收对照：①ui_workflow_regressions
+  test_project_voxels_training_submits_without_source_dataset（死数据集
+  路径提交成功且请求不含 dataset_root）；②③nnunet_integration
+  ProjectVoxelsTrainingTests.test_project_voxels_materializes_without_
+  source_dataset（物化落快照网格，CT/MR 强度恢复走 R95 同一
+  materialize_project_image_buffer）；④test_reexported_identical_raw_
+  hits_content_addressed_cache（新路径同内容必须命中缓存）；⑤
+  test_snapshotless_project_is_skipped_with_runtime_reason（跳过原因
+  透传运行时真实文案）+ test_all_cases_unusable_names_reasons（全不可用
+  中文报错）+ test_all 运行时 fake mimics 用例（缺快照预检跳过不进
+  degraded 等待）；⑥review_workflow_regressions
+  test_project_voxels_remote_training_rejected_before_job_dir（零 job
+  目录、_launch 未调）；⑦缓存签名断言（其余三模式契约 v4 键逐字节
+  不变）+ 既有套件全绿；⑧复用 _export_image 16MB 分块 + 泵 GUI（test_all
+  断言 image.raw 字节精确）。门禁：smoke 9/9（20261026T224600_smoke.json）、
+  full 35/35（20261026T223928_full.json）、fast 34/34
+  （20261026T230502_fast.json）。实机端到端登记 R96-3。〕
+- [x] **R96-2【P1】D28-2 FlexiCT 训练工程体素模式（第二轮，含新建
   .mcs 标签通道与 AL 池改造）**：FlexiCT 现状完全没有 .mcs 通道，
-  工作量最大。
+  工作量最大。〔实施核实：FlexiCT 训练数据准备本就走共享
+  nnunet_pipeline.prepare_source_grid_cases，normalize_flexict_request
+  委托 nnunet_common.normalize_request——project_voxels 请求**零管线
+  改动**即通，"新建 .mcs 标签通道"被共享分支覆盖，实际工作量集中在
+  扫描函数 + 训练窗入口。〕
   验收标准（写入后不放宽）：
   ①FlexiCT 训练窗新增从 .mcs 取图像+标签的通道，源数据集不可达时
   可扫描出病例清单；
@@ -79,10 +109,36 @@
   ⑤远程后端在 job 目录创建之前明确拒绝；
   ⑥既有数据集模式行为不变；
   ⑦大 buffer 流式分块导出并泵 GUI（铁律 1）。
+  〔当轮解决，commits `222b936`（create_flexict_job 在 mkdir 之前拒绝
+  远程与主动学习组合，中文说明）+ `d03dd2a`（scan_flexict_project_cases
+  枚举 .mcs + normalize 透传：project 模式 dataset_root 置空、mcs_dir
+  保留）+ `9b22afa`（训练窗第 2 种数据来源入口：数据集行隐藏、.mcs 行
+  必填、切换清旧表重扫、远程锁本机、settings 记输入框文本）。
+  验收对照：①TestScanFlexictProjectCases（排序枚举 + 中文拒绝）+
+  ui_workflow_regressions test_flexict_project_voxels_training_
+  submits_without_dataset（死数据集路径提交成功，请求 dataset_root=""
+  且 mcs_dir 保留）；②③零管线改动即复用 R96-1 全链路（无第二份
+  实现，d03dd2a..9b22afa 管线 diff 为 0 是证据）；④⑤
+  review_workflow_regressions test_project_voxels_remote_training_
+  rejected_before_job_dir / test_project_voxels_active_learning_
+  rejected_before_job_dir 的 FlexiCT 分支（零 job 工件、Popen 未调，
+  中文文案"首期仅支持本机"/"暂不支持主动学习"）；⑥normalize
+  test_project_voxels_request_requires_mcs_dir + UI 用例断言数据集
+  模式请求逐字节不变（label_source=dataset_masks、无 mcs_dir 键）；
+  ⑦同一运行时 16MB 分块导出链路（R96-1 ⑧证据共享）。
+  门禁：smoke 9/9（20261026T224600_smoke.json）、full 35/35
+  （20261026T223928_full.json，flexict_integration 153 用例含新增）、
+  fast 34/34（20261026T230502_fast.json）。
+  实机端到端并入 R96-3。〕
 - [ ] **R96-3 D28 实机端到端验证（L5 人工项）**：无原图机器上从分发
   .mcs 完成 nnU-Net 与 FlexiCT 各一轮训练冒烟（代码与门禁层闭环后登记
   TEST_STRATEGY.md L5 表）。
-- 红线核查：预计无需远程服务器与 Z 盘数据集；python_env 不改动。
+- 当轮另修（R96 当轮发现即修，commit `e7b12b5`，非 R96 回归——三处
+  全量门禁既有失败）：①test_all 冒烟注册表白名单漏 bcff48c 新增
+  flow_ 套件（slip_bridge 白名单同步）；②4af0393 引入的 AL 表
+  tuple 访问越界；③IT %TEMP% 清理与训练收敛冒烟互踩（清理路径
+  收窄）。修后 full 35/35。
+- 红线核查：未用远程服务器；Z 盘数据集未触碰；python_env 未改动。
 
 ### R95（2026-10-26 用户拍板：D20 无原图机子上的 nnU-Net/FlexiCT 预测）
 
@@ -143,13 +199,17 @@
   的生产调用均传 .nii.gz（gzip 不 mmap，同路径安全），D20 恒等快路测试
   踩到，属潜伏缺陷非在途 bug。最小方案：_force_nifti_affine 改临时文件
   写后替换（镜像 publish 语义）；验收：未压缩 .nii 重采样单测通过。
-- [ ] **R95-3【P2】tests/test_ui_workflow_regressions.py 未注册进回归
+- [x] **R95-3【P2】tests/test_ui_workflow_regressions.py 未注册进回归
   矩阵**〔R95 当轮发现〕：4af0393（2026-10-25）把 _selected_case 契约
   改为读 column-1 UserRole，当轮即打破该套件 1 项测试；因套件不在
   run_regression_matrix.py 的 SUITES 名单，门禁零告警逃逸两天，本轮
   跑全套件才暴露（3877f45 修测试跟契约）。最小方案：SUITES 注册
   ui_workflow_regressions（fast/full）；验收：--profile fast 名单出现
   该套件且当轮全绿。
+  〔R96 当轮解决，commit `240e052`：SUITES 注册 ui_workflow_regressions
+  （fast/full），test_all 注册表一致性测试（仅约束 smoke 白名单）不受
+  影响。验收：fast 名单出现该套件（34 套件）且当轮全绿——
+  20261026T230502_fast.json，34/34，ui_workflow_regressions 27.1s。〕
 - [ ] **R95-4 D20 实机端到端验证（RTX 3060 本机，L5 人工项）**：管线
   创建的 .mcs 复制到脱离数据集的目录、源路径不可达 → nnU-Net 与
   FlexiCT 预测各自走通（窗口提示体素模式 → 预测完成 → mask 叠加回
