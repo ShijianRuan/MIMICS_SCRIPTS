@@ -67,6 +67,14 @@ VAL_CASES = 1
 INFER_CASES = 1
 TOTAL_CASES = TRAIN_CASES + VAL_CASES + INFER_CASES
 
+# Scratch root for the whole run. NOT %TEMP%: IT cleanup on managed
+# workstations periodically purges %TEMP% and has killed multi-minute runs
+# mid-predict (FileNotFoundError on the predictor's own output, see the
+# TMP/TEMP comment in tools/nnunet_pipeline.py _spawn_worker). Keep the
+# workspaces under the project's runtime dir, which cleanup never touches.
+_SCRATCH_ROOT = ROOT / ".mimics_runtime" / "regression" / "convergence_tmp"
+_SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 def _gpu_available() -> bool:
     try:
@@ -252,7 +260,7 @@ class NnunetConvergenceSmoke(ConvergenceSmokeBase):
     def test_nnunet_train_infer_convergence(self):
         import torch
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=str(_SCRATCH_ROOT)) as tmp:
             dataset_root, case_ids = self._dataset_root(tmp)
             workspace = Path(tmp) / "workspace"
             request = {
@@ -383,7 +391,7 @@ class FlexictConvergenceSmoke(ConvergenceSmokeBase):
                 "the convergence smoke needs them."
             )
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=str(_SCRATCH_ROOT)) as tmp:
             dataset_root, case_ids = self._dataset_root(tmp)
             workspace = Path(tmp) / "workspace"
             request = {

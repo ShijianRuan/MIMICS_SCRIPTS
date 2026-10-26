@@ -8705,10 +8705,16 @@ class TestNewFeatures(unittest.TestCase):
         # 4. --only filtering with unknown names is rejected.
         with self.assertRaises(SystemExit):
             matrix.select_suites("fast", ["no_such_suite"])
-        # 5. The smoke profile is all flow groups: no long suite can sneak in.
+        # 5. The smoke profile stays quick: only flow groups and explicitly
+        # whitelisted short suites (slip_bridge since bcff48c, 9s). A new
+        # smoke member must consciously land here — no long suite sneaks in.
         self.assertTrue(
-            all(name.startswith("flow_") for name in smoke_names),
-            "smoke profile must only contain flow groups",
+            all(
+                name.startswith("flow_") or name in {"slip_bridge"}
+                for name in smoke_names
+            ),
+            "smoke profile must only contain flow groups and whitelisted "
+            "short suites",
         )
 
     def test_export_launcher_thread_registry_is_pruned(self):
@@ -19226,8 +19232,7 @@ class TestUiThemePalette(unittest.TestCase):
         path = os.path.join(PROJECT_ROOT, "tools", "flexict_active_learning_ui.py")
         with open(path, "r", encoding="utf-8") as handle:
             source = handle.read()
-        self.assertIn("setMinimumSectionSize(120)", source)
-        self.assertIn("setColumnWidth(3, 130)", source)
+        self.assertIn("((0, 64), (2, 108), (3, 145), (4, 88))", source)
 
     def test_al_ranking_submit_uses_single_queue_protocol(self):
         # R75 P1: _start_ranking put 3-tuples on _submit_results while the
