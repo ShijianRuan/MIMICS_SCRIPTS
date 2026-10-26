@@ -761,7 +761,10 @@ class TrainingSetupWindow:
             # 先把选择切回本机，避免禁用后仍带着远程配置提交。
             selector.combo.setCurrentIndex(0)
             selector.group.setEnabled(False)
-            selector.hint.setText("工程体素模式首期仅支持本机训练。")
+            selector.hint.setText(
+                "工程体素模式首期仅支持本机训练。"
+                "如需远程训练，请将数据来源切回数据集模式并填写原始图像数据集。"
+            )
         else:
             selector.group.setEnabled(True)
             selector._refresh_hint()

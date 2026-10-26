@@ -253,7 +253,9 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def reconcile_job_status(status_path: str | Path) -> dict[str, Any]:
+def reconcile_job_status(
+    status_path: str | Path, product: str = "nnU-Net"
+) -> dict[str, Any]:
     path = Path(status_path)
     status = read_json(path, {}) or {}
     state = str(status.get("status") or "").lower()
@@ -289,22 +291,19 @@ def reconcile_job_status(status_path: str | Path) -> dict[str, Any]:
             "status": "orphaned_remote",
             "phase": "controller_stopped",
             "message": (
-                "The local remote-task controller stopped unexpectedly. "
-                "Use Stop to clean up the remote container before retrying."
+                "本地远程任务控制器意外停止。请先使用「停止」清理远程容器后再重试。"
             ),
-            "error": "No local nnU-Net controller process is running.",
+            "error": "没有本地{}控制器进程在运行。".format(product),
         }
     else:
         values = {
             "status": "cancelled" if state == "cancelling" else "failed",
             "phase": "controller_stopped",
-            "message": (
-                "The nnU-Net background process stopped before recording completion."
-            ),
+            "message": "{}后台进程在记录完成前停止了。".format(product),
             "error": (
-                "The remote controller stopped before a remote job was launched."
+                "远程控制器在远程任务启动前停止了。"
                 if remote
-                else "No nnU-Net controller or worker process is running."
+                else "没有{}控制器或工作进程在运行。".format(product)
             ),
             "completed_at_epoch": time.time(),
         }

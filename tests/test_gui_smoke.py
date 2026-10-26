@@ -611,6 +611,34 @@ class TestViewerNonBlockingRefresh(unittest.TestCase):
         )
         window.window.close()
 
+    def test_remote_controller_statuses_have_chinese_labels(self):
+        """R97 P2-1：远程控制器写出的每个状态词都必须有中文标签。
+
+        漏一个（如 remote_control_unavailable），标注者在查看器里看到
+        的就是英文标题体回退文案，无从理解任务卡在哪一步。源码级断言，
+        防止 controller 以后新增状态时查看器漏更新。
+        """
+        import re
+
+        import flexict_status_viewer as flexict_viewer
+        import nnunet_status_viewer as nnunet_viewer
+
+        source = (ROOT / "tools" / "remote_training_controller.py").read_text(
+            encoding="utf-8")
+        literals = set(re.findall(r'\bstatus\s*=\s*"([a-z_]+)"', source))
+        literals.update(
+            re.findall(r'\["status"\]\s*=\s*"([a-z_]+)"', source))
+        self.assertTrue(
+            literals, "no status literals extracted — regex drifted?")
+        for module_name, labels in (
+            ("nnunet_status_viewer", nnunet_viewer._STATUS_LABELS),
+            ("flexict_status_viewer", flexict_viewer._STATUS_LABELS),
+        ):
+            missing = sorted(literals - set(labels))
+            self.assertEqual(
+                [], missing,
+                "{} 缺少中文状态标签：{}".format(module_name, missing))
+
     def test_nnunet_validation_dice_reads_fold_summary(self):
         """AUD 5.1: the models tab must surface the fold validation Dice
         (summary.json foreground_mean), not just creation time/usability."""

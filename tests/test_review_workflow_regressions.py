@@ -3,6 +3,7 @@
 No Mimics license, GPU, model downloads or patient data are used.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -160,6 +161,59 @@ class TestJobPreflight(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'暂不支持主动学习'):flexict_pipeline.create_flexict_job(values)
             self.assertEqual([], list(Path(tmp).rglob('*active_learning*')))
             popen.assert_not_called()
+
+    def test_flexict_remote_preflights_reject_before_job_dir(self):
+        # R97 P3-1/P3-3：FlexiCT 创建器此前在 status.json 写盘之后才查
+        # remote_profile_id，且不拒绝 active_learning+remote。两种都会留下
+        # 没有 PID 可对账的 "launching" 幽灵任务。必须与 nnunet_jobs.create_job
+        # 一样在任何 job 工件产生之前拒绝。
+        import flexict_pipeline
+        train_values = {'workspace': '', 'operation': 'train', 'task_name': 'Kidney',
+                        'label_name': 'kidney_left', 'cases': ['case01', 'case02'],
+                        'dataset_id': 750, 'configuration': '2d', 'epochs': 2,
+                        'val_cases': 1, 'mimics_exe': ''}
+        with tempfile.TemporaryDirectory() as tmp:
+            train_values['workspace'] = tmp
+            with mock.patch('flexict_pipeline.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(
+                        RuntimeError, 'Remote training server was not selected'):
+                    flexict_pipeline.create_flexict_job(
+                        dict(train_values, execution_backend='remote',
+                             remote_profile_id=''))
+            self.assertEqual([], list(Path(tmp).rglob('status.json')))
+            popen.assert_not_called()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch('flexict_pipeline.subprocess.Popen') as popen:
+                with self.assertRaisesRegex(
+                        RuntimeError, '主动学习任务首期仅支持本机'):
+                    flexict_pipeline.create_flexict_job(
+                        {'workspace': tmp, 'operation': 'active_learning',
+                         'execution_backend': 'remote', 'remote_profile_id': 'srv'})
+            self.assertEqual([], list(Path(tmp).rglob('status.json')))
+            popen.assert_not_called()
+
+    def test_flexict_launch_failure_marks_failed_not_launching(self):
+        # R97 P3-2：Popen 失败必须把 status 落成 failed/launch_failed。
+        # 此前异常直接抛出，status.json 停在 "launching"，reconcile 找不到
+        # 任何 PID，任务永远无人认领。
+        import flexict_pipeline
+        with tempfile.TemporaryDirectory() as tmp:
+            values = {'workspace': tmp, 'operation': 'train',
+                      'task_name': 'Kidney', 'label_name': 'kidney_left',
+                      'cases': ['case01'], 'dataset_id': 750,
+                      'configuration': '2d', 'epochs': 2, 'val_cases': 1,
+                      'mimics_exe': '', 'label_source': 'project_voxels',
+                      'mcs_dir': tmp, 'execution_backend': 'local'}
+            with mock.patch('flexict_pipeline.subprocess.Popen',
+                            side_effect=OSError('boom')):
+                with self.assertRaises(OSError):
+                    flexict_pipeline.create_flexict_job(values)
+            status_files = list(Path(tmp).rglob('status.json'))
+            self.assertEqual(1, len(status_files))
+            payload = json.loads(status_files[0].read_text(encoding='utf-8'))
+            self.assertEqual('failed', payload['status'])
+            self.assertEqual('launch_failed', payload['phase'])
+            self.assertIn('boom', str(payload.get('error')))
 
 class TestBatchJobIdentity(unittest.TestCase):
     def test_cli_chinese_cases_get_distinct_ids_in_same_second(self):

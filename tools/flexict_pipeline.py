@@ -1841,6 +1841,20 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
         # 主动学习排序硬性依赖 dataset_root 下的原图病例。
         raise RuntimeError(
             "工程体素训练模式暂不支持主动学习：排序需要原始影像数据集。")
+    if (
+        request.get("operation") == "active_learning"
+        and request.get("execution_backend") == "remote"
+    ):
+        # 首期主动学习仅本机执行：折间分歧推理 + 排序都在本地 GPU 完成
+        # （与 nnunet_jobs.create_job 同一拒绝）。
+        raise RuntimeError(
+            "主动学习任务首期仅支持本机执行，暂不支持远程训练服务器。")
+    if request.get("execution_backend") == "remote" and not str(
+        request.get("remote_profile_id") or ""
+    ).strip():
+        # Validate before creating status/control files. A launcher that
+        # never existed cannot reconcile a permanent "launching" job.
+        raise RuntimeError("Remote training server was not selected.")
     paths = workspace_paths(request.get("workspace"))
     job_dir = paths["jobs"] / safe_identifier(job_id)
     if job_dir.exists():
@@ -1885,8 +1899,6 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
     }
     write_json_atomic(status_path, status)
     if status["execution_backend"] == "remote":
-        if not status["remote_profile_id"]:
-            raise RuntimeError("Remote training server was not selected.")
         spec_path = job_dir / "remote_spec.json"
         write_json_atomic(
             spec_path,
@@ -1921,14 +1933,24 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
         ]
     from nnunet_jobs import hidden_process_kwargs
 
-    process = subprocess.Popen(
-        command,
-        cwd=str(ROOT),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **hidden_process_kwargs(),
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **hidden_process_kwargs(),
+        )
+    except Exception as exc:
+        update_status(
+            status_path,
+            status="failed",
+            phase="launch_failed",
+            error="Could not start FlexiCT background task: {}".format(exc),
+            completed_at_epoch=time.time(),
+        )
+        raise
     update_status(
         status_path,
         launcher_pid=process.pid,
@@ -1953,7 +1975,7 @@ def list_flexict_jobs(workspace: str | Path | None = None) -> list[dict[str, Any
     if not jobs_dir.is_dir():
         return rows
     for status_path in jobs_dir.glob("*/status.json"):
-        status = reconcile_job_status(status_path)
+        status = reconcile_job_status(status_path, product="FlexiCT")
         if status:
             status["status_path"] = str(status_path)
             rows.append(status)

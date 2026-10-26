@@ -430,9 +430,10 @@ class TrainingSetupWindow:
                 self.window, (self.QtCore, self.QtGui, self.QtWidgets)
             )
             layout.addWidget(self.remote_selector.group)
-        except Exception:
+        except Exception as exc:
+            # 把失败原因带给标注者：一个笼统的"不可用"无法指导排障。
             layout.addWidget(
-                QtWidgets.QLabel("本工作站不可用远程计算。")
+                QtWidgets.QLabel("本工作站不可用远程计算：{}".format(exc))
             )
         note = QtWidgets.QLabel(
             "本机与远程使用相同的请求、原始网格准备、配方、模型清单和状态格式。远程容器用后即弃；已验证的数据和预处理缓存仍可复用。"
@@ -598,7 +599,10 @@ class TrainingSetupWindow:
                 # raw。先切回本机，避免禁用后仍带着远程配置提交。
                 selector.combo.setCurrentIndex(0)
                 selector.group.setEnabled(False)
-                selector.hint.setText("工程体素模式首期仅支持本机训练。")
+                selector.hint.setText(
+                    "工程体素模式首期仅支持本机训练。"
+                    "如需远程训练，请将数据来源切回数据集模式并填写原始图像数据集。"
+                )
             else:
                 selector.group.setEnabled(True)
                 selector._refresh_hint()
