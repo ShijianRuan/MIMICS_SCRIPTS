@@ -4692,6 +4692,199 @@ class ProjectBufferMaterializationTests(unittest.TestCase):
                 payload, self.root / "case.nii.gz", {"case_id": "s0001"})
 
 
+class ProjectVoxelsTrainingTests(unittest.TestCase):
+    """D28: 训练侧工程体素模式——没有原图数据集，病例就是 .mcs 工程。
+
+    The runtime Mimics export is simulated by monkeypatching
+    _export_mcs_labels (same staging-simulation pattern as the G10 cache
+    test). Failure paths first: a tampered or truncated raw must never
+    reach the trainer, a snapshot-less project must be skipped with the
+    runtime's real reason instead of hanging the batch, and the cache key
+    must follow raw content, not the regenerable staging path.
+    """
+
+    def setUp(self):
+        import numpy as np
+
+        self.np = np
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.shape = [4, 4, 4]
+        self.mcs_dir = self.root / "projects"
+        self.mcs_dir.mkdir()
+        for name in ("case_a", "case_b", "case_c"):
+            (self.mcs_dir / (name + ".mcs")).write_bytes(b"project")
+
+    def request(self):
+        return common.normalize_request(
+            {
+                "operation": "train",
+                "task_name": "肝脏",
+                "task_id": "liver",
+                "label_source": "project_voxels",
+                "mcs_dir": str(self.mcs_dir),
+                "workspace": self.root / "workspace",
+                "labels": [{"name": "liver", "id": 1}],
+            }
+        )
+
+    def stage_case(self, staging, case_id, tamper=None):
+        import hashlib
+
+        import nibabel as nib
+
+        np = self.np
+        case_dir = staging / case_id
+        (case_dir / "segmentations").mkdir(parents=True)
+        label = np.zeros(self.shape, dtype=np.uint8)
+        label[1, 1, 1] = 1
+        nib.save(
+            nib.Nifti1Image(label, np.eye(4)),
+            str(case_dir / "segmentations" / "liver.nii.gz"),
+        )
+        data = (np.arange(64, dtype="<i2") * 3 + 10).reshape(self.shape)
+        raw = case_dir / "image.raw"
+        raw.write_bytes(data.tobytes())
+        digest = hashlib.sha256(data.tobytes()).hexdigest()
+        if tamper == "truncate":
+            raw.write_bytes(raw.read_bytes()[:-8])
+        elif tamper == "sha":
+            digest = "0" * 64
+        payload = {
+            "path": str(raw),
+            "shape": list(self.shape),
+            "dtype": "int16",
+            "sha256": digest,
+            "mimics_voxel_to_ras_matrix": np.eye(4).tolist(),
+            "source_modality": "CT",
+            "expected_grid": {
+                "source_shape": list(self.shape),
+                "source_voxel_to_ras_matrix": np.eye(4).tolist(),
+            },
+        }
+        (case_dir / "image_export.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    def fake_export(self, skipped=None, tamper=None):
+        skipped = skipped or {}
+
+        def fake(request, case_ids, staging, status_path, control_path):
+            staging.mkdir(parents=True, exist_ok=True)
+            for case_id in case_ids:
+                if case_id in skipped:
+                    continue
+                self.stage_case(
+                    staging, case_id, tamper=tamper if case_id == "case_a" else None
+                )
+            return staging, dict(skipped)
+
+        return fake
+
+    def prepare(self, request, out_name="out"):
+        out = self.root / out_name
+        out.mkdir()
+        return pipeline.prepare_source_grid_cases(
+            request, out, out / "status.json", out / "control.json"
+        )
+
+    def test_project_voxels_materializes_without_source_dataset(self):
+        import nibabel as nib
+
+        request = self.request()
+        self.assertEqual("", request["dataset_root"])
+        with mock.patch.object(
+            pipeline, "_export_mcs_labels", side_effect=self.fake_export()
+        ):
+            rows = self.prepare(request)
+        self.assertEqual(
+            {"case_a", "case_b", "case_c"}, {row["case_id"] for row in rows}
+        )
+        self.assertFalse(any(row["cache_hit"] for row in rows))
+        for row in rows:
+            image = nib.load(str(row["image"]))
+            self.assertEqual(tuple(self.shape), tuple(image.shape[:3]))
+            self.assertTrue(self.np.allclose(image.affine, self.np.eye(4)))
+            self.assertEqual(1, row["foreground_voxels"])
+
+    def test_project_voxels_tampered_raw_fails_sha256(self):
+        request = self.request()
+        with mock.patch.object(
+            pipeline, "_export_mcs_labels", side_effect=self.fake_export(tamper="sha")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "sha256 不一致"):
+                self.prepare(request)
+
+    def test_project_voxels_truncated_raw_reports_byte_mismatch(self):
+        request = self.request()
+        with mock.patch.object(
+            pipeline,
+            "_export_mcs_labels",
+            side_effect=self.fake_export(tamper="truncate"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "字节数不符"):
+                self.prepare(request)
+
+    def test_snapshotless_project_is_skipped_with_runtime_reason(self):
+        reason = "缺少导入时的网格快照，跳过导出"
+        request = self.request()
+        with mock.patch.object(
+            pipeline,
+            "_export_mcs_labels",
+            side_effect=self.fake_export(skipped={"case_b": reason}),
+        ):
+            rows = self.prepare(request)
+        self.assertEqual({"case_a", "case_c"}, {row["case_id"] for row in rows})
+        status = json.loads(
+            (self.root / "out" / "status.json").read_text(encoding="utf-8")
+        )
+        details = status.get("skipped_case_details") or []
+        self.assertTrue(
+            any(
+                item.get("case_id") == "case_b" and item.get("reason") == reason
+                for item in details
+            ),
+            "the runtime's real skip reason must surface, not a generic one",
+        )
+
+    def test_all_cases_unusable_names_reasons(self):
+        reason = "缺少导入时的网格快照，跳过导出"
+        request = self.request()
+        with mock.patch.object(
+            pipeline,
+            "_export_mcs_labels",
+            side_effect=self.fake_export(
+                skipped={name: reason for name in ("case_a", "case_b", "case_c")}
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "at least 2 usable case"
+            ) as ctx:
+                self.prepare(request)
+        self.assertIn(reason, str(ctx.exception))
+
+    def test_reexported_identical_raw_hits_content_addressed_cache(self):
+        request = self.request()
+        with mock.patch.object(
+            pipeline, "_export_mcs_labels", side_effect=self.fake_export()
+        ):
+            first = self.prepare(request, "out1")
+        self.assertFalse(any(row["cache_hit"] for row in first))
+        # A fresh staging run recreates the raw at NEW paths with
+        # byte-identical content (the .mcs export is regenerable): a
+        # path/mtime key would miss; the content key must hit.
+        with mock.patch.object(
+            pipeline, "_export_mcs_labels", side_effect=self.fake_export()
+        ):
+            second = self.prepare(request, "out2")
+        self.assertEqual(3, len(second))
+        self.assertTrue(
+            all(row["cache_hit"] for row in second),
+            "re-exported identical raw must reuse the cache",
+        )
+
+
 if __name__ == "__main__":
     # Isolate real lock acquisitions (dataset lock, GPU lock) to a temp
     # dir: per-run temp workspace paths hash to new lock names and would

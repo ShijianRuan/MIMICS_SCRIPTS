@@ -439,6 +439,72 @@ class TestUiWorkflow(unittest.TestCase):
             create.assert_not_called()
         self.assertIn(dead_path, w.status_label.text())
 
+    def test_project_voxels_training_submits_without_source_dataset(self):
+        # D28: the 4th label source trains from .mcs projects alone — the
+        # dataset row is hidden, remote is locked to local, and a dead
+        # dataset path in the box must neither block validate nor leak
+        # into the request (normalize forces dataset_root="").
+        import nnunet_training_setup_ui as ui
+        mcs_dir = self.root / 'projects'
+        mcs_dir.mkdir()
+        (mcs_dir / 'case_a.mcs').write_bytes(b'project')
+        (mcs_dir / 'case_b.mcs').write_bytes(b'project')
+        w = self.keep(ui.TrainingSetupWindow(
+            {'workspace': str(self.root / 'nn'), 'mcs_dir': str(mcs_dir)},
+            self.root / 'context.json', QT))
+        w.task_edit.setText('肝脏')
+        # Default (dataset_masks) keeps the dataset row and remote selector.
+        self.assertTrue(w.dataset_widget.isVisible())
+        self.assertTrue(w.remote_selector.group.isEnabled())
+        w.source_combo.setCurrentIndex(3)
+        APP.processEvents()
+        self.assertFalse(w.dataset_label.isVisible())
+        self.assertFalse(w.dataset_widget.isVisible())
+        self.assertTrue(w.mcs_widget.isVisible())
+        self.assertFalse(w.remote_selector.group.isEnabled())
+        self.assertIn('仅支持本机', w.remote_selector.hint.text())
+        # Switching to an existing mode restores both rows exactly as before.
+        w.source_combo.setCurrentIndex(2)
+        APP.processEvents()
+        self.assertTrue(w.dataset_widget.isVisible())
+        self.assertTrue(w.remote_selector.group.isEnabled())
+        w.source_combo.setCurrentIndex(3)
+        APP.processEvents()
+        # A dead dataset path stays in the box but must never be touched.
+        w.dataset_edit.setText(str(self.root / 'gone' / 'dataset'))
+        captured = []
+
+        def fake_create(request):
+            captured.append(request)
+            return {'job_id': 'j1', 'status_path': str(self.root / 'job.json')}
+
+        with mock.patch.object(ui, 'create_job', fake_create):
+            w._submit()
+            wait_until(lambda: w.submitted)
+        request = captured[0]
+        self.assertEqual('project_voxels', request['label_source'])
+        self.assertEqual('', request['dataset_root'])
+        self.assertEqual('local', request['execution_backend'])
+        self.assertEqual('', request['remote_profile_id'])
+        self.assertEqual(str(mcs_dir), request['mcs_dir'])
+
+    def test_project_voxels_training_blocks_submit_without_mcs_files(self):
+        # D28 negative path: an mcs_dir without .mcs projects must stop at
+        # validate with a clear Chinese reason — no job, no create_job call.
+        import nnunet_training_setup_ui as ui
+        empty_dir = self.root / 'empty'
+        empty_dir.mkdir()
+        w = self.keep(ui.TrainingSetupWindow(
+            {'workspace': str(self.root / 'nn'), 'mcs_dir': str(empty_dir)},
+            self.root / 'context.json', QT))
+        w.task_edit.setText('肝脏')
+        w.source_combo.setCurrentIndex(3)
+        APP.processEvents()
+        with mock.patch.object(ui, 'create_job') as create:
+            w._submit()
+            wait_until(lambda: '没有 .mcs 工程文件' in w.status_label.text())
+            create.assert_not_called()
+
     def test_export_small_screen_has_scroll_and_visible_primary_action(self):
         import io_path_setup_ui as ui
         seen = []

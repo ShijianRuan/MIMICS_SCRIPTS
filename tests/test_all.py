@@ -9940,6 +9940,187 @@ class TestNewFeatures(unittest.TestCase):
         )
         mimics_import._IMPORT_MONITORS.pop(str(import_work), None)
 
+    def test_project_voxel_batch_export_streams_image_and_skips_snapshotless(self):
+        """D28 project-voxel training: the background batch export streams each
+        project's image voxels beside the labels and records the import-time
+        grid snapshot parsed (int shape, 4x4 matrix) with the bare-hex sha256.
+        A project without the snapshot is skipped with a recorded reason
+        before the bridge call — never dropped into the 7-day
+        degraded-confirmation wait nobody watches on a training-side run."""
+        import mimics_export
+
+        root = Path(self.tmp) / "pv_batch"
+        mcs_dir = root / "mcs"
+        runtime = root / "runtime"
+        staging = root / "staging"
+        mcs_dir.mkdir(parents=True)
+        runtime.mkdir()
+        for case_id in ("case_a", "case_b"):
+            (mcs_dir / (case_id + ".mcs")).write_bytes(b"project")
+            (staging / case_id).mkdir(parents=True)
+        status_path = runtime / "status.json"
+        config_path = runtime / "config.json"
+        # Mirrors the tools-side bridge config for project_voxels: ts_root is
+        # the .mcs folder (no image dataset), cases arrive via case_dirs
+        # pointing at the per-case staging directories.
+        config_path.write_text(json.dumps({
+            "ts_root": str(mcs_dir),
+            "output_dir": str(mcs_dir),
+            "export_root": str(runtime),
+            "job_runtime": str(runtime),
+            "status_path": str(status_path),
+            "stop_path": str(runtime / "stop.request"),
+            "label_staging_dir": str(staging),
+            "project_image_export": True,
+            "case_dirs": {
+                "case_a": str(staging / "case_a"),
+                "case_b": str(staging / "case_b"),
+            },
+        }), encoding="utf-8")
+
+        identity = json.dumps(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+        )
+
+        class MetaItem(object):
+            def __init__(self, value):
+                self.value = value
+
+        class MetaStore(object):
+            def __init__(self, values):
+                self._values = values
+
+            def find(self, name):
+                return (
+                    MetaItem(self._values[name])
+                    if name in self._values else None
+                )
+
+        class FakeView(object):
+            shape = (2, 2, 2)
+            format = "h"  # int16
+
+            def tobytes(self):
+                return b"\x11" * 16
+
+        class FakeImage(object):
+            logical_dimensions = [2, 2, 2]
+
+            def __init__(self, values):
+                self.metadata = MetaStore(values)
+
+            def get_voxel_buffer(self):
+                return FakeView()
+
+        class FakeMask(object):
+            def __init__(self, name, image):
+                self.name = name
+                self.image = image
+
+            def get_voxel_buffer(self):
+                return memoryview(b"\x01" * 8)
+
+        image_a = FakeImage({
+            "mimics_script.mimics_voxel_to_ras_matrix": identity,
+            "mimics_script.source_image_shape": "[2, 2, 2]",
+            "mimics_script.source_voxel_to_ras_matrix": identity,
+        })
+        # case_b carries no import-time grid snapshot: its image exports fine,
+        # but the training side could never materialize it on the label grid.
+        image_b = FakeImage({
+            "mimics_script.mimics_voxel_to_ras_matrix": identity,
+        })
+        masks_by_case = {
+            "case_a": [FakeMask("target", image_a)],
+            "case_b": [FakeMask("target", image_b)],
+        }
+
+        opened = []
+        bridge_calls = []
+        old_open = mimics_export.mimics.file.open_project
+        old_close = mimics_export.mimics.file.close_project
+        old_masks = mimics_export.mimics.data.masks
+        old_bridge = mimics_export.call_bridge
+
+        def fake_open(path):
+            name = os.path.basename(str(path))
+            opened.append(name)
+            mimics_export.mimics.data.masks = masks_by_case[
+                name[:-len(".mcs")]
+            ]
+
+        def fake_bridge(params, extra_env=None):
+            bridge_calls.append(params)
+            return {
+                "status": "ok",
+                "total_new": 1,
+                "total_overwritten": 0,
+                "total_unchanged": 0,
+                "exported": [],
+            }
+
+        try:
+            mimics_export.mimics.file.open_project = fake_open
+            mimics_export.mimics.file.close_project = lambda: None
+            mimics_export.call_bridge = fake_bridge
+            code = mimics_export.run_background_batch_export(str(config_path))
+        finally:
+            mimics_export.mimics.file.open_project = old_open
+            mimics_export.mimics.file.close_project = old_close
+            mimics_export.mimics.data.masks = old_masks
+            mimics_export.call_bridge = old_bridge
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            ["case_a.mcs", "case_b.mcs"], sorted(opened)
+        )
+        # Only the snapshot-carrying case reached the bridge; the snapshotless
+        # case was skipped in the runtime loop before any bridge call.
+        self.assertEqual(1, len(bridge_calls))
+        self.assertIn("case_a", str(bridge_calls[0].get("output_seg_dir")))
+        # Image voxels streamed beside the labels, byte-exact.
+        self.assertEqual(
+            b"\x11" * 16,
+            (staging / "case_a" / "image.raw").read_bytes(),
+        )
+        payload = json.loads(
+            (staging / "case_a" / "image_export.json").read_text(
+                encoding="utf-8")
+        )
+        self.assertEqual([2, 2, 2], payload["shape"])
+        self.assertEqual("int16", payload["dtype"])
+        # sha256 must be bare hex — the tools side compares without the
+        # "sha256:" prefix the bridge reports.
+        sha = payload["sha256"]
+        self.assertTrue(sha and not sha.startswith("sha256:"))
+        self.assertEqual(64, len(sha))
+        # The snapshot is stored parsed: int shape and 4x4 matrix, not the
+        # raw metadata strings.
+        self.assertEqual(
+            [2, 2, 2], payload["expected_grid"]["source_shape"]
+        )
+        self.assertEqual(
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            payload["expected_grid"]["source_voxel_to_ras_matrix"],
+        )
+        self.assertIn("source_intensity_recovery_basis", payload)
+        # The snapshotless case left no image_export.json behind.
+        self.assertFalse(
+            (staging / "case_b" / "image_export.json").exists()
+        )
+        # The skip is recorded with its reason for the tools-side skip report.
+        skipped = json.loads(
+            (runtime / "_skipped_exports.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(1, skipped["count"])
+        self.assertEqual("case_b", skipped["skipped"][0]["case_id"])
+        self.assertEqual(
+            "source_geometry_unavailable",
+            skipped["skipped"][0]["reason"],
+        )
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual("closed", status["status"])
+        self.assertEqual("completed", status["phase"])
 
     def test_import_task_does_not_clear_stop_marker_owned_by_live_queue(self):
         import mimics_import
@@ -10628,6 +10809,8 @@ class TestNewFeatures(unittest.TestCase):
         sig = inspect.signature(pipeline.launch_mimics_export)
         self.assertIn("label_staging_dir", sig.parameters,
                       "launch_mimics_export must accept label_staging_dir")
+        self.assertIn("export_project_images", sig.parameters,
+                      "launch_mimics_export must accept export_project_images")
 
     def test_cancel_requested_control_json_conventions(self):
         """cancel_requested must not misread an existing control.json as cancelled.
