@@ -142,6 +142,21 @@ def create_job(request: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "工程体素模式（源影像文件不可达）首期仅支持本机执行，"
             "暂不支持远程训练服务器。")
+    if (
+        values.get("operation") == "train"
+        and str(values.get("label_source") or "") == "project_voxels"
+        and values.get("execution_backend") == "remote"
+    ):
+        # D28 首期仅本机执行：远程上传路径尚未覆盖工程导出的图像 raw。
+        raise RuntimeError(
+            "工程体素训练模式首期仅支持本机执行，暂不支持远程训练服务器。")
+    if (
+        values.get("operation") == "active_learning"
+        and str(values.get("label_source") or "") == "project_voxels"
+    ):
+        # 主动学习排序硬性依赖 dataset_root 下的原图病例。
+        raise RuntimeError(
+            "工程体素训练模式暂不支持主动学习：排序需要原始影像数据集。")
     paths = workspace_paths(values["workspace"])
     job_dir = paths["jobs"] / safe_identifier(values["job_id"])
     if job_dir.exists():

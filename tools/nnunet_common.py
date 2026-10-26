@@ -684,8 +684,17 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
             "exported_masks",
             "mcs_refresh",
             "prepared",
+            "project_voxels",
         }:
             raise ValueError("Unsupported label source: {}".format(values["label_source"]))
+        if values["label_source"] == "project_voxels":
+            # D28: image voxels come from the .mcs projects too, so no source
+            # image dataset is read. Keep dataset_root empty (an empty string
+            # would otherwise resolve to the CWD downstream) and require the
+            # project directory instead.
+            if not str(values.get("mcs_dir") or "").strip():
+                raise ValueError("工程体素模式需要 .mcs 工程目录。")
+            values["dataset_root"] = ""
         values["missing_label_policy"] = str(
             values.get("missing_label_policy") or "require_all"
         ).strip().lower()
