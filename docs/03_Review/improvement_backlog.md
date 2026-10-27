@@ -323,13 +323,22 @@
   被调用）。
   门禁：smoke 9/9（20261026T115518_smoke.json）、fast 33/33
   （20261026T120453_fast.json）。实机端到端登记 R95-4。〕
-- [ ] **R95-2【P3】mimics_bridge._force_nifti_affine 对未压缩 .nii 同
+- [x] **R95-2【P3】mimics_bridge._force_nifti_affine 对未压缩 .nii 同
   路径重写失败（Windows/nibabel mmap）**〔R95 当轮发现〕：nib.load 对
   未压缩 .nii 走 mmap，nib.save 同路径覆盖在 Windows 报 OSError
   （Errno 22）。唯一调用方 resample_image_to_grid（mimics_bridge.py:1578）
   的生产调用均传 .nii.gz（gzip 不 mmap，同路径安全），D20 恒等快路测试
   踩到，属潜伏缺陷非在途 bug。最小方案：_force_nifti_affine 改临时文件
   写后替换（镜像 publish 语义）；验收：未压缩 .nii 重采样单测通过。
+  〔R98 当轮解决（2026-10-27 用户指令"可以直接修的直接修掉"），commit
+  `eac001c`：根因实证为 np.asanyarray(img.dataobj) 对未压缩 .nii 返回
+  numpy.memmap（Nifti1Image 持有映射导致 os.replace 被拒，file_map 句柄
+  已是 None）——修复 = memmap 显式拷贝断开映射别名 + 同目录临时文件
+  （保留 .nii/.nii.gz 后缀供 nibabel 推断类型）写后 os.replace 原子
+  替换 + 失败清 .tmp。新增
+  test_resample_image_to_grid_uncompressed_nii_same_path_rewrite
+  （tests/test_all.py）锁定失败路径；TestMimicsBridgeBufferMapping 42/42
+  全绿；smoke 9/9（20261027T225206_smoke.json）。〕
 - [x] **R95-3【P2】tests/test_ui_workflow_regressions.py 未注册进回归
   矩阵**〔R95 当轮发现〕：4af0393（2026-10-25）把 _selected_case 契约
   改为读 column-1 UserRole，当轮即打破该套件 1 项测试；因套件不在
