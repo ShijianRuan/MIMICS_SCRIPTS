@@ -1519,11 +1519,33 @@ def _force_nifti_affine(path: Path, target_affine: np.ndarray) -> None:
     import nibabel as nib
 
     img = nib.load(str(path))
+    # The load proxy keeps the file open; nib.save onto the open same path
+    # fails on Windows (Errno 22) for uncompressed .nii.  Break the memmap
+    # aliasing, close the read handles, and publish via a temp file +
+    # atomic replace (Windows refuses the replace while a mapping is live).
     data = np.asanyarray(img.dataobj)
+    if isinstance(data, np.memmap):
+        data = np.array(data)
     out = nib.Nifti1Image(data, np.asarray(target_affine, dtype=float), header=img.header)
     out.set_qform(np.asarray(target_affine, dtype=float), code=1)
     out.set_sform(np.asarray(target_affine, dtype=float), code=1)
-    nib.save(out, str(path))
+    for holder in img.file_map.values():
+        fileobj = getattr(holder, "fileobj", None)
+        if fileobj is not None and not fileobj.closed:
+            fileobj.close()
+    del img
+    # Keep a recognizable suffix so nib.save can infer the file type.
+    suffix = ".nii.gz" if path.name.endswith(".nii.gz") else ".nii"
+    temporary = path.with_name(path.name + ".tmp" + suffix)
+    nib.save(out, str(temporary))
+    try:
+        os.replace(str(temporary), str(path))
+    finally:
+        try:
+            if temporary.is_file():
+                temporary.unlink()
+        except OSError:
+            pass
 
 
 def resample_image_to_grid(

@@ -2667,6 +2667,32 @@ class TestMimicsBridgeBufferMapping(unittest.TestCase):
         self.assertEqual((3, 2, 2), out.shape)
         np.testing.assert_allclose(target_affine, out.affine, atol=1e-6)
 
+    def test_resample_image_to_grid_uncompressed_nii_same_path_rewrite(self):
+        # R95-2 失败路径：未压缩 .nii 的 nib.load 保持文件打开，
+        # 同路径 nib.save 在 Windows 报 Errno 22——重采样走临时文件
+        # 写后原子替换必须成功，且不留 .tmp 残留。
+        from mimics_bridge import resample_image_to_grid
+        import nibabel as nib
+
+        source = os.path.join(self.tmp, "source_raw.nii")
+        output = os.path.join(self.tmp, "aligned_raw.nii")
+        data = np.arange(8, dtype=np.int16).reshape((2, 2, 2))
+        nib.save(nib.Nifti1Image(data, np.eye(4)), source)
+
+        target_affine = np.array([
+            [1.0, 0.0, 0.0, -10.0],
+            [0.0, 1.0, 0.0, -20.0],
+            [0.0, 0.0, 1.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        result = resample_image_to_grid(source, [3, 2, 2], target_affine.tolist(), output)
+        self.assertEqual("ok", result["status"])
+        out = nib.load(output)
+        self.assertEqual((3, 2, 2), out.shape)
+        np.testing.assert_allclose(target_affine, out.affine, atol=1e-6)
+        leftovers = [name for name in os.listdir(self.tmp) if name.endswith(".tmp")]
+        self.assertEqual([], leftovers)
+
 
 class TestVerifyMedicalGeometry(unittest.TestCase):
     """C8: tools/verify_medical_geometry.py guards data quality — an error
