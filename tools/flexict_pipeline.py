@@ -1826,14 +1826,8 @@ def create_flexict_job(values: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "工程体素模式（源影像文件不可达）首期仅支持本机执行，"
             "暂不支持远程训练服务器。")
-    if (
-        request.get("operation") == "train"
-        and str(request.get("label_source") or "") == "project_voxels"
-        and request.get("execution_backend") == "remote"
-    ):
-        # D28 首期仅本机执行：远程上传路径尚未覆盖工程导出的图像 raw。
-        raise RuntimeError(
-            "工程体素训练模式首期仅支持本机执行，暂不支持远程训练服务器。")
+    # R98：工程体素 + 远程训练已解禁——控制器在本地物化每例 NIfTI 后上传，
+    # 远程端以 prepared 源运行，与 label_source 无关。
     if (
         request.get("operation") == "active_learning"
         and str(request.get("label_source") or "") == "project_voxels"

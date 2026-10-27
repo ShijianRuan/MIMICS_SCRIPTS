@@ -126,23 +126,37 @@ class TestJobPreflight(unittest.TestCase):
             self.assertFalse((Path(tmp)/'jobs'/'bad_remote').exists())
             launch.assert_not_called()
 
-    def test_project_voxels_remote_training_rejected_before_job_dir(self):
-        # D28：远程上传路径尚未覆盖工程导出的图像 raw，必须在任何 job 工件
-        # 产生之前拒绝，不留 launching 幽灵。nnU-Net 与 FlexiCT 两个创建器
-        # 都要拦（FlexiCT 训练数据准备复用同一条 project_voxels 管线）。
+    def test_project_voxels_remote_training_creates_job_and_launches_controller(self):
+        # R98 用户立项：实际场景需要"无原图数据集 + 远程训练"组合。控制器在
+        # 本地物化每例 NIfTI 后上传，远程端以 prepared 源运行——两个创建器都
+        # 必须放行 train+project_voxels+remote，且按远程路径落 remote_spec.json
+        # 并启动控制器进程（D28 首期拒绝已被本轮取代）。
         import flexict_pipeline
         with tempfile.TemporaryDirectory() as tmp:
             values={'workspace':tmp,'operation':'train','label_source':'project_voxels','mcs_dir':tmp,'labels':[{'name':'target','id':1}],'execution_backend':'remote','remote_profile_id':'srv','job_id':'pv_remote'}
             with mock.patch.object(jobs,'_launch') as launch:
-                with self.assertRaisesRegex(RuntimeError,'工程体素训练模式首期仅支持本机'):jobs.create_job(values)
-            self.assertFalse((Path(tmp)/'jobs'/'pv_remote').exists())
-            launch.assert_not_called()
+                launch.return_value=types.SimpleNamespace(pid=1234)
+                jobs.create_job(values)
+            job_dir=Path(tmp)/'jobs'/'pv_remote'
+            self.assertTrue(job_dir.is_dir())
+            spec=json.loads((job_dir/'remote_spec.json').read_text(encoding='utf-8'))
+            self.assertEqual('nnunet',spec['kind'])
+            self.assertEqual('srv',spec['remote_profile_id'])
+            launch.assert_called_once()
         with tempfile.TemporaryDirectory() as tmp:
             values={'workspace':tmp,'operation':'train','task_name':'Kidney','label_name':'kidney_left','cases':['case01','case02'],'label_source':'project_voxels','mcs_dir':tmp,'dataset_id':750,'configuration':'2d','epochs':2,'val_cases':1,'mimics_exe':'','execution_backend':'remote','remote_profile_id':'srv'}
-            with mock.patch('flexict_pipeline.subprocess.Popen') as popen:
-                with self.assertRaisesRegex(RuntimeError,'工程体素训练模式首期仅支持本机'):flexict_pipeline.create_flexict_job(values)
-            self.assertEqual([], list(Path(tmp).rglob('*train*')))
-            popen.assert_not_called()
+            launched={}
+            def fake_popen(command,**kwargs):
+                launched['command']=command
+                return types.SimpleNamespace(pid=4321)
+            with mock.patch('flexict_pipeline.subprocess.Popen',side_effect=fake_popen), mock.patch('flexict_pipeline.process_start_marker',return_value='m'):
+                flexict_pipeline.create_flexict_job(values)
+            spec_files=list(Path(tmp).rglob('remote_spec.json'))
+            self.assertEqual(1,len(spec_files))
+            spec=json.loads(spec_files[0].read_text(encoding='utf-8'))
+            self.assertEqual('flexict',spec['kind'])
+            self.assertEqual('srv',spec['remote_profile_id'])
+            self.assertIn('remote_training_controller.py',launched['command'][1])
 
     def test_project_voxels_active_learning_rejected_before_job_dir(self):
         # D28：主动学习排序硬性依赖 dataset_root 下的原图病例，工程体素模式

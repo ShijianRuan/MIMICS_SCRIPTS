@@ -3590,6 +3590,68 @@ class JobLifecycleTests(unittest.TestCase):
             prepared_cases = payload["pipeline_request"]["prepared_cases"]
             self.assertIn("patient_group", prepared_cases[0])
 
+    def test_remote_training_prepare_transparent_to_project_voxels_source(self):
+        """R98: 工程体素（无原图数据集）必须能走同一条远程准备路径——控制器
+        本地物化每例 NIfTI 后上传，远程端只看到源无关的 prepared 请求。远程
+        解禁靠的是既有链路本就源无关（非数据路径改动），本测试锁定该透明性。"""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = root / "job"
+            bundle = root / "bundle"
+            job.mkdir()
+            bundle.mkdir()
+            image = root / "image.nii.gz"
+            label = root / "label.nii.gz"
+            image.write_bytes(b"image")
+            label.write_bytes(b"label")
+            request_path = job / "request.json"
+            status_path = job / "status.json"
+            common.write_json_atomic(
+                request_path,
+                {
+                    "operation": "train",
+                    "job_id": "pv_remote_train",
+                    "task_name": "Liver",
+                    "task_id": "liver",
+                    "workspace": str(root / "workspace"),
+                    "label_source": "project_voxels",
+                    "mcs_dir": str(root / "mcs"),
+                    "labels": [{"name": "Liver", "id": 1}],
+                },
+            )
+            common.write_json_atomic(status_path, {"status": "preparing_remote"})
+            common.write_json_atomic(job / "control.json", {"action": "run"})
+            spec = {
+                "job_dir": str(job),
+                "status_path": str(status_path),
+                "request_path": str(request_path),
+            }
+            rows = [
+                {
+                    "case_id": "case_1",
+                    "image": image,
+                    "label": label,
+                    "fingerprint": "pv_fingerprint",
+                }
+            ]
+            with mock.patch(
+                "tools.nnunet_pipeline.prepare_source_grid_cases", return_value=rows
+            ) as prepare:
+                prepared = remote._prepare_nnunet(spec, bundle)
+            # The materialization must go through the same pipeline entry
+            # local training uses (project_voxels handled inside it).
+            self.assertEqual(prepare.call_count, 1)
+            self.assertEqual(prepared["train_count"], 1)
+            self.assertTrue((bundle / "input" / "case_1" / "image.nii.gz").is_file())
+            self.assertTrue((bundle / "labels" / "case_1" / "label.nii.gz").is_file())
+            payload = common.read_json(bundle / "remote_request.json")
+            remote_request = payload["pipeline_request"]
+            self.assertEqual(remote_request["label_source"], "prepared")
+            self.assertEqual(remote_request["mcs_dir"], "")
+            self.assertEqual(remote_request["dataset_root"], "/job/input")
+            self.assertEqual(
+                remote_request["prepared_cases"][0]["fingerprint"], "pv_fingerprint")
+
     def test_remote_training_prepare_serializes_patient_groups(self):
         """R08: every staged case must carry its patient_group so the
         container-side split keeps same-patient scans on one side."""

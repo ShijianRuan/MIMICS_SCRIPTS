@@ -15,6 +15,54 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R98（2026-10-27 用户立项：工程体素 + 远程训练组合 + FlexiCT 病例/验证划分呈现）
+
+> 用户原话："实际场景需要'无原图数据集 + 远程训练'组合；UI显示病例与验证里
+> 必须手选啊，默认所有用于训练了"。本条为用户直接立项，**取代 R96-1 验收
+> 标准 ⑥（"远程训练在 mkdir 前拒绝"）中 train 场景的远程拒绝**；active_learning
+> 相关拒绝（工程体素×AL、远程×AL）与 D20 预测侧 project_image_export×远程
+> 拒绝均维持不变（AL 排序硬依赖原图 dataset_root，预测侧未被用户要求）。
+>
+> 核验结论（亲验 remote_training_controller.py:1296-1440/:1582-1727）：
+> `_prepare_nnunet`/`_prepare_flexict` 在控制器进程**本地**调用
+> `prepare_source_grid_cases` 物化每例 NIfTI（工程体素模式同样走本地 Mimics
+> 导出→物化），随后按行拷贝 image/label 进 bundle 上传，远程端以
+> label_source="prepared" 运行——完全源无关。原拒绝是 D28 首期保守范围
+> 划定，非数据链路缺口。
+
+**待办 R98-A〔P1〕工程体素 + 远程训练解禁**
+
+- 痛点：真实场景（无原图数据集的机器 + 远程训练服务器）被创建器与两个训练
+  UI 的首期拒绝挡死，用户无法完成交付闭环。
+- 根因：nnunet_jobs.py / flexict_pipeline.py 创建器在 mkdir 前硬拒
+  train+project_voxels+remote；两个训练 UI 在工程体素模式下强制禁用远程
+  选择器并回切本机。
+- 验收标准（写入即锁定）：
+  ① train + project_voxels + remote 创建 job 成功（spec 生成、控制器启动），
+  不再抛"首期仅支持本机"；
+  ② 两个训练 UI 工程体素模式下远程选择器可用，请求携带所选远程配置；
+  ③ active_learning 三类拒绝测试全部保持绿（工程体素×AL、远程×AL 两创建器
+    + D20 预测 project_image_export×远程）；
+  ④ 远程准备流程对 project_voxels 请求透明：mock
+    prepare_source_grid_cases 返回工程体素行 → `_prepare_nnunet` 产出
+    label_source="prepared"、mcs_dir=""、bundle 内 input/labels NIfTI 拷贝；
+  ⑤ 既有三种 label_source 的本地/远程行为逐字节不变（既有测试全绿）。
+
+**待办 R98-B〔P2〕FlexiCT 训练窗"病例与验证"呈现误导**
+
+- 痛点：用户以为必须手选验证病例；摘要行显示"验证 0"，实际不手选时管线会
+  自动抽取（<8 例取末尾 N 例，≥8 例按层位物理排序均匀抽取，
+  flexict_pipeline.py:498-547）；且 val_spin 上限 10，大数据集无法表达
+  "自动抽 20 例"。
+- 根因：摘要行只统计已勾选验证数，不提示自动抽取；tooltip 未说明自动策略；
+  spin 上限 10 与管线上限（len-1）不一致。
+- 验收标准（写入即锁定）：
+  ① 无手选验证病例时摘要行显示"验证自动抽取 N 例"（N=spin 值），不再显示
+    误导性的"验证 0"；
+  ② 验证选择控件 tooltip 说明"不手动勾选时自动按层位均匀抽取"；
+  ③ val_spin 上限提升（管线本就 clamp 到 len-1，UI 不再额外设 10 上限）；
+  ④ 手选验证病例时行为与呈现不变（显式勾选优先于自动抽取）。
+
 ### R97（2026-10-26 用户指令：训练/远程训练/.mcs 工程训练独立审计并自主修复）
 
 > 用户原话："请你好好独立代理检查这些训练功能远程训练mcs是否还有卡点和
