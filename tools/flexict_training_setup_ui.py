@@ -595,18 +595,10 @@ class TrainingSetupWindow:
             )
         selector = getattr(self, "remote_selector", None)
         if selector is not None:
-            if project:
-                # D28 首期仅本机执行：远程上传路径尚未覆盖工程导出的图像
-                # raw。先切回本机，避免禁用后仍带着远程配置提交。
-                selector.combo.setCurrentIndex(0)
-                selector.group.setEnabled(False)
-                selector.hint.setText(
-                    "工程体素模式首期仅支持本机训练。"
-                    "如需远程训练，请将数据来源切回数据集模式并填写原始图像数据集。"
-                )
-            else:
-                selector.group.setEnabled(True)
-                selector._refresh_hint()
+            # R98：工程体素模式支持远程训练——控制器在本地把工程导出物化成
+            # NIfTI 后上传，远程端不接触 .mcs。
+            selector.group.setEnabled(True)
+            selector._refresh_hint()
         # 旧表来自另一种数据来源：直接提交会把错误模式的病例发给管线，
         # 清空并按新来源的路径重扫（路径为空则留空表）。
         self._case_rows = []

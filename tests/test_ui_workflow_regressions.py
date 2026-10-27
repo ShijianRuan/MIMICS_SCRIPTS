@@ -441,9 +441,11 @@ class TestUiWorkflow(unittest.TestCase):
 
     def test_project_voxels_training_submits_without_source_dataset(self):
         # D28: the 4th label source trains from .mcs projects alone — the
-        # dataset row is hidden, remote is locked to local, and a dead
-        # dataset path in the box must neither block validate nor leak
-        # into the request (normalize forces dataset_root="").
+        # dataset row is hidden, and a dead dataset path in the box must
+        # neither block validate nor leak into the request (normalize forces
+        # dataset_root=""). R98: remote is no longer locked to local — the
+        # controller materializes NIfTIs locally, so the selector stays
+        # usable and a remote selection rides through to the request.
         import nnunet_training_setup_ui as ui
         mcs_dir = self.root / 'projects'
         mcs_dir.mkdir()
@@ -461,8 +463,9 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertFalse(w.dataset_label.isVisible())
         self.assertFalse(w.dataset_widget.isVisible())
         self.assertTrue(w.mcs_widget.isVisible())
-        self.assertFalse(w.remote_selector.group.isEnabled())
-        self.assertIn('仅支持本机', w.remote_selector.hint.text())
+        # R98：工程体素模式下远程选择器保持可用（不再回切本机）。
+        self.assertTrue(w.remote_selector.group.isEnabled())
+        self.assertIn('本机', w.remote_selector.combo.currentText())
         # Switching to an existing mode restores both rows exactly as before.
         w.source_combo.setCurrentIndex(2)
         APP.processEvents()
@@ -472,6 +475,10 @@ class TestUiWorkflow(unittest.TestCase):
         APP.processEvents()
         # A dead dataset path stays in the box but must never be touched.
         w.dataset_edit.setText(str(self.root / 'gone' / 'dataset'))
+        # R98：选中的远程配置必须原样进入请求（用户场景：无原图 + 远程）。
+        w.remote_selector.combo.addItem('远程 · labgpu', ('remote', 'srv'))
+        w.remote_selector.combo.setCurrentIndex(
+            w.remote_selector.combo.count() - 1)
         captured = []
 
         def fake_create(request):
@@ -484,8 +491,8 @@ class TestUiWorkflow(unittest.TestCase):
         request = captured[0]
         self.assertEqual('project_voxels', request['label_source'])
         self.assertEqual('', request['dataset_root'])
-        self.assertEqual('local', request['execution_backend'])
-        self.assertEqual('', request['remote_profile_id'])
+        self.assertEqual('remote', request['execution_backend'])
+        self.assertEqual('srv', request['remote_profile_id'])
         self.assertEqual(str(mcs_dir), request['mcs_dir'])
 
     def test_project_voxels_training_blocks_submit_without_mcs_files(self):
@@ -507,8 +514,9 @@ class TestUiWorkflow(unittest.TestCase):
 
     def test_flexict_project_voxels_training_submits_without_dataset(self):
         # R96-2: FlexiCT 训练窗的第 2 种数据来源用 .mcs 工程当病例——
-        # 数据集行隐藏、远程锁本机、切来源后自动扫描出工程病例、死数据集
-        # 路径既不拦 validate 也不进请求（normalize 强制 dataset_root=""）。
+        # 数据集行隐藏、切来源后自动扫描出工程病例、死数据集路径既不拦
+        # validate 也不进请求（normalize 强制 dataset_root=""）。
+        # R98：远程不再锁本机——选中的远程配置必须原样进入请求。
         import flexict_training_setup_ui as ui
         mcs_dir = self.root / 'projects'
         mcs_dir.mkdir()
@@ -523,18 +531,22 @@ class TestUiWorkflow(unittest.TestCase):
         self.assertTrue(w.remote_selector.group.isEnabled())
         self.assertEqual('dataset_masks', w._request()['label_source'])
         self.assertNotIn('mcs_dir', w._request())
-        # 切到工程体素：行切换、远程锁定、自动扫描出两个工程病例。
+        # 切到工程体素：行切换、远程保持可用、自动扫描出两个工程病例。
         w.source_combo.setCurrentIndex(1)
         APP.processEvents()
         self.assertFalse(w.dataset_label.isVisible())
         self.assertFalse(w.dataset_widget.isVisible())
         self.assertTrue(w.mcs_widget.isVisible())
-        self.assertFalse(w.remote_selector.group.isEnabled())
-        self.assertIn('仅支持本机', w.remote_selector.hint.text())
+        self.assertTrue(w.remote_selector.group.isEnabled())
+        self.assertIn('本机', w.remote_selector.combo.currentText())
         wait_until(lambda: [row['case_id'] for row in w._case_rows]
                    == ['case_a', 'case_b'])
         # 死数据集路径留在框里，但工程体素模式的 validate 绝不触碰它。
         w.dataset_edit.setText(str(self.root / 'gone' / 'dataset'))
+        # R98：选中的远程配置必须原样进入请求（用户场景：无原图 + 远程）。
+        w.remote_selector.combo.addItem('远程 · labgpu', ('remote', 'srv'))
+        w.remote_selector.combo.setCurrentIndex(
+            w.remote_selector.combo.count() - 1)
         captured = []
 
         def fake_create(request):
@@ -547,8 +559,8 @@ class TestUiWorkflow(unittest.TestCase):
         request = captured[0]
         self.assertEqual('project_voxels', request['label_source'])
         self.assertEqual('', request['dataset_root'])
-        self.assertEqual('local', request['execution_backend'])
-        self.assertEqual('', request['remote_profile_id'])
+        self.assertEqual('remote', request['execution_backend'])
+        self.assertEqual('srv', request['remote_profile_id'])
         self.assertEqual(str(mcs_dir), request['mcs_dir'])
         self.assertEqual(['case_a', 'case_b'], request['cases'])
         # 提交后记住的是输入框文本而非请求值：工程体素模式的
