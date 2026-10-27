@@ -591,6 +591,37 @@ class TestUiWorkflow(unittest.TestCase):
             wait_until(lambda: '没有 .mcs 工程文件' in w.status_label.text())
             create.assert_not_called()
 
+    def test_flexict_case_summary_reports_auto_validation_split(self):
+        # R98-B：不手选验证病例时管线自动按层位均匀抽取。摘要必须说出
+        # 实际会发生什么（"验证自动抽取 N 例"），而不是误导性的"验证 0"；
+        # 手动勾选优先；自动抽取数量可超过 10（旧控件上限）。
+        import flexict_training_setup_ui as ui
+        w = self.keep(ui.TrainingSetupWindow(
+            {'workspace': str(self.root / 'flex')},
+            self.root / 'context.json', QT))
+        w._case_rows = [
+            {'case_id': 'case_{:02d}'.format(i), 'checked': True,
+             'use_train': True, 'use_val': False, 'status': 'OK'}
+            for i in range(12)
+        ]
+        w._refresh_cases()
+        self.assertIn('验证自动抽取 1 例', w.case_summary.text())
+        # 自动抽取数量跟随验证病例数控件实时刷新。
+        w.val_spin.setValue(4)
+        APP.processEvents()
+        self.assertIn('验证自动抽取 4 例', w.case_summary.text())
+        w.val_spin.setValue(20)
+        APP.processEvents()
+        # 收缩到 可用病例数-1，与管线行为一致。
+        self.assertIn('验证自动抽取 11 例', w.case_summary.text())
+        # 手动勾选优先：勾选 2 例后按手动计数显示。
+        w._case_rows[0]['use_val'] = True
+        w._case_rows[1]['use_val'] = True
+        w._update_case_summary()
+        summary = w.case_summary.text()
+        self.assertIn('验证 2', summary)
+        self.assertNotIn('自动抽取', summary)
+
     def test_export_small_screen_has_scroll_and_visible_primary_action(self):
         import io_path_setup_ui as ui
         seen = []

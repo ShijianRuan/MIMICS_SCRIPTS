@@ -322,11 +322,15 @@ class TrainingSetupWindow:
         form.addWidget(QtWidgets.QLabel("训练轮数 (epoch)"), 1, 0)
         form.addWidget(self.epochs_spin, 1, 1)
         self.val_spin = QtWidgets.QSpinBox()
-        self.val_spin.setRange(1, 10)
+        # 管线会把留出数收缩到 可用病例数-1，UI 不再额外设 10 的上限。
+        self.val_spin.setRange(1, 999)
         self.val_spin.setValue(1)
         self.val_spin.setToolTip(
-            "从所选病例中留出多少例用于验证（用于选择最佳 checkpoint）。"
+            "留出多少例用于验证（用于选择最佳 checkpoint）。"
+            "未手动勾选验证病例时，自动从所选病例中按层位均匀抽取该数量；"
+            "手动勾选优先。"
         )
+        self.val_spin.valueChanged.connect(self._update_case_summary)
         form.addWidget(QtWidgets.QLabel("验证病例数"), 2, 0)
         form.addWidget(self.val_spin, 2, 1)
         self.mirror_combo = QtWidgets.QComboBox()
@@ -614,7 +618,6 @@ class TrainingSetupWindow:
         # unusable rows makes "已找到 12 个病例" sit next to an empty table,
         # and the user has no way to see WHY a case is not usable.
         rows = list(self._case_rows)
-        usable = 0
         for row in rows:
             index = self.case_table.rowCount()
             self.case_table.insertRow(index)
@@ -630,7 +633,6 @@ class TrainingSetupWindow:
                 status_item.setFlags(QtCore.Qt.NoItemFlags)
                 self.case_table.setItem(index, 3, status_item)
                 continue
-            usable += 1
             self.case_table.setItem(index, 0, case_item)
             use_check = QtWidgets.QCheckBox()
             use_check.setChecked(bool(row.get("use_train", True)))
@@ -648,17 +650,32 @@ class TrainingSetupWindow:
                 self._status_label(row.get("status", ""))
             )
             self.case_table.setItem(index, 3, status_item)
+        self._update_case_summary()
+
+    def _update_case_summary(self):
+        rows = list(getattr(self, "_case_rows", None) or [])
+        # 可用（checked）与已选在旧摘要里是同一个数（不可用行恒为
+        # checked=False），合并为一个"可用"；训练/验证计数只算可用行。
         selected = [row for row in rows if row.get("checked")]
         train_count = sum(1 for row in selected if row.get("use_train", True))
         val_count = sum(1 for row in selected if row.get("use_val", False))
-        summary = "共 {0} 例 · 可用 {1} · 已选 {2} · 训练 {3} · 验证 {4}".format(
-            len(rows), usable, len(selected), train_count, val_count
+        if val_count:
+            val_text = "验证 {0}".format(val_count)
+        elif selected:
+            # 未手动勾选验证病例：管线会自动按层位均匀抽取。摘要必须说出
+            # 实际会发生什么，否则"验证 0"会误导用户以为必须手选验证。
+            auto = max(1, min(self.val_spin.value(), len(selected) - 1))
+            val_text = "验证自动抽取 {0} 例".format(auto)
+        else:
+            val_text = "验证 0"
+        summary = "共 {0} 例 · 可用 {1} · 训练 {2} · {3}".format(
+            len(rows), len(selected), train_count, val_text
         )
         if selected and train_count == 0:
             # Every checked case is validation-only: training would run on an
             # empty split. Surface it here instead of at submit time.
             summary += " —— 训练集为空，请至少保留一个训练病例"
-        if rows and usable == 0:
+        if rows and not selected:
             summary += " —— 没有可用病例：请检查标签名是否与 Mask 文件名一致"
         self.case_summary.setText(summary)
 
