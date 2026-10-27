@@ -30,7 +30,7 @@
 > label_source="prepared" 运行——完全源无关。原拒绝是 D28 首期保守范围
 > 划定，非数据链路缺口。
 
-**待办 R98-A〔P1〕工程体素 + 远程训练解禁**
+**已解决 R98-A〔P1〕工程体素 + 远程训练解禁（commit e318a84 + e9238dd，2026-10-27）**
 
 - 痛点：真实场景（无原图数据集的机器 + 远程训练服务器）被创建器与两个训练
   UI 的首期拒绝挡死，用户无法完成交付闭环。
@@ -47,8 +47,17 @@
     prepare_source_grid_cases 返回工程体素行 → `_prepare_nnunet` 产出
     label_source="prepared"、mcs_dir=""、bundle 内 input/labels NIfTI 拷贝；
   ⑤ 既有三种 label_source 的本地/远程行为逐字节不变（既有测试全绿）。
+- 证据：e318a84 移除两创建器 train 拒绝并重写拒绝测试为成功路径
+  （test_review_workflow_regressions.py：nnU-Net 断言 job 目录 + remote_spec
+  kind/pid + `_launch` 调用，FlexiCT 断言 fake Popen + spec kind）；e9238dd
+  解禁两 UI 远程选择器（test_ui_workflow_regressions.py：选择器 enabled、
+  请求携带 execution_backend=remote + remote_profile_id，nnU-Net 与 FlexiCT
+  各一）；test_nnunet_integration.py 新增
+  test_remote_training_prepare_transparent_to_project_voxels_source（验收④，
+  真 `_prepare_nnunet` + mock prepare_source_grid_cases）。⑤ 由 fast 门禁
+  34/34 全绿背书（工件 20261027T140633_fast.json）。
 
-**待办 R98-B〔P2〕FlexiCT 训练窗"病例与验证"呈现误导**
+**已解决 R98-B〔P2〕FlexiCT 训练窗"病例与验证"呈现误导（commit e5a9304，2026-10-27）**
 
 - 痛点：用户以为必须手选验证病例；摘要行显示"验证 0"，实际不手选时管线会
   自动抽取（<8 例取末尾 N 例，≥8 例按层位物理排序均匀抽取，
@@ -62,6 +71,11 @@
   ② 验证选择控件 tooltip 说明"不手动勾选时自动按层位均匀抽取"；
   ③ val_spin 上限提升（管线本就 clamp 到 len-1，UI 不再额外设 10 上限）；
   ④ 手选验证病例时行为与呈现不变（显式勾选优先于自动抽取）。
+- 证据：e5a9304——新方法 `_update_case_summary`（自动抽取文案 N 与管线同
+  规则收缩到 len-1，随 val_spin 实时刷新）、tooltip 重写、上限 10→999；
+  回归测试 test_flexict_case_summary_reports_auto_validation_split
+  （test_ui_workflow_regressions.py）锁定①③④（含 >10 收缩与手选优先），
+  test_gui_smoke.py 既有摘要断言保持绿。
 
 ### R97（2026-10-26 用户指令：训练/远程训练/.mcs 工程训练独立审计并自主修复）
 
