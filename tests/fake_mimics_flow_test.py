@@ -23,6 +23,8 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = ROOT / "runtime_py35"
@@ -1330,6 +1332,59 @@ def test_window_level_from_selected_mask(fake, tmp):
     return "mask-name preset, image-range clamp, reset retry, state save, undo, and no-image guard passed"
 
 
+def test_window_level_auto_contrast(fake, tmp):
+    # R102: MR-style auto contrast — percentile window from the image's own
+    # histogram, applied in GV space (no HU2GV), undoable, and reachable as
+    # the 自动对比度 button in the choose dialog.
+    image = fake.reset_scene(image_shape=(4, 4, 4), minimum_value=0, maximum_value=4095)
+    # 1 floor sample + 1 spike out of 64 (1.6% each) sit outside the p1/p99
+    # clip points, so both get trimmed instead of crushing the tissue range.
+    arr = np.full(64, 400, dtype=np.uint16)
+    arr[0] = 0         # air/noise floor
+    arr[-1] = 4000     # MR noise spike
+    image.get_voxel_buffer = lambda: memoryview(arr)
+    module = import_runtime_module("window_level_mimics")
+    state_path = tmp / "window_auto_state.json"
+    original_state_path = module._state_path
+    module._state_path = lambda: str(state_path)
+    try:
+        expected_low = int(round(float(np.percentile(arr, 1.0))))
+        expected_high = int(round(float(np.percentile(arr, 99.0))))
+        assert_true(expected_high < 4000, "fixture must contain clipped spikes")
+
+        assert_equal(module.auto_contrast(), 0, "auto_contrast result")
+        assert_equal(
+            fake.view.get_contrast(), ((expected_low, 0.0), (expected_high, 1.0)),
+            "auto contrast must clip noise spikes instead of full range",
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert_equal(state.get("last_preset"), "Auto Contrast", "auto contrast state preset")
+        assert_equal(state.get("source"), "auto_contrast", "auto contrast state source")
+
+        # Undo restores the pre-auto contrast display.
+        module.undo_last()
+        assert_equal(
+            fake.view.get_contrast(), ((0.0, 0.0), (4095.0, 1.0)),
+            "undo must restore contrast before auto contrast",
+        )
+
+        # Real entry path: the dialog's 自动对比度 button drives auto_contrast.
+        fake.dialogs.question_answers = ["自动对比度"]
+        assert_equal(module.choose_preset(), 0, "choose_preset result")
+        question = fake.dialogs.questions[-1]
+        assert_true(
+            "自动对比度" in str(question.get("buttons", "")),
+            "dialog must offer the auto contrast button",
+        )
+        assert_equal(
+            fake.view.get_contrast(), ((expected_low, 0.0), (expected_high, 1.0)),
+            "dialog auto contrast button must apply the percentile window",
+        )
+    finally:
+        module._state_path = original_state_path
+    return "auto contrast percentile window, undo, and dialog button entry passed"
+
+
 def test_mask_identifier_all_mask_bbox_scan(fake, tmp):
     image = fake.reset_scene(image_shape=(3, 3, 3), minimum_value=0, maximum_value=100)
     fake.dialogs.messages = []
@@ -2061,6 +2116,7 @@ def main(argv=None):
         tests.append(("Scripting Library shared entrypoint", lambda: test_scripting_entrypoint(fake, tmp / "entrypoint")))
     if args.only in ("window", "all"):
         tests.append(("window/level selected-mask flow", lambda: test_window_level_from_selected_mask(fake, tmp / "window")))
+        tests.append(("window/level auto contrast flow", lambda: test_window_level_auto_contrast(fake, tmp / "window_auto")))
         tests.append(("mask identifier all-mask bounding-box scan", lambda: test_mask_identifier_all_mask_bbox_scan(fake, tmp / "mask_identifier")))
     if args.only in ("export", "all"):
         tests.append(("mask export buffer flow", lambda: test_export_masks_to_buffers(fake, tmp / "export")))

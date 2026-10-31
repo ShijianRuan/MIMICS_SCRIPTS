@@ -3115,6 +3115,168 @@ class TestWindowLevel(unittest.TestCase):
         self.assertEqual(4095, maximum)
         self.assertLess(minimum, maximum)
 
+    @staticmethod
+    def _make_buffer_image(data, minimum=0, maximum=4095, raise_buffer=False):
+        class _Info(object):
+            def __init__(self):
+                self.minimum_value = minimum
+                self.maximum_value = maximum
+
+        class _Image(object):
+            def get_image_information(self):
+                return _Info()
+
+            def get_voxel_buffer(self):
+                if raise_buffer:
+                    raise RuntimeError("buffer unavailable")
+                return memoryview(data)
+
+        return _Image()
+
+    def test_auto_contrast_points_clip_noise_spikes(self):
+        """R102: auto contrast clips the histogram at p1/p99 instead of
+        min→max — MR noise spikes (4000) must not crush the tissue range."""
+        from window_level_mimics import _auto_contrast_points
+
+        # MR-like histogram: spread tissue signal plus a noise floor and spikes.
+        # A constant tissue value would make p1 == p99 (degenerate fallback).
+        rng = np.random.RandomState(102)
+        data = rng.randint(100, 800, size=10000).astype(np.uint16)
+        data[:50] = 0          # air/noise floor
+        data[-50:] = 4000      # noise spikes
+        image = self._make_buffer_image(data)
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=image
+        ):
+            low, high = _auto_contrast_points()
+        expected_low = int(round(float(np.percentile(data, 1.0))))
+        expected_high = int(round(float(np.percentile(data, 99.0))))
+        self.assertEqual(expected_low, low)
+        self.assertEqual(expected_high, high)
+        self.assertLess(high, int(data.max()))  # spike not included
+
+    def test_auto_contrast_points_degenerate_falls_back(self):
+        """Failure path: identical voxels (p99 == p1) fall back to the full
+        image range rather than a zero-width window."""
+        from window_level_mimics import _auto_contrast_points
+
+        data = np.full(1000, 400, dtype=np.uint16)
+        image = self._make_buffer_image(data, minimum=0, maximum=4095)
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=image
+        ):
+            low, high = _auto_contrast_points()
+        # The percentile result (400, 400) is degenerate and rejected in
+        # favor of the reported image range.
+        self.assertEqual(0, low)
+        self.assertEqual(4095, high)
+
+    def test_auto_contrast_points_buffer_error_falls_back(self):
+        """Failure path: a raising voxel buffer must not crash auto contrast
+        — it falls back to the reported image range."""
+        from window_level_mimics import _auto_contrast_points
+
+        image = self._make_buffer_image(
+            None, minimum=10, maximum=500, raise_buffer=True
+        )
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=image
+        ):
+            low, high = _auto_contrast_points()
+        self.assertEqual(10, low)
+        self.assertEqual(500, high)
+
+    def test_auto_contrast_points_no_image_falls_back(self):
+        """Failure path: no active image at all falls back like reset."""
+        from window_level_mimics import _auto_contrast_points
+
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=None
+        ):
+            low, high = _auto_contrast_points()
+        self.assertEqual(0, low)
+        self.assertEqual(4095, high)
+
+    def test_auto_contrast_points_strides_large_buffers(self):
+        """Buffers above the sample cap are strided, not fully sorted —
+        and the strided estimate matches the same computation offline."""
+        from window_level_mimics import (
+            AUTO_SAMPLE_LIMIT,
+            _auto_contrast_points,
+        )
+
+        rng = np.random.RandomState(7)
+        data = rng.randint(0, 3000, size=AUTO_SAMPLE_LIMIT * 3).astype(
+            np.uint16
+        )
+        image = self._make_buffer_image(data)
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=image
+        ):
+            low, high = _auto_contrast_points()
+        step = -(-data.size // AUTO_SAMPLE_LIMIT)
+        sampled = data[::step]
+        expected_low = int(round(float(np.percentile(sampled, 1.0))))
+        expected_high = int(round(float(np.percentile(sampled, 99.0))))
+        self.assertEqual(expected_low, low)
+        self.assertEqual(expected_high, high)
+
+    def test_choose_preset_dialog_offers_auto_contrast(self):
+        """R102: the dialog offers 自动对比度 (MR 适用) and wiring it calls
+        auto_contrast()."""
+        import window_level_mimics as wl
+
+        captured = {}
+
+        def fake_question_box(**kwargs):
+            captured.update(kwargs)
+            return wl.AUTO_CONTRAST_BUTTON
+
+        with mock.patch.object(
+            _mock_mimics.dialogs, "question_box", side_effect=fake_question_box
+        ), mock.patch.object(wl, "auto_contrast") as fake_auto:
+            wl._choose_preset(wl.DEFAULT_PRESETS)
+        self.assertIn(wl.AUTO_CONTRAST_BUTTON, captured["buttons"].split(";"))
+        self.assertIn("MR", captured["message"])
+        self.assertEqual(1, fake_auto.call_count)
+
+    def test_auto_contrast_applies_percentile_window_and_undo_state(self):
+        """End-to-end through auto_contrast(): percentile window applied via
+        set_contrast and recorded so 撤销上一次 can restore it."""
+        import window_level_mimics as wl
+
+        # Spread tissue signal (constant tissue would make p1 == p99 and trip
+        # the degenerate full-range fallback instead of exercising the window).
+        rng = np.random.RandomState(103)
+        data = rng.randint(100, 800, size=10000).astype(np.uint16)
+        data[:50] = 0
+        data[-50:] = 4000
+        image = self._make_buffer_image(data)
+        previous = ((0, 0.0), (4095, 1.0))
+        calls = []
+        state_path = os.path.join(self.tmp, "state.json")
+
+        with mock.patch.object(
+            _mock_mimics.data.images, "get_active", return_value=image
+        ), mock.patch.object(
+            _mock_mimics.view, "set_contrast",
+            side_effect=lambda low, high: calls.append((low, high)),
+        ), mock.patch.object(
+            _mock_mimics.view, "get_contrast", return_value=previous,
+        ), mock.patch.object(
+            wl, "_state_path", return_value=state_path,
+        ):
+            self.assertEqual(0, wl.auto_contrast())
+        self.assertEqual(1, len(calls))
+        low, high = calls[0][0][0], calls[0][1][0]
+        self.assertEqual(int(round(float(np.percentile(data, 1.0)))), low)
+        self.assertEqual(int(round(float(np.percentile(data, 99.0)))), high)
+        with open(state_path, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        self.assertEqual("Auto Contrast", state["last_preset"])
+        self.assertEqual("auto_contrast", state["source"])
+        self.assertEqual([[0.0, 0.0], [4095.0, 1.0]], state["previous_contrast"])
+
     def test_load_presets_returns_defaults_when_no_file(self):
         from window_level_mimics import _load_presets
 
@@ -4628,6 +4790,8 @@ class TestScriptingLibraryEntries(unittest.TestCase):
         source = inspect.getsource(_choose_preset)
         self.assertIn("撤销上一次", source)
         self.assertIn("编辑预设…", source)
+        # R102: auto contrast (MR 适用) rides along as a dialog button too.
+        self.assertIn("自动对比度", source)
 
     def test_living_docs_do_not_reference_deleted_entries(self):
         """B24: entries deleted by R41/R43 must not appear as live references

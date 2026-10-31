@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CT window/level helpers for Mimics annotation workflows."""
+"""CT window/level presets and modality-agnostic auto contrast for Mimics."""
 
 from __future__ import print_function
 
@@ -192,6 +192,42 @@ def _hu_to_gv(value):
     return gv
 
 
+AUTO_CONTRAST_BUTTON = "自动对比度"
+# Strided-sample cap: percentile math stays in the tens of milliseconds on
+# any clinical volume, so the Mimics GUI never waits on a full-volume sort.
+AUTO_SAMPLE_LIMIT = 1024 * 1024
+AUTO_PERCENTILE = 1.0
+
+
+def _auto_contrast_points():
+    """Auto contrast points from the image's own intensity histogram (GV).
+
+    MR images carry no HU scale, so the CT presets do not apply; like
+    ITK-SNAP's auto window/level, clip the histogram at low/high percentiles
+    instead of min→max so noise spikes cannot crush the visible range.
+    Returns (low, high) GV points, falling back to the full image range.
+    """
+    image = _active_image()
+    minimum, maximum = _image_min_max()
+    low, high = minimum, maximum
+    if image is not None:
+        try:
+            import numpy as np
+
+            samples = np.asarray(image.get_voxel_buffer()).ravel()
+            if samples.size > AUTO_SAMPLE_LIMIT:
+                step = -(-samples.size // AUTO_SAMPLE_LIMIT)
+                samples = samples[::step]
+            if samples.size:
+                low = int(round(float(np.percentile(samples, AUTO_PERCENTILE))))
+                high = int(round(float(np.percentile(samples, 100.0 - AUTO_PERCENTILE))))
+        except Exception:
+            low, high = minimum, maximum
+    if high <= low:
+        low, high = minimum, maximum
+    return low, high
+
+
 def _current_contrast():
     getter = getattr(mimics.view, "get_contrast", None)
     if callable(getter):
@@ -301,10 +337,10 @@ def _apply_preset(preset, source):
 
 def _choose_preset(presets, selected_name=""):
     buttons = [str(preset.get("name", "")) for preset in presets if preset.get("name")]
-    # C2: the dialog is the single window/level surface — Undo and the preset
-    # editor ride along as buttons instead of separate menu entries.
-    buttons.extend(["撤销上一次", "编辑预设…", "恢复全范围", "取消"])
-    message = "请选择一个 CT 窗宽窗位预设。"
+    # C2: the dialog is the single window/level surface — Undo, auto contrast
+    # and the preset editor ride along as buttons instead of separate menu entries.
+    buttons.extend(["自动对比度", "撤销上一次", "编辑预设…", "恢复全范围", "取消"])
+    message = "请选择 CT 窗宽窗位预设，或选择“自动对比度”（MR 等非 CT 影像适用）。"
     if selected_name:
         message += "\n当前选中掩膜：{0}".format(selected_name)
     answer = mimics.dialogs.question_box(
@@ -314,6 +350,9 @@ def _choose_preset(presets, selected_name=""):
         ui_blocking=True,
     )
     if not answer or answer == "取消":
+        return None
+    if answer == AUTO_CONTRAST_BUTTON:
+        auto_contrast()
         return None
     if answer == "恢复全范围":
         reset_full_range()
@@ -350,6 +389,26 @@ def choose_preset():
     preset = _choose_preset(presets, selected_name)
     if preset is not None:
         _apply_preset(preset, "manual_choice")
+    return 0
+
+
+def auto_contrast():
+    previous = _json_contrast(_current_contrast())
+    low, high = _set_contrast_points(*_auto_contrast_points())
+    _save_state(
+        {
+            "previous_contrast": previous,
+            "last_preset": "Auto Contrast",
+            "last_low_gv": low,
+            "last_high_gv": high,
+            "source": "auto_contrast",
+            "updated_at_epoch": time.time(),
+        }
+    )
+    _mimics_log(
+        logging.INFO,
+        "Auto contrast applied from image histogram (GV={0}-{1}).".format(low, high),
+    )
     return 0
 
 
