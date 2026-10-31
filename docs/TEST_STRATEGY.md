@@ -98,6 +98,7 @@ python_env/python.exe tools/run_regression_matrix.py --list
 | SLIP 无 GPU 机器拒绝路径（R91-6/SL06） | 在无 CUDA 的机器上跑 SLIP/01_Annotate 入口 | 在创建草稿/导出缓冲之前被明确拒绝并提示需要 CUDA GPU，不产生任何半途产物 |
 | nnU-Net AL 端到端（R93-1） | nnU-Net 训练窗对 Totalsegmentator 只读小子集逐折训练 2 折 → `02_AI/nnUNet/05_Active_Learning_Review` 排序未标注池 → 复核窗口双击开病例/叠加不确定度带/标记状态 | ranking.csv 排序合理；不确定度双带出现在 Mimics；annotation_state.json 状态回流；全程不写源数据集路径 |
 | 分发工程预测（D20/R95-4） | 管线创建的 .mcs 复制到脱离数据集的目录（源路径不可达）→ nnU-Net 与 FlexiCT 预测各跑 1 例 | 预测窗口提示体素模式（仅本机）；预测完成 mask 叠加回工程；网格恒等快路无重采样损失；job 目录 input/ 内含 project_image.raw |
+| nnInteractive 同图连续标注（R100⑧） | 同一病例连续 3+ 次进入交互工具（换目标 Mask / 退出重进），观察首次预测等待 | 第一次之后的进入不再出现 ~55s 服务器容量重启等待；日志可见 "reused N background image worker(s)" 收养记录而非新起 worker；同时确认不同 NIfTI 导入产生不同 image GUID（若不稳定需加内容指纹后再收养） |
 
 ## 资源清单（运行测试需要什么）
 

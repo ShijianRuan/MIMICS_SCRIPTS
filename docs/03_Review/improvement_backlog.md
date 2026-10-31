@@ -34,7 +34,7 @@
 > 零新增启动、重启、清理逻辑。多候选同图时优先持有服务器会话者
 > （.nninteractive_server.json 的 client_control_dir）。
 
-**进行中 R100〔P1〕同图连续标注每次 ~65-72 秒等待**
+- [x] **R100【P1】同图连续标注每次 ~65-72 秒等待**：
 
 - 痛点：同一病例连续标注（换目标 Mask 或重新进入工具），每次都要等
   65-72 秒才出第一个预测结果；标注者每例都会碰到。
@@ -61,6 +61,30 @@
   ⑧ L5 实机验证：同图多次进入工具，首提示不再出现 ~55s 重启等待；
     并验证不同 NIfTI 导入产生不同 image GUID（日志 7 次启动同 GUID 已是
     强证据；若 L5 发现 GUID 不稳定，加内容指纹校验后再收养）。
+  〔当轮解决，commits `dc0f31e`（实现：`_adopt_disk_image_workers`
+  ~63 行 + `_continue_session_prompt` 内 1 个调用点——缓存未命中时扫
+  `async_jobs/image_worker_*` 的 image_worker.json，存活者按其记录的
+  cache_key 重新登记，多候选优先 `.nninteractive_server.json`
+  client_control_dir 持有者否则 created_at_epoch 最新者，绝不覆盖已存活
+  内存项；之后完全走既有 prewarm 命中/共享/`_retire_idle_image_workers`
+  优雅退役路径，零新增启动/重启/清理逻辑）+ `a5da6db`（fake-mimics 流
+  测试 +204 行，失败路径优先）。
+  验收对照：①缓存命中直返（`_get_or_start_image_worker` 既有快路）+
+  flow 测试步骤 2（同图 worker 收养后过 `_shared_image_worker_alive`）；
+  ②flow 测试步骤 7（收养的他图 worker 被
+  `_retire_idle_image_workers` 写 close.json 优雅退役，同图收养者不退）；
+  ③flow 测试步骤 1（expired/进程死/manifest 损坏 `"{not json`/无 manifest
+  四路 → 0 收养不抛错，缓存保持空）+ 步骤 6（runtime 根不存在 → 静默 0）；
+  ④flow 测试步骤 3（session 持有者胜过更新候选；无 server 态时最新者胜）；
+  ⑤flow 测试步骤 5（`async_reuse_image_worker: False` → 0）；⑥结构性
+  验证——入口 `_run_with_config` 的两处 busy 检查（:3139/:3153）在
+  `_run_async`→`_continue_session_prompt`→收养（:2993）之前执行，且 Mimics
+  每次调用重载模块、busy 检查时缓存必为空，收养项永远不进本次入口
+  拒绝；另有 flow 测试步骤 4（已存活内存项绝不被收养覆盖）；⑦收养只写
+  `_ASYNC_IMAGE_WORKERS` 内存 dict（步骤 7 断言唯一磁盘写是退役者的
+  close.json）；既有套件全绿；⑧归入 R96-3/R95-4 L5 轮（TEST_STRATEGY.md
+  已加行）。门禁：nninteractive flow 3/3、smoke 9/9
+  （20261031T132049_smoke.json）、fast 34/34（20261031T133028_fast.json）。〕
 
 ### R98（2026-10-27 用户立项：工程体素 + 远程训练组合 + FlexiCT 病例/验证划分呈现）
 
