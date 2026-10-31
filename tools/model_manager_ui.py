@@ -749,7 +749,7 @@ class ModelManagerWindow:
             configuration if configuration is not None else importable[0]
         )
         use_folds = None
-        folds = [str(name) for name in (row or {}).get("complete_folds") or []]
+        folds = [str(name) for name in (row or {}).get("usable_folds") or []]
         if (row or {}).get("requires_fold_selection") and folds:
             default = "fold_all" if "fold_all" in folds else folds[0]
             choice, ok = QtWidgets.QInputDialog.getItem(
@@ -765,6 +765,22 @@ class ModelManagerWindow:
             if not ok:
                 return
             use_folds = [str(choice)]
+        fallback = str((row or {}).get("fallback_checkpoint") or "")
+        if fallback:
+            # 中断训练的结果只有最优权重可用：导入前说清楚，别让标注者
+            # 在预测结果异常时才发现权重不是最终权重。
+            answer = QtWidgets.QMessageBox.question(
+                self.window,
+                "没有最终权重",
+                "该训练结果没有 checkpoint_final.pth（训练未跑满或中断导出），\n"
+                "导入后将使用验证集最优权重 {0} 进行推理。\n\n继续导入吗？".format(
+                    fallback
+                ),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
         self._external_import_from(
             use_folds=use_folds, configuration=configuration
         )
@@ -833,12 +849,19 @@ class ModelManagerWindow:
         )
         usable, reason = nnunet_common.model_usability(manifest)
         status_text = "可正常使用" if usable else "不可用：{0}".format(reason)
+        recipe = manifest.get("recipe") or {}
+        checkpoint_name = str(recipe.get("checkpoint_name") or "")
+        checkpoint_text = (
+            "权重：{0}（训练未跑满，使用验证集最优权重）\n".format(checkpoint_name)
+            if checkpoint_name and checkpoint_name != "checkpoint_final.pth"
+            else ""
+        )
         reused = bool(result.get("reused"))
         self.QtWidgets.QMessageBox.information(
             self.window,
             "该模型此前已导入" if reused else "导入完成",
             "模型名：{0}\n分割目标：{1}\n要求的输入：{2}\n来源：{3}\n"
-            "大小：{4}\n兼容状态：{5}\n\n{6}\n\n"
+            "大小：{4}\n兼容状态：{5}\n{6}{7}\n\n"
             "外部预训练／未做本地效果验证；"
             "请在 nnU-Net 预测窗口选择此模型使用。".format(
                 manifest.get("display_name")
@@ -850,6 +873,7 @@ class ModelManagerWindow:
                 source_text,
                 size_text,
                 status_text,
+                checkpoint_text,
                 "相同内容的模型此前已导入，未生成重复版本。"
                 if reused
                 else "模型已发布到本机模型库。",

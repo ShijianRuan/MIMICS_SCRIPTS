@@ -87,7 +87,8 @@ class ExternalModelScan(unittest.TestCase):
         self.assertEqual([], report["candidates"][0]["blockers"])
         row = report["candidates"][0]
         self.assertEqual("nnUNetTrainer", row["trainer"])
-        self.assertEqual(["fold_0"], row["complete_folds"])
+        self.assertEqual(["fold_0"], row["usable_folds"])
+        self.assertIsNone(row["fallback_checkpoint"])
         self.assertEqual({"0": "CT"}, row["channel_names"])
         self.assertEqual([0, 1], row["mirroring_axes"])
         self.assertFalse(report["candidates"][0]["requires_fold_selection"])
@@ -126,6 +127,27 @@ class ExternalModelScan(unittest.TestCase):
         report = external.scan_external_model(self.root / "Dataset123_Example")
         blockers = "；".join(report["candidates"][0]["blockers"])
         self.assertIn("safetensors", blockers)
+        self.assertEqual([], report["importable"])
+
+    def test_scan_best_only_fold_is_importable_with_fallback_flag(self):
+        # 外部交付常在中断后发生：fold 只有验证集最优权重。nnU-Net 官方
+        # 推理支持 -chk checkpoint_best.pth，导入必须放行并标记回退。
+        build_model(self.root, checkpoint="checkpoint_best.pth")
+        report = external.scan_external_model(self.root / "Dataset123_Example")
+        row = report["candidates"][0]
+        self.assertEqual([], row["blockers"])
+        self.assertEqual(["fold_0"], row["usable_folds"])
+        self.assertEqual("checkpoint_best.pth", row["fallback_checkpoint"])
+        self.assertEqual(["3d_fullres"], report["importable"])
+
+    def test_scan_latest_only_fold_is_blocked(self):
+        # checkpoint_latest.pth 可能是首次验证前的早期权重：推理会产出
+        # 形似掩膜的垃圾结果。必须阻断并列出实际文件，不能静默放行。
+        build_model(self.root, checkpoint="checkpoint_latest.pth")
+        report = external.scan_external_model(self.root / "Dataset123_Example")
+        blockers = "；".join(report["candidates"][0]["blockers"])
+        self.assertIn("checkpoint_latest.pth", blockers)
+        self.assertIn("checkpoint_best.pth", blockers)
         self.assertEqual([], report["importable"])
 
     def test_scan_multichannel_model_is_blocked(self):
@@ -359,6 +381,62 @@ class ExternalModelImport(unittest.TestCase):
              {"name": "kidney", "id": 2, "aliases": ["kidney"]}],
             result["manifest"]["labels"],
         )
+
+    def test_import_best_only_model_publishes_fallback_recipe(self):
+        # 训练中断的结果只有最优权重：manifest 必须记录实际推理用的权重，
+        # 预测窗口按 recipe 判定可用性，而不是硬编码 checkpoint_final.pth。
+        self.source = build_model(self.root / "source_best", checkpoint="checkpoint_best.pth")
+        result = external.import_external_model(self.source, self.workspace)
+        manifest = result["manifest"]
+        self.assertEqual("checkpoint_best.pth", manifest["recipe"]["checkpoint_name"])
+        self.assertEqual(["fold_0"], manifest["folds_available"])
+        triplet = Path(manifest["model_dir"])
+        self.assertTrue((triplet / "fold_0" / "checkpoint_best.pth").is_file())
+        import nnunet_common
+        rows = [m for m in nnunet_common.load_models(self.workspace)
+                if m.get("model_id") == manifest["model_id"]]
+        self.assertEqual(1, len(rows))
+        usable, reason = nnunet_common.model_usability(rows[0])
+        self.assertTrue(usable, reason)
+        # 回归 nnunet_common 的硬编码修复：recipe 声明的权重缺失时不可用。
+        (triplet / "fold_0" / "checkpoint_best.pth").unlink()
+        usable, reason = nnunet_common.model_usability(rows[0])
+        self.assertFalse(usable)
+        self.assertIn("checkpoint_best.pth", reason)
+
+    def test_import_mixed_fold_checkpoints_requires_consistent_choice(self):
+        # fold_all 有最终权重、fold_0 只有最优权重：一次推理只能用同一份
+        # 权重文件，混选必须报错而不是猜测；单选各自成立。
+        self.source = build_model(
+            self.root / "source_mixed",
+            folds=("fold_all",),
+        )
+        fold_dir = self.source / "fold_0"
+        fold_dir.mkdir()
+        torch.save(
+            {
+                "trainer_name": "nnUNetTrainer",
+                "network_weights": {},
+                "current_epoch": 100,
+                "inference_allowed_mirroring_axes": [0, 1],
+            },
+            str(fold_dir / "checkpoint_best.pth"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "权重不一致"):
+            external.import_external_model(
+                self.source, self.workspace, use_folds=["fold_0", "fold_all"]
+            )
+        self.assertFalse(self.external_root().exists())
+        result = external.import_external_model(
+            self.source, self.workspace, use_folds=["fold_all"]
+        )
+        self.assertEqual("checkpoint_final.pth", result["manifest"]["recipe"]["checkpoint_name"])
+        # 同一内容换 fold 再导入必须报错：静默复用旧 recipe 会让预测窗口
+        # 按 fold_all 的最终权重去找 fold_0，误判为不可用。
+        with self.assertRaisesRegex(RuntimeError, "已按 fold"):
+            external.import_external_model(
+                self.source, self.workspace, use_folds=["fold_0"]
+            )
 
     def test_import_same_content_twice_reuses_single_version(self):
         first = external.import_external_model(self.source, self.workspace)

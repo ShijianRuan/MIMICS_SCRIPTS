@@ -51,6 +51,9 @@ except ImportError:  # direct tools/ import (tests, smoke runs)
 EXTERNAL_SCHEMA_VERSION = "mimics_nnunet_external_model.v1"
 EXTERNAL_MANIFEST_NAME = "external_model_manifest.json"
 CHECKPOINT_NAME = "checkpoint_final.pth"
+# 外部训练结果常在中断后交付，只有验证集最优权重（nnU-Net 官方推理支持
+# -chk checkpoint_best.pth）；导入时按 fold 实际持有情况回退到它。
+FALLBACK_CHECKPOINT_NAME = "checkpoint_best.pth"
 MAX_ZIP_FILES = 50000
 MAX_ZIP_TOTAL_BYTES = 32 * 1024 ** 3
 MAX_ZIP_COMPRESSION_RATIO = 200
@@ -220,6 +223,20 @@ def _trainer_is_builtin(trainer_name: str) -> bool | None:
     return found is not None
 
 
+def _fold_checkpoint(fold_row: dict[str, Any]) -> str | None:
+    """The checkpoint one fold can predict from: final when training ran to
+    the end, else the validation-best checkpoint. ``checkpoint_latest.pth``
+    is deliberately not accepted: before the first validation it holds barely
+    trained weights that would still produce a plausible-looking garbage mask.
+    """
+    checkpoints = fold_row["checkpoints"]
+    if CHECKPOINT_NAME in checkpoints:
+        return CHECKPOINT_NAME
+    if FALLBACK_CHECKPOINT_NAME in checkpoints:
+        return FALLBACK_CHECKPOINT_NAME
+    return None
+
+
 def _scan_config_dir(config_dir: Path) -> dict[str, Any]:
     row: dict[str, Any] = {
         "config_dir": str(config_dir),
@@ -230,7 +247,8 @@ def _scan_config_dir(config_dir: Path) -> dict[str, Any]:
         "channel_names": None,
         "labels": None,
         "folds": [],
-        "complete_folds": [],
+        "usable_folds": [],
+        "fallback_checkpoint": None,
         "requires_fold_selection": False,
         "mirroring_axes": None,
         "missing": [],
@@ -251,21 +269,27 @@ def _scan_config_dir(config_dir: Path) -> dict[str, Any]:
         )
         fold_rows.append({"fold": fold_dir.name, "checkpoints": checkpoints})
     row["folds"] = fold_rows
-    complete = [f["fold"] for f in fold_rows if CHECKPOINT_NAME in f["checkpoints"]]
-    row["complete_folds"] = complete
-    row["requires_fold_selection"] = "fold_all" in complete and any(
-        f != "fold_all" for f in complete
+    usable = [f["fold"] for f in fold_rows if _fold_checkpoint(f)]
+    row["usable_folds"] = usable
+    row["requires_fold_selection"] = "fold_all" in usable and any(
+        f != "fold_all" for f in usable
     )
-    if not row["missing"] and not complete:
-        st_only = [
-            f["fold"]
-            for f in fold_rows
-            if f["checkpoints"] and CHECKPOINT_NAME not in f["checkpoints"]
-        ]
-        if st_only:
+    # 所有可用 fold 都没有最终权重时，导入必然回退到 checkpoint_best.pth；
+    # UI 用这个标记提前告知，而不是导入后才在结果里说。
+    if usable and not any(_fold_checkpoint(f) == CHECKPOINT_NAME for f in fold_rows):
+        row["fallback_checkpoint"] = FALLBACK_CHECKPOINT_NAME
+    if not row["missing"] and not usable:
+        partial = [f for f in fold_rows if f["checkpoints"]]
+        if partial:
             blockers.append(
-                "仅有 .safetensors 权重（无 {}）：需要先在目标环境验证 safetensors "
-                "加载能力，暂不放行。".format(CHECKPOINT_NAME)
+                "各 fold 均缺少可推理权重（需 {} 或 {}）：现有 {}。".format(
+                    CHECKPOINT_NAME,
+                    FALLBACK_CHECKPOINT_NAME,
+                    "；".join(
+                        "{}：{}".format(f["fold"], "、".join(f["checkpoints"]))
+                        for f in partial
+                    ),
+                )
             )
         else:
             blockers.append("没有任何包含 {} 的完整 fold。".format(CHECKPOINT_NAME))
@@ -339,9 +363,12 @@ def _scan_config_dir(config_dir: Path) -> dict[str, Any]:
                 "级联（cascade）模型需要完整推理链（前级结果与后处理），"
                 "首期导入暂不支持。"
             )
-    if complete:
+    if usable:
+        first = next(f for f in fold_rows if f["fold"] == usable[0])
         try:
-            payload = load_checkpoint_restricted(config_dir / complete[0] / CHECKPOINT_NAME)
+            payload = load_checkpoint_restricted(
+                config_dir / usable[0] / _fold_checkpoint(first)
+            )
         except RuntimeError as exc:
             blockers.append(str(exc))
         else:
@@ -494,6 +521,25 @@ def _select_importable_row(report: dict[str, Any], configuration: str | None) ->
     return rows[0]
 
 
+def _resolve_checkpoint_name(
+    fold_map: dict[str, dict[str, Any]], chosen_folds: list[str]
+) -> str:
+    """One checkpoint file must serve every chosen fold (the predictor loads
+    the same name from each fold directory). Mixed final/best coverage cannot
+    be served by a single recipe and is rejected, not guessed.
+    """
+    per_fold = [_fold_checkpoint(fold_map[name]) for name in chosen_folds]
+    if CHECKPOINT_NAME in per_fold and FALLBACK_CHECKPOINT_NAME in per_fold:
+        raise RuntimeError(
+            "所选 fold 的权重不一致：部分只有 {}，部分只有 {}，无法用同一份权重推理；"
+            "请只选择其中一类。".format(CHECKPOINT_NAME, FALLBACK_CHECKPOINT_NAME)
+        )
+    for name in (CHECKPOINT_NAME, FALLBACK_CHECKPOINT_NAME):
+        if name in per_fold:
+            return name
+    raise RuntimeError("所选 fold 没有可推理的权重文件。")
+
+
 def _import_directory(
     root: Path,
     workspace: str | Path,
@@ -504,20 +550,22 @@ def _import_directory(
 ) -> dict[str, Any]:
     report = _scan_directory(root, source_kind, source_display)
     row = _select_importable_row(report, configuration)
-    complete = list(row["complete_folds"])
-    chosen_folds = list(use_folds) if use_folds else complete
-    unknown = [f for f in chosen_folds if f not in complete]
+    usable = list(row["usable_folds"])
+    fold_map = {f["fold"]: f for f in row["folds"]}
+    chosen_folds = list(use_folds) if use_folds else usable
+    unknown = [f for f in chosen_folds if f not in usable]
     if unknown:
         raise RuntimeError(
             "选择的 fold 不可用：{}；可用 fold：{}。".format(
-                "、".join(unknown), "、".join(complete)
+                "、".join(unknown), "、".join(usable)
             )
         )
     if row["requires_fold_selection"] and not use_folds:
         raise RuntimeError(
             "fold_all 与数字 fold 并存（{}），请明确选择要使用的 fold，"
-            "不能混用。".format("、".join(complete))
+            "不能混用。".format("、".join(usable))
         )
+    checkpoint_name = _resolve_checkpoint_name(fold_map, chosen_folds)
     config_dir = Path(row["config_dir"])
     inventory = _file_inventory(config_dir)
     digest = _inventory_digest(inventory)
@@ -529,6 +577,16 @@ def _import_directory(
     if destination.is_dir():
         existing = read_json(destination / EXTERNAL_MANIFEST_NAME, default=None)
         if isinstance(existing, dict) and existing.get("content_sha256") == digest:
+            existing_folds = list((existing.get("recipe") or {}).get("use_folds") or [])
+            if existing_folds != chosen_folds:
+                # 同一内容换 fold 重新导入会静默沿用旧 recipe：混合权重场景下
+                # 预测窗口按旧 recipe 找不到权重文件，误判为不可用。必须报错。
+                raise RuntimeError(
+                    "相同内容的外部模型已按 fold {} 导入过（{}）；"
+                    "如需改用其他 fold，请先删除该外部模型后重新导入。".format(
+                        "、".join(existing_folds), destination
+                    )
+                )
             return {
                 "reused": True,
                 "model_id": model_id,
@@ -597,10 +655,10 @@ def _import_directory(
             "trainer": row["trainer"],
             "plans_name": row["plans_name"],
             "configuration": row["configuration"],
-            "folds_available": complete,
+            "folds_available": usable,
             "recipe": {
                 "use_folds": chosen_folds,
-                "checkpoint_name": CHECKPOINT_NAME,
+                "checkpoint_name": checkpoint_name,
                 "mirroring_axes": row["mirroring_axes"],
             },
             "channel_names": row["channel_names"],

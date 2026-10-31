@@ -986,15 +986,21 @@ def model_usability(model: dict[str, Any]) -> tuple[bool, str]:
         ]
     if not folds:
         return False, "没有已训练的 fold"
+    # 外部导入的模型可能声明回退到 checkpoint_best.pth（训练未跑满交付），
+    # 可用性按 manifest recipe 记录的权重文件判断，而不是硬编码最终权重。
+    recipe = model.get("recipe")
+    checkpoint_name = (
+        str(recipe.get("checkpoint_name") or "checkpoint_final.pth")
+        if isinstance(recipe, dict)
+        else "checkpoint_final.pth"
+    )
     missing = [
         value
         for value in folds
-        if not (model_dir / ("fold_" + value) / "checkpoint_final.pth").is_file()
+        if not (model_dir / ("fold_" + value) / checkpoint_name).is_file()
     ]
     if missing:
-        return False, "以下 fold 缺少 checkpoint_final.pth：{}".format(
-            ", ".join(missing)
-        )
+        return False, "以下 fold 缺少 {}：{}".format(checkpoint_name, ", ".join(missing))
     if not (model_dir / "plans.json").is_file():
         return False, "缺少 plans.json"
     if not (model_dir / "dataset.json").is_file():

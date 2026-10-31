@@ -552,7 +552,7 @@ class TestModelManagerExternalImport(unittest.TestCase):
                 [{
                     "configuration": "3d_fullres",
                     "blockers": [],
-                    "complete_folds": ["fold_0"],
+                    "usable_folds": ["fold_0"],
                     "requires_fold_selection": False,
                 }],
             )
@@ -607,6 +607,96 @@ class TestModelManagerExternalImport(unittest.TestCase):
                              "外部预训练／未做本地效果验证"):
                 self.assertIn(expected, message)
 
+    def test_fallback_checkpoint_confirms_then_imports_with_note(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                ["3d_fullres"],
+                [{
+                    "configuration": "3d_fullres",
+                    "blockers": [],
+                    "usable_folds": ["fold_0"],
+                    "requires_fold_selection": False,
+                    "fallback_checkpoint": "checkpoint_best.pth",
+                }],
+            )
+            captured = {}
+            result = {
+                "reused": False,
+                "manifest": {
+                    "display_name": "Dataset123_Example",
+                    "labels": [{"name": "tumor", "id": 1}],
+                    "channel_names": {"0": "CT"},
+                    "source": {"kind": "zip", "path": "D:/model.zip"},
+                    "files": [{"path": "a", "sha256": "x", "bytes": 1}],
+                    "model_dir": name,
+                    "folds": ["0"],
+                    "recipe": {"checkpoint_name": "checkpoint_best.pth"},
+                },
+            }
+
+            def fake_import(source, workspace, use_folds=None,
+                            configuration=None):
+                captured["args"] = (source, workspace, use_folds,
+                                    configuration)
+                return result
+
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model", side_effect=fake_import
+            ), mock.patch.object(
+                manager.nnunet_common, "model_usability",
+                return_value=(True, ""),
+            ), mock.patch.object(
+                QtWidgets.QMessageBox, "question",
+                return_value=QtWidgets.QMessageBox.Yes,
+            ) as question, mock.patch.object(
+                QtWidgets.QMessageBox, "information"
+            ) as info:
+                window._external_scan_from("D:/model_source")
+                self._drive(window, lambda: window._external_busy)
+            # 只有最优权重（训练未跑满）：导入前必须确认，说明用哪个权重。
+            question.assert_called_once()
+            self.assertIn("checkpoint_best.pth", question.call_args[0][2])
+            self.assertEqual(
+                (Path("D:/model_source"), Path(name), None, None),
+                captured["args"],
+            )
+            info.assert_called_once()
+            self.assertIn("权重：checkpoint_best.pth",
+                          info.call_args[0][2])
+
+    def test_fallback_checkpoint_declined_aborts_without_import(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                ["3d_fullres"],
+                [{
+                    "configuration": "3d_fullres",
+                    "blockers": [],
+                    "usable_folds": ["fold_0"],
+                    "requires_fold_selection": False,
+                    "fallback_checkpoint": "checkpoint_best.pth",
+                }],
+            )
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model"
+            ) as do_import, mock.patch.object(
+                QtWidgets.QMessageBox, "question",
+                return_value=QtWidgets.QMessageBox.No,
+            ):
+                window._external_scan_from("D:/model_source")
+                self._drive(window, lambda: window._external_busy)
+            do_import.assert_not_called()
+            self.assertTrue(window.external_import_button.isEnabled())
+
     def test_multiple_configurations_and_folds_require_choice(self):
         import nnunet_external_model as external
 
@@ -616,10 +706,10 @@ class TestModelManagerExternalImport(unittest.TestCase):
                 ["2d", "3d_fullres"],
                 [
                     {"configuration": "2d", "blockers": [],
-                     "complete_folds": ["fold_0"],
+                     "usable_folds": ["fold_0"],
                      "requires_fold_selection": False},
                     {"configuration": "3d_fullres", "blockers": [],
-                     "complete_folds": ["fold_0", "fold_all"],
+                     "usable_folds": ["fold_0", "fold_all"],
                      "requires_fold_selection": True},
                 ],
             )
@@ -655,10 +745,10 @@ class TestModelManagerExternalImport(unittest.TestCase):
             report = self._report(
                 ["2d", "3d_fullres"],
                 [{"configuration": "2d", "blockers": [],
-                  "complete_folds": ["fold_0"],
+                  "usable_folds": ["fold_0"],
                   "requires_fold_selection": False},
                  {"configuration": "3d_fullres", "blockers": [],
-                  "complete_folds": ["fold_0"],
+                  "usable_folds": ["fold_0"],
                   "requires_fold_selection": False}],
             )
             with mock.patch.object(
@@ -683,7 +773,7 @@ class TestModelManagerExternalImport(unittest.TestCase):
                 [],
                 [{"configuration": "3d_fullres",
                   "blockers": ["自定义训练器 MyCustomTrainer"],
-                  "complete_folds": [], "requires_fold_selection": False}],
+                  "usable_folds": [], "requires_fold_selection": False}],
                 rejected=[{"config_dir": "only_checkpoint",
                            "missing": ["dataset.json", "plans.json"]}],
             )
