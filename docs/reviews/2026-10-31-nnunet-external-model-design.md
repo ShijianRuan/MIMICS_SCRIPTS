@@ -1,6 +1,6 @@
 # 外部 nnU-Net 模型进入 Mimics 的设计方案
 
-日期：2026-10-31。代码核对版本：`33e738fca65526156791e03b5acf999f9d9928b3`。本文是兼容性调查与待实施设计；本轮没有新增原生 nnU-Net 目录/官方 ZIP 导入入口。已完成的缺陷修复见[修复报告](2026-10-31-nninteractive-fixes-external-nnunet.md)。
+日期：2026-10-31。代码核对版本：`33e738fca65526156791e03b5acf999f9d9928b3`。本文是兼容性调查与设计。首批实现已落地（commits `927355d` + `0d38a91`）：受限 checkpoint 加载、严格 ZIP 提取、只读扫描与受管理导入（`tools/nnunet_external_model.py`）；模型管理器 UI 原生导入入口与推理配方贯通为后续轮次。已完成的缺陷修复见[修复报告](2026-10-31-nninteractive-fixes-external-nnunet.md)。
 
 ## 可以跨电脑使用，但模型不是一个固定网络
 

@@ -2972,6 +2972,40 @@
 
 ## 进行中
 
+### R101（2026-10-31 用户指令：核验外部修正 + 继续完成外部 nnU-Net v2 模型导入）
+
+> 用户指令："有人对代码做了新改动，对你的设计做了修正和优化；请你检查
+> 是不是正确合理的，并继续完成没有完成的设计和优化"。外部修正 `33e738f`
+> 核验：fast 35/35 绿（`20261031T152558_fast.json`）；full 门禁 test_all
+> 唯一失败经取证为**环境干扰而非回归**——两把 2026-10-30 中断导出遗留的
+> 真实机器 export_labels 锁（pid 15340 已死）被未隔离的
+> `_background_mimics_lock_records` 扫进测试断言；已删陈旧锁（清后 0 把）
+> 并给两个受影响测试补 `resource_lock_dir` 隔离（`a3da6de`，沿用
+> test_all 既有 try/finally 写法）。设计依据：
+> `docs/reviews/2026-10-31-nnunet-external-model-design.md`。
+
+- [x] **R101-1【P1】外部 nnU-Net v2 模型只读导入（首期切片）**〔当轮解决，
+  commits `927355d` + `0d38a91`〕：新增 `tools/nnunet_external_model.py`——
+  ① 受限反序列化 checkpoint 加载（numpy allowlist + safe_globals +
+  weights_only，恶意 `__reduce__` 不执行 payload）；② 严格 ZIP 提取
+  （遍历/绝对路径/盘符/符号链接/压缩炸弹/大小写重复路径/文件数与总大小
+  上限全拒）；③ 只读扫描（三段式目录约定、近失目录以 rejected_candidates
+  列全缺失文件而非猜默认、多通道/级联/自定义训练器/region-based 标签/
+  safetensors-only/混合 fold 阻断并给中文原因）；④ 受管理导入（内容寻址
+  去重、staged 复制 + 清单摘要防复制期间篡改、原子发布到
+  `external_models/`、manifest 不进活跃预测注册表——Action4_Predict 不得
+  从外来目录名猜配方）。ai_model_bundle 的 checkpoint 校验改为委托同一
+  受限加载器（`0d38a91`，+4/−16，英文报错文案逐字保留，
+  test_model_portability 23/23 绿为行为不变证据）。
+  证据：test_nnunet_external_model 29/29（失败路径优先）；矩阵注册
+  fast+full（smoke ~1 分钟预算容不下 20-100s torch 套件）。
+- 待续（下轮，非本轮范围）：模型管理器 UI 原生导入入口、推理配方贯通
+  （use_folds/checkpoint_name 选择）、多通道病例绑定、级联/集成配置。
+- 红线核查：未用远程服务器；Z 盘数据集未触碰（全部离线临时目录夹具）；
+  python_env 未改动。
+- 净代码变化见复杂度账本 R101 行（+1044/−16 净 +1028：产品 +648/−16、
+  测试 +396；另有 a3da6de 测试隔离 +14）。
+
 ### R89（2026-10-22 用户指令：R88 审查问题修复 + SLIP 多模态启用）
 
 > 用户指令："修改发现的问题，以及思考既然SLIP支持其他模态，为什么
