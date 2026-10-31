@@ -15,6 +15,53 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R100（2026-10-31 用户批准立项：nnInteractive 同图连续标注 ~65-72 秒等待）
+
+> 用户原话："现在nninteractive还是在每例数据标注时明显的等待和慢，好好独立
+> 思考是否有更好的更聪明的方案做加速"，方案决策后用户批准："那请你解决吧谢谢"。
+>
+> 根因取证（.mimics_runtime/nninteractive/logs/nninteractive_mimics.log +
+> worker 目录走查，全部亲验）：Mimics 每次工具调用重载本模块 →
+> `_ASYNC_IMAGE_WORKERS` 内存缓存每次归零，而 worker 进程跨调用存活
+> （空闲超时 900s）→ 同图新会话重新起 worker → 单会话 owned 服务器容量
+> 冲突 → 破坏性容量恢复重启（~55s）+ 图像重载（~15s）。日志中 7 次
+> worker 启动全部同 image_guid/cache_key、同 parent_pid、无一次
+> close.json——"复用同图 worker"的设计被空缓存击穿。
+>
+> 方案：**磁盘收养**——缓存未命中时扫描 `async_jobs/image_worker_*` 下的
+> image_worker.json，把仍存活的 worker 按其记录的 cache_key 重新登记进
+> `_ASYNC_IMAGE_WORKERS`，之后完全走既有 prewarm 命中/共享/优雅退役路径，
+> 零新增启动、重启、清理逻辑。多候选同图时优先持有服务器会话者
+> （.nninteractive_server.json 的 client_control_dir）。
+
+**进行中 R100〔P1〕同图连续标注每次 ~65-72 秒等待**
+
+- 痛点：同一病例连续标注（换目标 Mask 或重新进入工具），每次都要等
+  65-72 秒才出第一个预测结果；标注者每例都会碰到。
+- 根因：见上——内存缓存跨调用失效 + 单会话服务器破坏性重启。
+- 影响视角：标注者（高频等待卡点，P1）。
+- 验收标准（写入即锁定）：
+  ① 同图连续会话：收养命中后不再新起 worker、不再触发服务器容量重启
+    （走既有共享路径，image.raw 不重复导出）；
+  ② 换图：既有 `_retire_idle_image_workers` 优雅退役收养来的他图
+    worker（写 close.json + 异步终止），不再依赖 900s 空闲超时后的
+    破坏性重启；
+  ③ 失败路径全部回退现状行为：worker_status 为 expired/closing/closed/
+    failed、进程已死、manifest 缺失或损坏、目录异常 → 不收养、不抛错，
+    行为与修复前一致（最坏等于现状）；
+  ④ 同 cache_key 多候选：优先 .nninteractive_server.json
+    client_control_dir 持有者，否则 created_at_epoch 最新者；落选者
+    不退役，交 900s 空闲超时自然退出；
+  ⑤ async_reuse_image_worker=False 时不收养（与既有开关语义一致）；
+  ⑥ 收养不喂给入口 busy 拒绝检查（_different_model_busy_workers/
+    _same_model_busy_workers 维持只看本调用内存，防止陈旧
+    pending_sequence 永久阻塞启动弹窗）；
+  ⑦ 收养只登记内存缓存，不产生任何新进程/文件/服务器交互；既有会话
+    行为不变（既有测试全绿）；
+  ⑧ L5 实机验证：同图多次进入工具，首提示不再出现 ~55s 重启等待；
+    并验证不同 NIfTI 导入产生不同 image GUID（日志 7 次启动同 GUID 已是
+    强证据；若 L5 发现 GUID 不稳定，加内容指纹校验后再收养）。
+
 ### R98（2026-10-27 用户立项：工程体素 + 远程训练组合 + FlexiCT 病例/验证划分呈现）
 
 > 用户原话："实际场景需要'无原图数据集 + 远程训练'组合；UI显示病例与验证里
