@@ -2990,6 +2990,7 @@ def _continue_session_prompt(
             _save_async_job(state)
             return False
 
+        _adopt_disk_image_workers(config)
         _retire_different_model_workers(config)
         _retire_idle_image_workers(
             config,
@@ -3591,6 +3592,71 @@ def _close_all_async_image_workers():
 
 
 atexit.register(_close_all_async_image_workers)
+
+
+def _adopt_disk_image_workers(config):
+    """Re-register image workers left on disk by earlier tool runs.
+
+    Mimics reloads this module for every tool invocation, so the in-process
+    worker cache starts empty each time even though the worker processes
+    outlive the invocation (idle timeout 900s). Without adoption every new
+    session on the same image started a duplicate worker, hit the owned
+    server's single-session capacity limit, and paid a destructive server
+    restart plus a full image reload. Adoption restores the intended
+    cross-invocation reuse; every failure path simply leaves the cache as
+    it was, i.e. the pre-adoption behavior.
+    """
+    if not bool(config.get("async_reuse_image_worker", True)):
+        return 0
+    try:
+        runtime_root = _runtime_work_dir(config)
+        jobs_root = os.path.join(runtime_root, "async_jobs")
+        names = sorted(os.listdir(jobs_root))
+    except Exception:
+        return 0
+    # Prefer the worker holding the owned server's single session so the
+    # adopted one can serve predictions without any server interaction.
+    server_state = _read_json(
+        os.path.join(runtime_root, ".nninteractive_server.json"), {}
+    )
+    session_holder_dir = os.path.abspath(
+        str((server_state or {}).get("client_control_dir") or "")
+    )
+    candidates = {}
+    for name in names:
+        worker_dir = os.path.abspath(os.path.join(jobs_root, name))
+        if not name.startswith("image_worker_") or not os.path.isdir(worker_dir):
+            continue
+        worker = _read_json(os.path.join(worker_dir, "image_worker.json"))
+        if not isinstance(worker, dict):
+            continue
+        worker["worker_dir"] = worker_dir
+        cache_key = str(worker.get("cache_key") or "")
+        if not cache_key or not _shared_image_worker_alive(worker):
+            continue
+        # Several live workers can exist for one image (one per earlier
+        # invocation). Rank: session holder first, then the newest; the
+        # losers are left alone and idle out on their own.
+        rank = (
+            1 if worker_dir == session_holder_dir else 0,
+            float(worker.get("created_at_epoch") or 0),
+        )
+        previous = candidates.get(cache_key)
+        if previous is None or rank > previous[0]:
+            candidates[cache_key] = (rank, worker)
+    adopted = 0
+    for cache_key, item in candidates.items():
+        if _shared_image_worker_alive(_ASYNC_IMAGE_WORKERS.get(cache_key)):
+            continue
+        _ASYNC_IMAGE_WORKERS[cache_key] = item[1]
+        adopted += 1
+    if adopted:
+        _mimics_log(
+            logging.INFO,
+            "nnInteractive reused {0} background image worker(s) from earlier "
+            "tool runs (no model reload needed).".format(adopted),
+        )
+    return adopted
 
 
 def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=True):
