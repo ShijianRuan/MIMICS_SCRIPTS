@@ -4798,12 +4798,19 @@ class TestStopBackgroundServices(unittest.TestCase):
         old_lock = msb._background_mimics_lock_path
         old_runtime = msb._runtime_dir
         old_stop = msb._stop_export_inprocess_monitors
+        old_lock_dir = msb.runtime_common.resource_lock_dir
+        lock_dir = os.path.join(self.tmp, "locks")
+        os.makedirs(lock_dir)
         try:
+            # Scan an empty lock dir: real machine locks must neither supply
+            # a target pid nor receive stray stop markers during the test.
+            msb.runtime_common.resource_lock_dir = lambda _root: lock_dir
             msb._background_mimics_lock_path = lambda: lock_path
             msb._runtime_dir = lambda: runtime_dir
             msb._stop_export_inprocess_monitors = lambda: 0
             result = msb.stop_background_export()
         finally:
+            msb.runtime_common.resource_lock_dir = old_lock_dir
             msb._background_mimics_lock_path = old_lock
             msb._runtime_dir = old_runtime
             msb._stop_export_inprocess_monitors = old_stop
@@ -4839,12 +4846,19 @@ class TestStopBackgroundServices(unittest.TestCase):
         old_lock = msb._background_mimics_lock_path
         old_runtime = msb._runtime_dir
         old_stop = msb._stop_export_inprocess_monitors
+        old_lock_dir = msb.runtime_common.resource_lock_dir
+        lock_dir = os.path.join(self.tmp, "locks")
+        os.makedirs(lock_dir)
         try:
+            # Scan an empty lock dir: a stale real export-labels lock on this
+            # machine must not leak a foreign target_pid into the assertion.
+            msb.runtime_common.resource_lock_dir = lambda _root: lock_dir
             msb._background_mimics_lock_path = lambda: lock_path
             msb._runtime_dir = lambda: runtime_dir
             msb._stop_export_inprocess_monitors = lambda: 0
             result = msb.stop_background_export()
         finally:
+            msb.runtime_common.resource_lock_dir = old_lock_dir
             msb._background_mimics_lock_path = old_lock
             msb._runtime_dir = old_runtime
             msb._stop_export_inprocess_monitors = old_stop
