@@ -57,14 +57,10 @@ except ImportError:  # direct tools/ import (tests, smoke runs)
 
 
 def _require_checkpoint_loadable(model_dir: Path, family: str) -> None:
-    """Reject model packages whose checkpoints cannot actually load.
+    """Validate serialized checkpoint data without running package code.
 
-    Byte-level completeness and checksums alone accept truncated or
-    non-torch files; a package like that imports cleanly and only blows up
-    at inference time on the annotator's machine. Loading here (CPU,
-    header-sized read via torch.load with map_location) proves the file is
-    a real serialized torch checkpoint before anything is published into
-    the workspace.
+    This reads checkpoint tensors on CPU; it is not a network or inference
+    compatibility check. Never fall back to unrestricted pickle loading.
     """
     patterns = {
         "nninteractive_task": ("fold_*/checkpoint_final.pth",),
@@ -86,18 +82,28 @@ def _require_checkpoint_loadable(model_dir: Path, family: str) -> None:
         return
     try:
         import torch
-    except ImportError:  # pragma: no cover - torch ships with the env
-        return
+    except ImportError as exc:  # pragma: no cover - torch ships with the env
+        raise RuntimeError("模型尚未导入：当前环境缺少 PyTorch，无法安全校验权重。") from exc
+    # Standard nnU-Net logging/checkpoint metadata contains NumPy numeric
+    # arrays/scalars. Allow these specific data constructors, never globals
+    # discovered from the untrusted checkpoint itself or custom model code.
+    import numpy as np
+    multiarray = np._core.multiarray if hasattr(np, "_core") else np.core.multiarray
+    numeric_dtypes = [np.dtype(code) for code in ("?", "i1", "i2", "i4", "i8", "u1", "u2", "u4", "u8", "f2", "f4", "f8", "c8", "c16")]
+    allowed = [np.ndarray, np.dtype, multiarray._reconstruct, multiarray.scalar]
+    allowed += list({type(dtype) for dtype in numeric_dtypes})
+    # NumPy 1.x and 2.x use different module paths for the same data types.
+    allowed += [(multiarray._reconstruct, "numpy.core.multiarray._reconstruct"),
+                (multiarray.scalar, "numpy.core.multiarray.scalar")]
     for checkpoint in checkpoints:
         try:
-            torch.load(
-                str(checkpoint), map_location="cpu", weights_only=False
-            )
+            with torch.serialization.safe_globals(allowed):
+                torch.load(str(checkpoint), map_location="cpu", weights_only=True)
         except Exception as exc:
             raise RuntimeError(
-                "The packaged checkpoint {} is not a loadable torch file "
-                "({}). The bundle is corrupt or was not exported from a "
-                "trained model.".format(checkpoint.name, exc)
+                "The packaged checkpoint {} is not a loadable torch file under restricted deserialization "
+                "({}). 模型尚未导入：文件损坏、PyTorch 版本不兼容或包含未支持的自定义对象；"
+                "请由可信模型提供者重新导出纯数据权重，不要改用不受限的 Pickle 加载。".format(checkpoint.name, exc)
             ) from exc
 
 

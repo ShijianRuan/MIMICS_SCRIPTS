@@ -15,6 +15,7 @@ from __future__ import print_function
 import atexit
 import json
 import logging
+import math
 import os
 import queue
 import shutil
@@ -28,6 +29,7 @@ import mimics
 
 import dataset_manifest
 import runtime_common
+import nninteractive_worker_identity as worker_identity
 
 
 TITLE = "nnInteractive 交互标注"
@@ -909,6 +911,113 @@ def _worker_cache_key(config, image):
     return image_key + "::" + identity
 
 
+def _path_revision(path):
+    """Local source/model revision without opening native imaging libraries."""
+    path = os.path.realpath(os.path.expandvars(os.path.expanduser(str(path or ""))))
+    if _is_network_source_path(path):
+        return [path, "network_unverified"]
+    try:
+        if os.path.isdir(path):
+            rows = []
+            for folder, dirs, files in os.walk(path):
+                dirs.sort()
+                for name in sorted(files):
+                    child = os.path.join(folder, name)
+                    stat = os.stat(child)
+                    rows.append([os.path.relpath(child, path), stat.st_size,
+                                 getattr(stat, "st_mtime_ns", stat.st_mtime),
+                                 getattr(stat, "st_ctime_ns", stat.st_ctime)])
+                    if len(rows) % 64 == 0:
+                        _update_gui()
+            return [path, rows]
+        stat = os.stat(path)
+        return [path, stat.st_size, getattr(stat, "st_mtime_ns", stat.st_mtime),
+                getattr(stat, "st_ctime_ns", stat.st_ctime), getattr(stat, "st_ino", 0)]
+    except OSError:
+        return [path, "unavailable"]
+
+
+def _live_image_identity(image):
+    """Stream a current-image proof; GUID alone is not an input version."""
+    token = runtime_common.try_acquire_local_operation("mask_buffer_access", "nnInteractive image validation")
+    if not token:
+        raise RuntimeError("其他操作正在使用图像缓冲区，请稍后重试。")
+    try:
+        project = _current_project_path() or ""
+        view = image.get_voxel_buffer()
+        shape = [int(v) for v in view.shape]
+        grid = _derive_image_voxel_to_ras_matrix(image, shape)
+        if (len(shape) != 3 or min(shape) <= 0 or grid is None
+                or not all(math.isfinite(v) for row in grid for v in row)):
+            raise RuntimeError("无法验证当前图像的物理网格，不能复用旧输入。")
+        checksum = _stream_buffer(_buffer_byte_view(view))
+        metadata = dict((name, _metadata_get(image, value, ""))
+                        for name, value in globals().items()
+                        if name.endswith("_METADATA") and isinstance(value, str)
+                        and (name.startswith("SOURCE_") or name.startswith("MIMICS_")))
+        identity = {
+            "project": os.path.normcase(os.path.abspath(project)) if project else "unsaved",
+            "image_guid": _object_id(image), "shape": shape, "grid": grid,
+            "dtype": _buffer_dtype(view), "sha256": checksum, "metadata": metadata,
+            "hu_to_gv": _hu_to_mimics_gv_transform(),
+        }
+        active = mimics.data.images.get_active()
+        if (active is None or _object_id(active) != _object_id(image)
+                or (_current_project_path() or "") != project
+                or _derive_image_voxel_to_ras_matrix(image, shape) != grid):
+            raise RuntimeError("校验期间项目或图像网格发生变化，请重新提交。")
+        # Persisted session state uses JSON lists; use the same plain-data
+        # representation for in-memory comparisons (e.g. HU2GV tuples).
+        return json.loads(json.dumps(identity, sort_keys=True, allow_nan=False))
+    finally:
+        runtime_common.release_local_operation("mask_buffer_access", token)
+
+
+def _image_worker_input_identity(config, image, model_dir):
+    live = _live_image_identity(image)
+    profile = _model_profile(config)
+    selected_dir = (profile.get("model_dir") if profile.get("source") == "task_model" else
+                    os.environ.get("NNINTERACTIVE_MODEL_DIR") or config.get("model_dir") or model_dir)
+    source = _relocated_source_image_path() or _metadata_get(image, SOURCE_IMAGE_PATH_METADATA, "")
+    model_revision = [os.path.realpath(str(selected_dir or ""))]
+    if selected_dir and os.path.isdir(selected_dir):
+        for name in ("plans.json", "dataset.json", "inference_info.json", "inference_session_class.json"):
+            model_revision.append(_path_revision(os.path.join(selected_dir, name)))
+        for fold in _model_folds(selected_dir):
+            model_revision.append(_path_revision(os.path.join(selected_dir, "fold_" + str(fold), "checkpoint_final.pth")))
+    values = {"schema": "image_worker_input.v2", "image": live,
+              "source": _path_revision(source) if source else None,
+              "model": model_revision, "profile": profile,
+              "config": dict((k, v) for k, v in config.items() if not str(k).startswith("_"))}
+    # A plain JSON record is compared, never arbitrary serialized objects.
+    return json.loads(json.dumps(values, sort_keys=True, allow_nan=False))
+
+
+def _retire_owned_image_worker(worker, reason):
+    if not worker_identity.owned(worker):
+        return False
+    _request_async_worker_close(worker, reason)
+    runtime_common.terminate_process_async(
+        process=worker_identity.process_handle(worker), pid=worker.get("pid"),
+        graceful_seconds=1.0,
+        expected_start_marker=worker.get("worker_start_marker") or None,
+    )
+    worker_identity.forget(worker)
+    return True
+
+
+def _worker_input_revision_verified(identity, image_source):
+    def unverified(row):
+        return isinstance(row, list) and len(row) == 2 and row[1] in ("network_unverified", "unavailable")
+    source = identity.get("source")
+    if image_source != "mimics_buffer" and (not source or unverified(source)):
+        return False
+    # Optional metadata may legitimately be absent. Checkpoints must be
+    # locally observable before their revision can authorize model reuse.
+    return not any(unverified(row) for row in identity.get("model", [])[1:]
+                   if isinstance(row, list) and str(row[0]).endswith(".pth"))
+
+
 def _state_model_matches(state, profile):
     expected = _model_identity(profile)
     actual = str(state.get("model_identity") or "official")
@@ -1256,24 +1365,25 @@ def _derive_image_voxel_to_ras_matrix(image, image_shape):
         ]
         matrix = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
         for axis in range(3):
-            if int(image_shape[axis]) > 1:
-                index = [0, 0, 0]
-                index[axis] = 1
-                point_lps = _image_voxel_center(image, index)
-                point = [
-                    -float(point_lps[0]),
-                    -float(point_lps[1]),
-                    float(point_lps[2]),
-                ]
-                vector = [point[row] - origin[row] for row in range(3)]
-            else:
-                vector = [0.0, 0.0, 0.0]
-                vector[axis] = 1.0
+            # A singleton axis still has physical spacing/direction. Ask the
+            # live coordinate transform; if the API rejects that index, the
+            # grid is unprovable here, rather than silently inventing 1 mm.
+            index = [0, 0, 0]
+            index[axis] = 1
+            point_lps = _image_voxel_center(image, index)
+            point = [-float(point_lps[0]), -float(point_lps[1]), float(point_lps[2])]
+            vector = [point[row] - origin[row] for row in range(3)]
             for row in range(3):
                 matrix[row][axis] = vector[row]
         for row in range(3):
             matrix[row][3] = origin[row]
         matrix[3] = [0.0, 0.0, 0.0, 1.0]
+        a, b, c = matrix[:3]
+        determinant = (a[0] * (b[1]*c[2]-b[2]*c[1])
+                       - a[1] * (b[0]*c[2]-b[2]*c[0])
+                       + a[2] * (b[0]*c[1]-b[1]*c[0]))
+        if not math.isfinite(determinant) or abs(determinant) <= 1e-12:
+            return None
         return matrix
     except Exception:
         return None
@@ -1481,6 +1591,16 @@ def _source_image_export(image, config):
             "The portable Mimics image buffer will be used instead: {0}".format(path),
         )
         return None
+    # Registration can change the live grid without replacing Image GUID or
+    # its import metadata. Probe only after the no-network fast-path guard.
+    try:
+        live_grid = _derive_image_voxel_to_ras_matrix(image, _image_shape(image))
+    except Exception:
+        live_grid = None
+    if live_grid is not None:
+        mimics_voxel_to_ras = json.dumps(live_grid)
+        mimics_to_source_index = ""
+        has_ras_affines = _parse_matrix_metadata(source_voxel_to_ras) is not None
     lower_path = path.lower()
     derived_resampled_index_spaces = (
         "derived_dicom_axial_lps_resampled_from_nifti_v1",
@@ -1862,11 +1982,10 @@ def _export_image(image, path):
         "dtype": _buffer_dtype(view),
         "sha256": sha256,
     }
-    matrix = _parse_matrix_metadata(
-        _metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, "")
-    )
+    matrix = _derive_image_voxel_to_ras_matrix(image, result["shape"])
     if matrix is None:
-        matrix = _derive_image_voxel_to_ras_matrix(image, result["shape"])
+        matrix = _parse_matrix_metadata(
+            _metadata_get(image, MIMICS_VOXEL_TO_RAS_MATRIX_METADATA, ""))
     if matrix is not None:
         result["mimics_voxel_to_ras_matrix"] = matrix
     modality = _image_modality(image)
@@ -2815,6 +2934,11 @@ def _run_async(
     profile = _model_profile(config)
     _log_effective_image_input_config(config)
     state = _load_async_job(target)
+    if (state is not None and _async_state_worker_dir(state) != state.get("_job_dir")
+            and not state.get("launch_image_identity")):
+        _close_async_job(target, state, "legacy_input_identity_unverified")
+        _mimics_log(logging.WARNING, "旧版会话缺少图像输入身份，保留当前 Mask；请结束旧后台会话后重新提交。")
+        state = None
     validated_target_hash = None
     if state is not None:
         if not _state_model_matches(state, profile):
@@ -2990,7 +3114,6 @@ def _continue_session_prompt(
             _save_async_job(state)
             return False
 
-        _adopt_disk_image_workers(config)
         _retire_different_model_workers(config)
         _retire_idle_image_workers(
             config,
@@ -3136,6 +3259,7 @@ def _run_with_config(config):
                 profile.get("task_name") or profile.get("task_id") or "unnamed",
             ),
         )
+    _adopt_disk_image_workers(config)
     busy_workers = _different_model_busy_workers(config)
     if busy_workers:
         current = busy_workers[0]
@@ -3302,6 +3426,7 @@ def _close_async_job(target, state, reason):
                 },
             )
         state["status"] = "closing"
+        state["pending_sequence"] = None
         state["closed_reason"] = reason
         state["updated_at_epoch"] = time.time()
         _save_async_job(state)
@@ -3386,10 +3511,18 @@ def _shared_image_worker_alive(worker):
         return False
     worker_dir = worker.get("worker_dir")
     pid = worker.get("pid")
-    if not worker_dir or not os.path.isdir(worker_dir) or not _process_exists(pid):
+    if (not worker_dir or not os.path.isdir(worker_dir) or not _process_exists(pid)
+            or not worker_identity.owned(worker) or os.path.isfile(os.path.join(worker_dir, "close.json"))):
         return False
-    status = _async_worker_status(worker_dir).get("status")
-    return status not in ("closing", "closed", "failed", "expired")
+    status = _async_worker_status(worker_dir)
+    if not isinstance(status, dict):
+        return False
+    if not status:
+        return (worker_identity.process_handle(worker) is not None
+                and 0 <= time.time() - float(worker.get("created_at_epoch") or 0) < 30)
+    return (status.get("status") in ("initializing", "ready", "running", "result_ready")
+            and status.get("worker_token") == worker.get("worker_token")
+            and status.get("pid") == pid)
 
 
 def _state_worker_alive(state):
@@ -3445,6 +3578,8 @@ def _worker_has_unapplied_prediction(worker):
         if not name.startswith("job_"):
             continue
         state = _read_json(_async_job_state_path(os.path.join(jobs_root, name)), {}) or {}
+        if state.get("status") in ("closing", "closed", "discarded", "failed", "expired"):
+            continue
         if not state.get("pending_sequence"):
             continue
         state_worker_dir = os.path.abspath(
@@ -3547,13 +3682,9 @@ def _retire_idle_image_workers(config, keep_model_identity=None, keep_image_guid
             continue
         if _worker_has_unapplied_prediction(worker):
             continue
-        _request_async_worker_close(worker, "gpu_contention")
-        runtime_common.terminate_process_async(
-            pid=worker.get("pid"),
-            graceful_seconds=1.0,
-        )
+        closed = _retire_owned_image_worker(worker, "gpu_contention")
         _ASYNC_IMAGE_WORKERS.pop(cache_key, None)
-        retired += 1
+        retired += int(closed)
     return retired
 
 
@@ -3587,7 +3718,8 @@ def _retire_different_model_workers(config):
 
 def _close_all_async_image_workers():
     for worker in list(_ASYNC_IMAGE_WORKERS.values()):
-        _request_async_worker_close(worker, "mimics_python_exit")
+        if worker_identity.owned(worker):
+            _request_async_worker_close(worker, "mimics_python_exit")
     _ASYNC_IMAGE_WORKERS.clear()
 
 
@@ -3627,19 +3759,27 @@ def _adopt_disk_image_workers(config):
         worker_dir = os.path.abspath(os.path.join(jobs_root, name))
         if not name.startswith("image_worker_") or not os.path.isdir(worker_dir):
             continue
-        worker = _read_json(os.path.join(worker_dir, "image_worker.json"))
-        if not isinstance(worker, dict):
-            continue
-        worker["worker_dir"] = worker_dir
-        cache_key = str(worker.get("cache_key") or "")
-        if not cache_key or not _shared_image_worker_alive(worker):
+        try:
+            worker = _read_json(os.path.join(worker_dir, "image_worker.json"))
+            if not isinstance(worker, dict):
+                continue
+            worker["worker_dir"] = worker_dir
+            cache_key = str(worker.get("cache_key") or "")
+            created = float(worker.get("created_at_epoch") or 0)
+            shape = worker.get("shape") or []
+            if (not math.isfinite(created) or created < 0 or len(shape) != 3
+                    or any(type(v) is not int or v <= 0 for v in shape)
+                    or not worker.get("input_identity") or not cache_key
+                    or not _shared_image_worker_alive(worker)):
+                continue
+        except Exception:
             continue
         # Several live workers can exist for one image (one per earlier
         # invocation). Rank: session holder first, then the newest; the
         # losers are left alone and idle out on their own.
         rank = (
             1 if worker_dir == session_holder_dir else 0,
-            float(worker.get("created_at_epoch") or 0),
+            created,
         )
         previous = candidates.get(cache_key)
         if previous is None or rank > previous[0]:
@@ -3664,7 +3804,16 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     image_key = _worker_cache_key(config, image)
     profile = _model_profile(config)
     cached = _ASYNC_IMAGE_WORKERS.get(image_key)
-    if _shared_image_worker_alive(cached):
+    if cached and _shared_image_worker_alive(cached):
+        current_identity = _image_worker_input_identity(config, image, cached.get("model_dir") or "")
+        if (current_identity != cached.get("input_identity")
+                or not _worker_input_revision_verified(current_identity, cached.get("image_source"))):
+            if _worker_has_unapplied_prediction(cached):
+                raise RuntimeError("图像或模型输入已变化，旧预测尚待处理；请先结束原会话再重试。")
+            _retire_owned_image_worker(cached, "gpu_contention")
+            _ASYNC_IMAGE_WORKERS.pop(image_key, None)
+            cached = None
+    if cached and _shared_image_worker_alive(cached):
         image_input_mode = _effective_image_input_mode(config)
         force_source = image_input_mode in ("source", "source_image", "original", "original_image")
         force_mimics_buffer = image_input_mode in ("mimics", "mimics_buffer", "buffer")
@@ -3674,18 +3823,19 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
                 logging.INFO,
                 "nnInteractive explicit mimics image mode requires a Mimics-buffer worker; replacing prewarmed source-image worker.",
             )
-            _request_async_worker_close(cached, "image_mode_changed_to_mimics")
+            _retire_owned_image_worker(cached, "gpu_contention")
             _ASYNC_IMAGE_WORKERS.pop(image_key, None)
         elif force_source and cached_source == "mimics_buffer":
             _mimics_log(
                 logging.INFO,
                 "nnInteractive explicit source image mode requires a source-image worker; replacing prewarmed Mimics-buffer worker.",
             )
-            _request_async_worker_close(cached, "image_mode_changed_to_source")
+            _retire_owned_image_worker(cached, "gpu_contention")
             _ASYNC_IMAGE_WORKERS.pop(image_key, None)
         else:
             return cached
     python_exe, bridge_script, model_dir, probe, folds = _runtime_paths(config)
+    input_identity = _image_worker_input_identity(config, image, model_dir)
 
     worker_id = "image_worker_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
     worker_dir = os.path.join(jobs_root, worker_id)
@@ -3740,6 +3890,10 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
             "nnInteractive source-image prewarm was skipped because no valid source image metadata is available. No Mimics image buffer export was performed before prompt capture.",
         )
         return None
+    if (image_export.get("source", "mimics_buffer") == "mimics_buffer"
+            and image_export.get("sha256") != input_identity["image"]["sha256"]):
+        shutil.rmtree(worker_dir, ignore_errors=True)
+        raise RuntimeError("图像内容在输入准备期间变化，请重新提交。")
     empty_base_export = {
         "path": "",
         "shape": image_export["shape"],
@@ -3754,6 +3908,8 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
     initialize["async_worker_control_dir"] = worker_dir
     initialize["initial_seg_path"] = None
     initialize["parent_pid"] = os.getpid()
+    ownership = worker_identity.new_identity()
+    initialize["worker_identity"] = ownership
     _write_json_atomic(os.path.join(worker_dir, "initialize.json"), initialize)
     process, worker_log_path = _start_async_worker(python_exe, bridge_script, worker_dir)
     worker = {
@@ -3783,7 +3939,10 @@ def _get_or_start_image_worker(config, image, jobs_root, allow_buffer_export=Tru
         "folds": folds,
         "runtime_log": parameters["runtime_log"],
         "created_at_epoch": time.time(),
+        "model_dir": model_dir,
+        "input_identity": input_identity,
     }
+    worker.update(worker_identity.attach_process(worker_dir, process, ownership))
     worker.update(_model_state_values(profile))
     _write_json_atomic(os.path.join(worker_dir, "image_worker.json"), worker)
     _ASYNC_IMAGE_WORKERS[image_key] = worker
@@ -3874,9 +4033,10 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
     cache_key = _worker_cache_key(config, image)
     shared_worker = None
     if bool(config.get("async_reuse_image_worker", True)):
-        cached = _ASYNC_IMAGE_WORKERS.get(cache_key)
-        if _shared_image_worker_alive(cached):
-            shared_worker = cached
+        jobs_root = os.path.join(_runtime_work_dir(config), "async_jobs")
+        if not os.path.isdir(jobs_root):
+            os.makedirs(jobs_root)
+        shared_worker = _get_or_start_image_worker(config, image, jobs_root)
 
     if shared_worker is not None:
         jobs_root = os.path.dirname(shared_worker["worker_dir"])
@@ -3895,8 +4055,8 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         config.get("async_job_max_terminal", 20),
     )
 
-    if shared_worker is None and bool(config.get("async_reuse_image_worker", True)):
-        shared_worker = _get_or_start_image_worker(config, image, jobs_root)
+    launch_image_identity = (shared_worker["input_identity"]["image"] if shared_worker is not None
+                             else _live_image_identity(image))
 
     job_id = "job_" + time.strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
     job_dir = os.path.join(jobs_root, job_id)
@@ -3983,6 +4143,7 @@ def _start_async_job(config, image, target, source=None, write_mode="in_place"):
         "image_guid": _object_id(image),
         "image_name": str(getattr(image, "name", "")),
         "launch_project_path": _current_project_path() or "",
+        "launch_image_identity": launch_image_identity,
         "image_source": image_export.get("source", "mimics_buffer"),
         "image_source_kind": image_export.get("source_kind", ""),
         "image_source_index_space": image_export.get("source_index_space", ""),
@@ -4743,6 +4904,13 @@ def _handle_async_result(image, target, state):
             ui_blocking=False,
         )
         _close_async_job(target, state, "active_project_changed")
+        return "ready"
+    launch_identity = state.get("launch_image_identity")
+    if launch_identity is not None and _live_image_identity(active_image) != launch_identity:
+        _close_async_job(target, state, "image_input_changed")
+        mimics.dialogs.message_box(
+            "图像内容、强度或物理网格已变化，本次旧输入预测未应用；当前 Mask 已保留。请重新启动会话。",
+            title=TITLE, ui_blocking=False)
         return "ready"
     if _object_id(image) != state.get("image_guid") or _object_id(target) != state.get(
         "target_guid"

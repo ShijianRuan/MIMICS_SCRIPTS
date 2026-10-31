@@ -1092,6 +1092,22 @@ def _wait_for_server(
     return False
 
 
+def _foreign_image_client_is_live(state: dict[str, Any]) -> bool:
+    """Protect active and idle image leases, including pre-upgrade clients."""
+    try:
+        operation_pid = int(state.get("active_operation_pid") or 0)
+        pid = int(state.get("client_pid") or 0)
+    except (TypeError, ValueError):
+        return True
+    if operation_pid != os.getpid() and _owned_server_operation_is_active(state):
+        return True
+    control = str(state.get("client_control_dir") or "")
+    if not control or pid <= 0 or pid == os.getpid() or not _process_exists(pid):
+        return False
+    status = _load_server_state(Path(control) / "worker_status.json") or {}
+    return status.get("status") not in ("closing", "closed", "failed", "expired")
+
+
 def _ensure_server(
     model_dir: str,
     device: str,
@@ -1129,6 +1145,8 @@ def _ensure_server(
         if matches_request and _server_running(state_url, api_key):
             _touch_server_activity(state_path, api_key)
             return False, state_url, api_key
+        if _foreign_image_client_is_live(state):
+            raise RuntimeError("另一图像会话仍在使用 nnInteractive 服务器，未切换模型或重启。")
         if not _terminate_owned_server(state):
             raise RuntimeError(
                 "The previous owned nnInteractive server did not exit; its GPU "
@@ -2128,6 +2146,36 @@ class _BridgeSessionContext:
     """Keep one remote session and one preprocessed image for a Mimics tool run."""
 
     def __init__(self, input_data: dict[str, Any]):
+        self._image_lease = None
+        try:
+            self._initialize(input_data)
+        except BaseException:
+            session = getattr(self, "session", None)
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            self._release_image_lease()
+            raise
+
+    def _release_image_lease(self):
+        lease = getattr(self, "_image_lease", None)
+        if lease is not None:
+            lease.release()
+            self._image_lease = None
+
+    def _acquire_image_lease(self):
+        from resource_locks import FileResourceLock, ResourceLockTimeout
+        self._image_lease = FileResourceLock(
+            _server_state_path(self.model_dir, self.runtime_work_dir).parent / ".nninteractive_image_client.lock",
+            "nninteractive-image", "nnInteractive image session")
+        try:
+            self._image_lease.acquire(wait_seconds=0)
+        except ResourceLockTimeout as exc:
+            raise RuntimeError("另一个 nnInteractive 图像会话仍在使用服务器，请先结束该会话后重试。") from exc
+
+    def _initialize(self, input_data: dict[str, Any]):
         context_started = time.time()
         self.input_data = input_data
         self.model_dir = str(input_data["model_dir"])
@@ -2247,6 +2295,10 @@ class _BridgeSessionContext:
             )
         self.owned_state_path: Path | None = None
         self.owned_token: str | None = None
+        # Serialize image sessions across Mimics processes before changing
+        # server ownership or attempting capacity recovery.
+        if self.auto_start_server and self.server_url == SERVER_URL:
+            self._acquire_image_lease()
         server_started = time.time()
         if self.auto_start_server and self.server_url == SERVER_URL:
             self.first_call, self.server_url, self.server_api_key = _ensure_server(
@@ -2275,6 +2327,8 @@ class _BridgeSessionContext:
             _touch_server_activity(self.owned_state_path, self.owned_token)
             state = _load_server_state(self.owned_state_path)
             if state and state.get("ownership_token") == self.owned_token:
+                if _foreign_image_client_is_live(state):
+                    raise RuntimeError("另一图像会话仍持有 nnInteractive 服务器，未改写其客户端记录。")
                 state["client_pid"] = os.getpid()
                 state["active_operation_timeout_seconds"] = max(
                     60.0,
@@ -2305,6 +2359,8 @@ class _BridgeSessionContext:
                 raise
             state = _load_server_state(self.owned_state_path)
             if state:
+                if _foreign_image_client_is_live(state):
+                    raise RuntimeError("nnInteractive 服务器仍属于另一图像会话，未执行容量恢复重启。") from exc
                 if not _terminate_owned_server(state):
                     raise RuntimeError(
                         "The existing nnInteractive server could not be stopped "
@@ -2753,6 +2809,12 @@ class _BridgeSessionContext:
 
     def close(self) -> None:
         try:
+            self._close()
+        finally:
+            self._release_image_lease()
+
+    def _close(self) -> None:
+        try:
             if self.session is not None:
                 self.session.close()
         finally:
@@ -2982,6 +3044,12 @@ def _async_worker_status(
         "pid": os.getpid(),
         "updated_at_epoch": time.time(),
     }
+    request = _load_server_state(job_dir / "initialize.json") or {}
+    identity = request.get("worker_identity") or {}
+    if identity:
+        payload["worker_token"] = identity.get("worker_token")
+        payload["owner_token"] = identity.get("owner_token")
+        payload["process_start_marker"] = resource_process_start_marker(os.getpid())
     payload.update(details)
     _write_json_atomic(job_dir / "worker_status.json", payload)
 

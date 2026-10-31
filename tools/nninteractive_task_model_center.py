@@ -709,6 +709,23 @@ class ModelCenter:
 
     def _build_progress_tab(self):
         QtWidgets = self.QtWidgets
+        class WrappedDetailLabel(QtWidgets.QLabel):
+            # The enclosing scroll body can shrink a plain wrapping QLabel
+            # to one line after setText. Keep its real height-for-width as
+            # the minimum, so the scroll bar exposes all completion text.
+            def _fit_text(self):
+                height = max(self.fontMetrics().height(), self.heightForWidth(max(1, self.width())))
+                if height != self.minimumHeight():
+                    self.setMinimumHeight(height)
+
+            def setText(self, text):
+                super().setText(text)
+                self._fit_text()
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._fit_text()
+
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(4, 10, 4, 4)
@@ -716,6 +733,7 @@ class ModelCenter:
 
         status_surface = self._surface()
         status_layout = QtWidgets.QVBoxLayout(status_surface)
+        status_layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         status_layout.setContentsMargins(16, 14, 16, 14)
         status_head = QtWidgets.QHBoxLayout()
         self.progress_title = QtWidgets.QLabel("当前没有正在进行的训练")
@@ -725,7 +743,7 @@ class ModelCenter:
         status_head.addWidget(self.progress_title, 1)
         status_head.addWidget(self.elapsed_label)
         status_layout.addLayout(status_head)
-        self.progress_detail = QtWidgets.QLabel("请在“训练设置”页开始训练。")
+        self.progress_detail = WrappedDetailLabel("请在“训练设置”页开始训练。")
         self.progress_detail.setObjectName("hint")
         # S11: the completion/retained-model copy is long; an unwrapped
         # QLabel's minimum content width participates in the layout and
@@ -733,6 +751,8 @@ class ModelCenter:
         # forcing horizontal scrolling. Same treatment as the other detail
         # labels on this page.
         self.progress_detail.setWordWrap(True)
+        self.progress_detail.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         status_layout.addWidget(self.progress_detail)
         # R13/UI21: one-click navigation from the completion card to the
         # version it just produced — the model list lives on another tab and

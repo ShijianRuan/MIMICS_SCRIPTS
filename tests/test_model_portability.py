@@ -24,6 +24,10 @@ import flexict_common
 import nnunet_common
 
 
+def _unsafe_checkpoint_marker(path):
+    Path(path).write_text("checkpoint code executed")
+
+
 def _torch_checkpoint_bytes(payload=None) -> bytes:
     """A real torch.save'd checkpoint, so torch.load-based import
     validation exercises the true serialization path (Phase 3b)."""
@@ -63,6 +67,24 @@ def _nninteractive_model(root: Path) -> Path:
 
 
 class ModelPortabilityTests(unittest.TestCase):
+    def test_checkpoint_data_validation_accepts_numeric_metadata_but_never_executes_pickle(self):
+        import numpy as np
+        with tempfile.TemporaryDirectory() as temp:
+            model = Path(temp)
+            checkpoint = model / "fold_0/checkpoint_final.pth"
+            checkpoint.parent.mkdir()
+            checkpoint.write_bytes(_torch_checkpoint_bytes({"network_weights": {}, "logging": {
+                "loss": [np.float64(0.1), np.float32(0.2)], "dice": np.arange(4, dtype=np.float64)}}))
+            ai_model_bundle._require_checkpoint_loadable(model, "nnunet")
+            marker = model / "must-not-exist"
+            class Untrusted:
+                def __reduce__(self):
+                    return _unsafe_checkpoint_marker, (str(marker),)
+            checkpoint.write_bytes(_torch_checkpoint_bytes({"network_weights": Untrusted()}))
+            with self.assertRaisesRegex(RuntimeError, "restricted deserialization"):
+                ai_model_bundle._require_checkpoint_loadable(model, "nnunet")
+            self.assertFalse(marker.exists())
+
     def test_nninteractive_registry_survives_workspace_relocation(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

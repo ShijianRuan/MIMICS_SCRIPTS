@@ -33,6 +33,7 @@ from __future__ import print_function
 import json
 import logging
 import os
+import re
 
 import mimics
 
@@ -131,13 +132,6 @@ def find_latest_receipt():
             for name in os.listdir(folder):
                 if not name.endswith(RECEIPT_SUFFIX):
                     continue
-                if ".previous-" in name:
-                    # Archived by flush_pending_receipts (S01): an older
-                    # import's receipt kept as evidence, not an undo
-                    # candidate. With a rolled-back clock its
-                    # created_at_epoch is the newest in the folder and
-                    # would shadow the current receipt.
-                    continue
                 path = os.path.join(folder, name)
                 try:
                     with open(path, "r") as handle:
@@ -145,6 +139,14 @@ def find_latest_receipt():
                 except Exception:
                     continue
                 if not isinstance(payload, dict):
+                    continue
+                # Case names can legitimately contain '.previous-'. Use the
+                # producer's full normal filename and exact archive suffix.
+                case_id = str(payload.get("case_id") or "")
+                normal = "." + runtime_common.safe_filename(case_id) + RECEIPT_SUFFIX
+                if name != normal and re.search(
+                    r"\.previous-[0-9a-f]{8,64}\.import_receipt\.json$", name
+                ):
                     continue
                 if payload.get("schema_version") not in (
                     "mimics_import_receipt.v1", RECEIPT_SCHEMA_VERSION,

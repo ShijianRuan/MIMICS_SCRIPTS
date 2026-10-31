@@ -68,6 +68,7 @@ SUITES = [
     ("geometry_manifest_regressions", [sys.executable, "tests/test_geometry_manifest_regressions.py"], {"fast", "full"}),
     ("review_workflow_regressions", [sys.executable, "tests/test_review_workflow_regressions.py"], {"fast", "full"}),
     ("active_learning_review", [sys.executable, "tests/test_active_learning_review_regressions.py"], {"fast", "full"}),
+    ("worker_cache_safety", [sys.executable, "tests/test_worker_cache_safety.py"], {"fast", "full"}),
     ("migrate_root", [sys.executable, "tests/test_migrate_root.py"], {"fast", "full"}),
     ("ui_preferences", [sys.executable, "tests/test_ui_preferences.py"], {"fast", "full"}),
     ("gui_smoke", [sys.executable, "tests/test_gui_smoke.py"], {"fast", "full"}),

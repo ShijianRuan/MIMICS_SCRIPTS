@@ -608,6 +608,60 @@ def _case_source_signature(
     )
 
 
+def project_image_content_signature(payload: dict[str, Any]) -> dict[str, Any]:
+    """Sign bytes AND their physical interpretation before accepting a cache."""
+    import numpy as np
+
+    shape = tuple(payload.get("shape") or [])
+    if len(shape) != 3 or any(type(v) is not int or v <= 0 for v in shape):
+        raise RuntimeError("工程体素缓存缺少有效的三维尺寸。")
+    dtype = np.dtype(str(payload.get("dtype") or ""))
+    if dtype.kind not in "biuf" or dtype.hasobject:
+        raise RuntimeError("工程体素缓存的数据类型不受支持。")
+    path = Path(str(payload.get("path") or ""))
+    expected = str(payload.get("sha256") or "")
+    if not path.is_file():
+        raise RuntimeError("工程体素缓存输入校验失败：原始文件不存在，请重新导出。")
+    if path.stat().st_size != int(np.prod(shape)) * dtype.itemsize:
+        raise RuntimeError("工程体素缓存输入校验失败：字节数不符，请重新导出。")
+    if not expected or file_fingerprint(path) != expected:
+        raise RuntimeError("工程体素缓存输入校验失败：sha256 不一致，请重新导出。")
+
+    def matrix(value):
+        result = np.asarray(value, dtype=float)
+        if (result.shape != (4, 4) or not np.isfinite(result).all()
+                or abs(float(np.linalg.det(result[:3, :3]))) <= 1e-12
+                or not np.allclose(result[3], [0, 0, 0, 1], atol=1e-8, rtol=0)):
+            raise RuntimeError("工程体素缓存的物理网格无效。")
+        return result.tolist()
+
+    def number(key, default):
+        value = float(payload.get(key) if payload.get(key) is not None else default)
+        if not np.isfinite(value):
+            raise RuntimeError("工程体素缓存的强度恢复参数无效：{}".format(key))
+        return value
+
+    slope = number("buffer_to_source_slope", 1)
+    if slope == 0:
+        raise RuntimeError("工程体素缓存的强度恢复斜率不能为零。")
+    grid = payload.get("expected_grid") or {}
+    grid_shape = tuple(grid.get("source_shape") or [])
+    if grid and (len(grid_shape) != 3 or any(type(v) is not int or v <= 0 for v in grid_shape)):
+        raise RuntimeError("工程体素缓存的目标网格尺寸无效。")
+    return {
+        "kind": "project_buffer_physical_content.v2",
+        "sha256": expected, "shape": list(shape), "dtype": dtype.str,
+        "affine": matrix(payload.get("mimics_voxel_to_ras_matrix")),
+        "expected_grid": ({"shape": list(grid_shape),
+                           "affine": matrix(grid.get("source_voxel_to_ras_matrix"))} if grid else {}),
+        "modality": str(payload.get("source_modality") or "").upper(),
+        "basis": str(payload.get("source_intensity_recovery_basis") or ""),
+        "encoding": str(payload.get("source_intensity_encoding") or ""),
+        "slope": slope, "intercept": number("buffer_to_source_intercept", 0),
+        "zero_tolerance": abs(number("buffer_to_source_zero_tolerance", 0)),
+    }
+
+
 def _materialize_case(
     case_id: str,
     image_source: Path | None,
@@ -629,6 +683,9 @@ def _materialize_case(
     )
     from tools.mimics_label_export import materialize_source_image as _materialize_source_image
 
+    if image_payload is not None:
+        # A caller-supplied raw digest alone cannot authorize cache reuse.
+        image_signature = project_image_content_signature(image_payload)
     fingerprint = _case_source_signature(
         image_source, label_sources, request, image_signature=image_signature
     )
@@ -889,12 +946,8 @@ def prepare_source_grid_cases(
                 skipped.append({"case_id": case_id, "reason": reason})
                 continue
             image_payload = payload
-            # Content-addressed cache key (trap 7): the .mcs export is
-            # regenerable, so path/mtime would permanently mismatch the cache.
-            image_signature = {
-                "kind": "project_buffer_content",
-                "sha256": str(payload.get("sha256") or ""),
-            }
+            # _materialize_case signs both bytes and their physical meaning;
+            # the export path itself is regenerable and is not a cache key.
             image = label_root / case_id / "image.raw"
         label_files = []
         missing = []
@@ -2024,8 +2077,10 @@ def _restore_project_buffer_intensity(
     basis = str(payload.get("source_intensity_recovery_basis") or "")
     if not basis or basis == "unavailable":
         return np.asarray(volume, dtype=np.float32)
-    slope = float(payload.get("buffer_to_source_slope") or 1.0)
-    intercept = float(payload.get("buffer_to_source_intercept") or 0.0)
+    slope = float(payload.get("buffer_to_source_slope") if payload.get("buffer_to_source_slope") is not None else 1.0)
+    intercept = float(payload.get("buffer_to_source_intercept") if payload.get("buffer_to_source_intercept") is not None else 0.0)
+    if not np.isfinite([slope, intercept]).all() or slope == 0:
+        raise RuntimeError("工程体素强度恢复参数无效。")
     if slope == 1.0 and intercept == 0.0:
         result = np.asarray(volume, dtype=np.float32)
     else:

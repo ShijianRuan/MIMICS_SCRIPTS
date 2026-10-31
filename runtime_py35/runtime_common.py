@@ -1705,7 +1705,8 @@ def resource_lock_summary(payload):
     return "{0}{1} (PID {2})".format(owner, " / " + kind if kind else "", pid)
 
 
-def terminate_process_async(process=None, pid=None, graceful_seconds=2.0, on_complete=None):
+def terminate_process_async(process=None, pid=None, graceful_seconds=2.0, on_complete=None,
+                            expected_start_marker=None):
     """Terminate an owned child without waiting on the Mimics GUI thread."""
     process_pid = getattr(process, "pid", None) if process is not None else None
     if pid is not None and process_pid is not None:
@@ -1718,21 +1719,37 @@ def terminate_process_async(process=None, pid=None, graceful_seconds=2.0, on_com
         target_pid = int(pid or process_pid or 0)
     except Exception:
         target_pid = 0
-    if target_pid <= 0:
+    if target_pid <= 0 or target_pid == os.getpid():
         return False
+
+    def still_owned():
+        if process is not None:
+            try:
+                if process.poll() is not None:
+                    return False
+            except Exception:
+                return False
+        if expected_start_marker:
+            actual = process_start_marker(target_pid)
+            if not actual or actual != str(expected_start_marker):
+                return False
+        return process_exists(target_pid)
 
     def _reap():
         stopped = False
         try:
-            if process is not None and process.poll() is None:
+            if not still_owned():
+                stopped = not process_exists(target_pid)
+                return
+            if process is not None and still_owned():
                 try:
                     process.terminate()
                 except Exception:
                     pass
             deadline = time.time() + max(0.0, float(graceful_seconds))
-            while process_exists(target_pid) and time.time() < deadline:
+            while still_owned() and time.time() < deadline:
                 time.sleep(0.1)
-            if process_exists(target_pid):
+            if still_owned():
                 if os.name == "nt":
                     killer = subprocess.Popen(
                         ["taskkill", "/PID", str(target_pid), "/T", "/F"],

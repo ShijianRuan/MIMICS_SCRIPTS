@@ -241,7 +241,9 @@ class TestUiWorkflow(unittest.TestCase):
         import nninteractive_task_common as common
         import json as _json
 
-        prefix = 'model_20261014T220658' + 'f' * 60
+        # Keep the synthetic identifier wider than the viewport on macOS
+        # as well as Windows fonts, so this actually exercises token wrap.
+        prefix = 'model_20261014T220658' + 'f' * 220
         ids = [prefix + 'aaaa0000', prefix + 'bbbb1111']
         registry = {
             'schema_version': 'nninteractive_task_registry.v1',
@@ -787,6 +789,18 @@ class TestUiWorkflow(unittest.TestCase):
         # next to it on the same card), not one huge line.
         self.assertGreater(
             w.progress_detail.height(), w.elapsed_label.height())
+        self.assertGreaterEqual(
+            w.progress_detail.height(),
+            w.progress_detail.heightForWidth(w.progress_detail.width()),
+            'the allocated label height must contain every wrapped line')
+        self.assertLess(
+            w.progress_detail.geometry().bottom(),
+            w.view_completed_model_button.geometry().top(),
+            'completion text must not overlap the navigation button')
+        self.assertLess(
+            w.view_completed_model_button.geometry().bottom(),
+            w.progress_bar.geometry().top(),
+            'the navigation button must not overlap the progress bar')
         # The status card and its button stay inside the viewport — no
         # forced horizontal scrolling.
         self.assertLessEqual(

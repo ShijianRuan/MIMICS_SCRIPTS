@@ -749,6 +749,27 @@ def test_scripting_entrypoint(fake, tmp):
     return "shared Scripting Library entrypoint executed inside fake Mimics"
 
 
+@contextlib.contextmanager
+def fake_owned_worker_processes(module, workers):
+    """Keep flow fixtures honest about the current child-ownership schema."""
+    common = module.runtime_common
+    old_exists, old_marker = common.process_exists, common.process_start_marker
+    pids = {row["pid"] for row in workers}
+    try:
+        common.process_exists = lambda pid: pid in pids
+        common.process_start_marker = lambda pid: "flow-fixture-start-{0}".format(pid)
+        for row in workers:
+            identity = module.worker_identity.new_identity()
+            folder = Path(row["worker_dir"])
+            (folder / "initialize.json").write_text(json.dumps({"worker_identity": identity}))
+            row.update(module.worker_identity.attach_process(str(folder), types.SimpleNamespace(pid=row["pid"], poll=lambda: None), identity))
+        yield
+    finally:
+        common.process_exists, common.process_start_marker = old_exists, old_marker
+        for row in workers:
+            module.worker_identity.forget(row)
+
+
 def test_nninteractive_task_model_routing(fake, tmp):
     image = fake.reset_scene(
         image_shape=(2, 2, 2),
@@ -873,7 +894,8 @@ def test_nninteractive_task_model_routing(fake, tmp):
             [],
             "idle official worker should not block task-model switch",
         )
-        retired = inference._retire_different_model_workers(task_config)
+        with fake_owned_worker_processes(inference, [official_worker]):
+            retired = inference._retire_different_model_workers(task_config)
     finally:
         inference.runtime_common.terminate_process_async = original_terminate
     assert_equal(retired, 1, "idle official worker should be retired")
@@ -1011,11 +1033,12 @@ def test_nninteractive_same_model_dual_image_guard(fake, tmp):
         inference.runtime_common.terminate_process_async = (
             lambda **kwargs: terminated.append(kwargs) or True
         )
-        retired = inference._retire_idle_image_workers(
-            {},
-            keep_model_identity="official",
-            keep_image_guid=inference._object_id(image),
-        )
+        with fake_owned_worker_processes(inference, list(inference._ASYNC_IMAGE_WORKERS.values())):
+            retired = inference._retire_idle_image_workers(
+                {},
+                keep_model_identity="official",
+                keep_image_guid=inference._object_id(image),
+            )
     finally:
         inference.runtime_common.terminate_process_async = original_terminate
     assert_equal(retired, 1, "only the other-image worker is retired")
@@ -1057,34 +1080,39 @@ def test_nninteractive_disk_worker_adoption(fake, tmp):
     jobs_root = runtime_root / "async_jobs"
     jobs_root.mkdir(parents=True)
     image_key = inference._worker_cache_key({}, image)
+    ownership = inference.worker_identity
 
     def write_worker(name, cache_key, pid, status="ready", created=1000.0):
         worker_dir = jobs_root / name
         worker_dir.mkdir()
+        identity = ownership.new_identity()
+        (worker_dir / "initialize.json").write_text(json.dumps({"worker_identity": identity}))
+        process = types.SimpleNamespace(pid=pid, poll=lambda: None)
+        row = {
+            "worker_dir": str(worker_dir), "pid": pid, "cache_key": cache_key,
+            "image_guid": cache_key, "model_identity": "official", "shape": [2, 2, 2],
+            "input_identity": {"fixture": True}, "created_at_epoch": created,
+        }
+        row.update(ownership.attach_process(str(worker_dir), process, identity))
         (worker_dir / "worker_status.json").write_text(
-            json.dumps({"status": status}), encoding="utf-8"
+            json.dumps({"status": status, "pid": pid, "worker_token": row["worker_token"]}), encoding="utf-8"
         )
         (worker_dir / "image_worker.json").write_text(
-            json.dumps(
-                {
-                    "worker_dir": str(worker_dir),
-                    "pid": pid,
-                    "cache_key": cache_key,
-                    "image_guid": cache_key,
-                    "model_identity": "official",
-                    "created_at_epoch": created,
-                }
-            ),
+            json.dumps(row),
             encoding="utf-8",
         )
         return worker_dir
 
     original_exists = inference._process_exists
+    original_common_exists = inference.runtime_common.process_exists
+    original_marker = inference.runtime_common.process_start_marker
     old_runtime_env = os.environ.get("NNINTERACTIVE_RUNTIME_DIR")
     os.environ["NNINTERACTIVE_RUNTIME_DIR"] = str(runtime_root)
     live_pids = set()
     try:
         inference._process_exists = lambda pid: int(pid or 0) in live_pids
+        inference.runtime_common.process_exists = inference._process_exists
+        inference.runtime_common.process_start_marker = lambda pid: "fixture-start-{0}".format(pid)
 
         # Failure paths first: expired, dead, corrupt, and manifest-less
         # workers are skipped silently — behavior stays exactly as before.
@@ -1157,16 +1185,8 @@ def test_nninteractive_disk_worker_adoption(fake, tmp):
 
         # A live worker already in the cache is never replaced by adoption.
         live_pids.add(206)
-        cache_dir = tmp / "cache_worker"
-        cache_dir.mkdir()
-        (cache_dir / "worker_status.json").write_text(
-            json.dumps({"status": "ready"}), encoding="utf-8"
-        )
-        inference._ASYNC_IMAGE_WORKERS[image_key] = {
-            "worker_dir": str(cache_dir),
-            "pid": 206,
-            "model_identity": "official",
-        }
+        cache_dir = write_worker("image_worker_cached", image_key, 206)
+        inference._ASYNC_IMAGE_WORKERS[image_key] = json.loads((cache_dir / "image_worker.json").read_text())
         write_worker("image_worker_newest_disk", image_key, 205, created=3000.0)
         assert_equal(
             inference._adopt_disk_image_workers({}),
@@ -1231,6 +1251,10 @@ def test_nninteractive_disk_worker_adoption(fake, tmp):
         )
     finally:
         inference._process_exists = original_exists
+        inference.runtime_common.process_exists = original_common_exists
+        inference.runtime_common.process_start_marker = original_marker
+        for folder in jobs_root.glob("image_worker_*"):
+            ownership.forget({"worker_dir": str(folder)})
         if old_runtime_env is None:
             os.environ.pop("NNINTERACTIVE_RUNTIME_DIR", None)
         else:
@@ -1768,18 +1792,19 @@ def test_nninteractive_derived_draft_session(fake, tmp):
         "runtime_log": str(runtime_log),
         "shape": [2, 3, 4],
         "image_source": "fake",
+        "input_identity": {"image": module._live_image_identity(image)},
     }
-    old_alive = module._shared_image_worker_alive
+    old_get_worker = module._get_or_start_image_worker
     old_cache = dict(module._ASYNC_IMAGE_WORKERS)
     try:
-        module._shared_image_worker_alive = lambda _worker: True
+        module._get_or_start_image_worker = lambda *_args, **_kwargs: cached
         module._ASYNC_IMAGE_WORKERS.clear()
         module._ASYNC_IMAGE_WORKERS[module._object_id(image)] = cached
         state = module._start_async_job(
             {}, image, target, source=source, write_mode="derived_copy"
         )
     finally:
-        module._shared_image_worker_alive = old_alive
+        module._get_or_start_image_worker = old_get_worker
         module._ASYNC_IMAGE_WORKERS.clear()
         module._ASYNC_IMAGE_WORKERS.update(old_cache)
 
