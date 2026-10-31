@@ -3017,13 +3017,42 @@
   证据：test_nnunet_external_model 36/36、test_nnunet_integration 定向绿、
   gui_smoke + ui_workflow 141 passed + 37 subtests、fast 36/36
   （`20261031T191500_fast.json`）。
+- [x] **R101-3【P2×2+P3×2】外部模型导入链路标注者视角文案修复**
+  〔当轮解决，commit `934b901`〕：全新上下文独立代理以标注者视角审查
+  外部模型导入→预测全链路，结论**无 P1**（端到端闭环成立：导入入口 →
+  扫描校验 → 导入发布 → 预测窗可见 → 推理配方贯通 → 结果应用），发现
+  4 项文案/标注缺口：P2-1 预测窗口模型列表对外部模型只显示 `ext_*` 式
+  model_id、无来源标识（两处 `_apply_models`）；P2-2 模型管理器配置/fold
+  选择对话框裸术语无指引；P3-3 无训练画像模型的兼容性跳过说明为英文且
+  用"legacy"措辞——外部导入模型正命中此分支；P3-4 `model_usability`
+  不可用原因为英文，直接进入导入结果对话框"不可用：{reason}"。修复：
+  ① 两处 `_apply_models`（单例+批量预测窗）外部模型渲染
+  "显示名（外部导入，未本地验证）"；② 配置/fold 对话框各加一行标注者
+  指引（3d_fullres vs 2d、fold_all vs 数字 fold）；③ 无画像分支改中文
+  并点明"外部导入或早期版本训练"；④ 不可用原因中文化（nnU-Net 五条 +
+  FlexiCT 副本四条，文件名字面量保留，既有测试仍匹配）。
+  证据：3 个新测试（test_model_usability_reasons_are_annotator_facing、
+  test_external_model_without_profile_reports_plain_skip_note、
+  test_external_imports_are_marked_in_prediction_windows，覆盖失败路径）
+  + fast 36/36（`20261031T194956_fast.json`）+ flexict_common 触及的
+  全部 6 套件定向重跑 315 passed + 2 subtests。
+- [ ] **R101-4【P3】外部模型 ZIP 双重解压**（待办，需用户决策是否立项）：
+  痛点：扫描（scan_external_model）与导入（import_external_model）各自
+  完整解压 ZIP 一次，官方大模型 zip 全流程解压两遍。根因：扫描阶段解压
+  到临时目录用于校验即弃，导入阶段重新解压做 staged 复制。影响视角：
+  标注者（导入大模型等待时间约翻倍，低频操作）；两阶段均为后台线程且
+  结果页有耗时提示，铁律 1 不受威胁。验收标准：同一 ZIP 扫描→导入只
+  解压一次（扫描产物移交导入或导入复用扫描校验结论），且移交产物被
+  篡改时导入仍拒绝（test_nnunet_external_model 新增失败路径测试）。
+  暂缓理由：收益仅省一次解压等待（低频），改动涉及临时产物生命周期
+  管理，按铁律 9 风险不对称原则待用户拍板。
 - 待续（后续轮次，非本轮范围）：多通道病例绑定、级联/集成配置、
   region-based labels 与自定义 trainer 依赖处理、实机 L5 验收。
 - 红线核查：未用远程服务器；Z 盘数据集未触碰（全部离线临时目录夹具）；
   python_env 未改动。
-- 净代码变化见复杂度账本 R101 行（两段合计：首期切片 +1044/−16；
-  本段 +748/−35——产品 +377/−28、测试 +371/−7；另有 a3da6de 测试隔离
-  +14）。
+- 净代码变化见复杂度账本 R101 行（三段合计：首期切片 +1044/−16；
+  第二段 +748/−35——产品 +377/−28、测试 +371/−7，另有 a3da6de 测试
+  隔离 +14；文案修复段 +109/−15——产品 +31/−15、测试 +78/−0）。
 - 门禁噪声登记（R92-1/R97-B 同类）：收尾 fast 矩阵两次一次性原生崩溃
   （`20261031T170308`/`171036`：ui_workflow_regressions 0xC0000409 两次
   同点、interactive_algorithms 0xC0000005 空输出一次），两套件单跑
