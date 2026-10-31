@@ -150,6 +150,15 @@ class ExternalModelScan(unittest.TestCase):
         self.assertIn("region-based", blockers)
         self.assertEqual([], report["importable"])
 
+    def test_scan_non_integer_label_values_are_blocked(self):
+        # 非整数标签值无法映射为分割标签编号；导入时转换会以裸
+        # ValueError 崩溃，必须在扫描层就给出可读阻碍。
+        build_model(self.root, labels={"tumor": 1, "kidney": "two"})
+        report = external.scan_external_model(self.root / "Dataset123_Example")
+        blockers = "；".join(report["candidates"][0]["blockers"])
+        self.assertIn("不是整数编号", blockers)
+        self.assertEqual([], report["importable"])
+
     def test_scan_cascade_configuration_is_blocked(self):
         build_model(self.root, configuration="3d_cascade_fullres")
         report = external.scan_external_model(self.root / "Dataset123_Example")
@@ -306,6 +315,31 @@ class ExternalModelImport(unittest.TestCase):
         import nnunet_common
         self.assertEqual([], [m for m in nnunet_common.load_models(self.workspace)
                               if m.get("model_id") == manifest["model_id"]])
+
+    def test_import_preserves_triplet_dir_and_records_model_dir(self):
+        # 推理侧（Action4_Predict._parse_model_folder_triplet）靠目录名解析
+        # Trainer__Plans__Configuration；展平发布会让 2d 等模型静默退回
+        # 默认 3d_fullres，属于错误配置而非报错。
+        result = external.import_external_model(self.source, self.workspace)
+        triplet = Path(result["manifest"]["model_dir"])
+        self.assertEqual("nnUNetTrainer__nnUNetPlans__3d_fullres", triplet.name)
+        self.assertEqual(Path(result["destination"]) / triplet.name, triplet)
+        self.assertTrue((triplet / "plans.json").is_file())
+        self.assertTrue((triplet / "fold_0" / "checkpoint_final.pth").is_file())
+        # 模型文件清单相对 model_dir，与来源内容摘要保持同一命名空间。
+        for entry in result["manifest"]["files"]:
+            self.assertTrue((triplet / entry["path"]).is_file())
+        # 推理侧直接读 manifest 文件：派生键缺失会静默跳过任务/模态
+        # 兼容校验，因此必须在导入时写全（与训练侧 manifest 同构）。
+        self.assertEqual("Dataset123_Example", result["manifest"]["task_id"])
+        self.assertEqual("Dataset123_Example", result["manifest"]["task_name"])
+        self.assertEqual("CT", result["manifest"]["modality"])
+        self.assertEqual(["0"], result["manifest"]["folds"])
+        self.assertEqual(
+            [{"name": "tumor", "id": 1, "aliases": ["tumor"]},
+             {"name": "kidney", "id": 2, "aliases": ["kidney"]}],
+            result["manifest"]["labels"],
+        )
 
     def test_import_same_content_twice_reuses_single_version(self):
         first = external.import_external_model(self.source, self.workspace)

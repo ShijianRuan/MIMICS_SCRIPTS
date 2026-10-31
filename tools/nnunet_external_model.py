@@ -310,6 +310,17 @@ def _scan_config_dir(config_dir: Path) -> dict[str, Any]:
                 "该模型使用区域（region-based）标签：{}；需要按模型语义解码，"
                 "首期导入暂不支持。".format("、".join(region_entries))
             )
+        non_int_entries = [
+            str(key)
+            for key, value in labels.items()
+            if key != "background" and not isinstance(value, int)
+        ]
+        if non_int_entries:
+            blockers.append(
+                "以下标签的取值不是整数编号：{}；无法映射为分割标签。".format(
+                    "、".join(non_int_entries)
+                )
+            )
     parts = config_dir.name.split("__")
     if len(parts) != 3 or not all(parts):
         blockers.append(
@@ -532,9 +543,13 @@ def _import_directory(
     staging = destination.with_name(
         "{}.importing_{}".format(destination.name, uuid.uuid4().hex)
     )
+    model_dir_name = config_dir.name
     try:
-        shutil.copytree(str(config_dir), str(staging))
-        if _inventory_digest(_file_inventory(staging)) != digest:
+        staging.mkdir()
+        # 保留 Trainer__Plans__Configuration 目录名：推理侧靠它解析配置三元组，
+        # 展平会静默退回默认 3d_fullres（对 2d 等模型是错误配置）。
+        shutil.copytree(str(config_dir), str(staging / model_dir_name))
+        if _inventory_digest(_file_inventory(staging / model_dir_name)) != digest:
             raise RuntimeError(
                 "复制期间模型文件内容发生变化，已取消本次导入；来源未做任何修改。"
             )
@@ -559,7 +574,26 @@ def _import_directory(
                 "publisher_notes": "",
             },
             "content_sha256": digest,
+            "model_dir": str(destination / model_dir_name),
             "files": inventory,
+            # 以下派生键供推理侧直接消费：run_inference 与
+            # validate_model_input_compatibility 读的是 manifest 文件本体
+            # （而非注册表行），缺这些键会静默跳过任务/模态兼容校验。
+            # labels 与训练侧 manifest 同构（{"name","id","aliases"} 列表），
+            # background 为保留标签不导出。
+            "task_id": task_slug,
+            "task_name": display_name,
+            "modality": next(iter(row["channel_names"].values()), ""),
+            "folds": [name[len("fold_"):] for name in chosen_folds],
+            "labels": [
+                {
+                    "name": str(key),
+                    "id": int(value),
+                    "aliases": [str(key)],
+                }
+                for key, value in row["labels"].items()
+                if key != "background"
+            ],
             "trainer": row["trainer"],
             "plans_name": row["plans_name"],
             "configuration": row["configuration"],
@@ -570,7 +604,6 @@ def _import_directory(
                 "mirroring_axes": row["mirroring_axes"],
             },
             "channel_names": row["channel_names"],
-            "labels": row["labels"],
             "environment": _environment_versions(),
             "created_at_epoch": time.time(),
         }
