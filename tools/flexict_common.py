@@ -305,13 +305,13 @@ def model_usability(model: dict[str, Any]) -> tuple[bool, str]:
     a real train/val split — checkpoint_best is selected by validation Dice)."""
     model_dir = Path(str(model.get("model_dir") or "")).expanduser()
     if not model_dir.is_dir():
-        return False, "model folder is missing"
+        return False, "模型目录不存在"
     if not (model_dir / "plans.json").is_file():
-        return False, "plans.json is missing"
+        return False, "缺少 plans.json"
     if not (model_dir / "dataset.json").is_file():
-        return False, "dataset.json is missing"
+        return False, "缺少 dataset.json"
     if not (model_dir / "fold_0" / "checkpoint_best.pth").is_file():
-        return False, "fold_0/checkpoint_best.pth is missing"
+        return False, "fold_0 缺少 checkpoint_best.pth"
     return True, ""
 
 

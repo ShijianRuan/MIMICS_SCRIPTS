@@ -182,9 +182,15 @@ class PredictionWindow:
             unusable_count = 0
             for index, model in enumerate(self.models):
                 unusable_reason = str(model.get("_unusable_reason") or "")
+                if str(model.get("origin") or "") == "external_pretrained_unverified":
+                    model_cell = "{0}（外部导入，未本地验证）".format(
+                        model.get("display_name") or model.get("model_id")
+                    )
+                else:
+                    model_cell = model.get("model_id")
                 values = [
                     model.get("task_name") or model.get("task_id"),
-                    model.get("model_id"),
+                    model_cell,
                     model.get("configuration"),
                     ", ".join(
                         str(row.get("name")) for row in model.get("labels") or []

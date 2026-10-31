@@ -976,7 +976,7 @@ def load_models(
 def model_usability(model: dict[str, Any]) -> tuple[bool, str]:
     model_dir = Path(str(model.get("model_dir") or "")).expanduser()
     if not model_dir.is_dir():
-        return False, "model folder is missing"
+        return False, "模型目录不存在"
     folds = [str(value) for value in model.get("folds") or []]
     if not folds:
         folds = [
@@ -985,20 +985,20 @@ def model_usability(model: dict[str, Any]) -> tuple[bool, str]:
             if path.is_dir()
         ]
     if not folds:
-        return False, "no trained fold is recorded"
+        return False, "没有已训练的 fold"
     missing = [
         value
         for value in folds
         if not (model_dir / ("fold_" + value) / "checkpoint_final.pth").is_file()
     ]
     if missing:
-        return False, "checkpoint_final.pth is missing for fold(s): {}".format(
+        return False, "以下 fold 缺少 checkpoint_final.pth：{}".format(
             ", ".join(missing)
         )
     if not (model_dir / "plans.json").is_file():
-        return False, "plans.json is missing"
+        return False, "缺少 plans.json"
     if not (model_dir / "dataset.json").is_file():
-        return False, "dataset.json is missing"
+        return False, "缺少 dataset.json"
     return True, ""
 
 

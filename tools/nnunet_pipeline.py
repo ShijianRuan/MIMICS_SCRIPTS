@@ -1975,8 +1975,8 @@ def validate_model_input_compatibility(
     profile = manifest.get("training_data_profile") or {}
     if not isinstance(profile, dict) or not profile:
         return [
-            "This legacy model has no training-data profile; task and spatial "
-            "distribution compatibility could not be fully checked."
+            "该模型（外部导入或早期版本训练）没有记录训练数据画像，"
+            "已跳过任务与空间分布兼容性比对。"
         ]
     if int(profile.get("channel_count") or 1) != 1:
         raise RuntimeError(

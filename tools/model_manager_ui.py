@@ -735,7 +735,9 @@ class ModelManagerWindow:
             choice, ok = QtWidgets.QInputDialog.getItem(
                 self.window,
                 "选择配置",
-                "该训练结果包含多个可用配置，请选择要导入的配置：",
+                "该训练结果包含多个可用配置，请选择要导入的配置：\n"
+                "（常用：3d_fullres＝三维全分辨率，效果通常最好；"
+                "2d＝逐层二维切片，速度更快）",
                 importable,
                 0,
                 False,
@@ -753,7 +755,9 @@ class ModelManagerWindow:
             choice, ok = QtWidgets.QInputDialog.getItem(
                 self.window,
                 "选择 fold",
-                "该训练结果同时包含 fold_all 与数字 fold，请选择导入时使用的 fold：",
+                "该训练结果同时包含 fold_all 与数字 fold，请选择导入时使用的 fold：\n"
+                "（fold_all＝用全部数据训练的最终模型，推荐；"
+                "数字 fold＝只用部分数据训练，适合快速验证）",
                 folds,
                 folds.index(default),
                 False,

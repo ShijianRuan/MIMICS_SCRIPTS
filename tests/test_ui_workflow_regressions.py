@@ -349,6 +349,29 @@ class TestUiWorkflow(unittest.TestCase):
                     w._apply_models([row], '')
                 self.assertEqual(w.table.item(0, 1).toolTip(), long_id)
 
+    def test_external_imports_are_marked_in_prediction_windows(self):
+        # R101 评审 P2-1：外部导入模型在模型列必须直接可读（含"未本地
+        # 验证"标识），而不是一个看不懂的 ext_* 编号。仅 nnU-Net 两个
+        # 预测窗口有外部导入入口。
+        import nnunet_prediction_setup_ui as single
+        import nnunet_batch_predict_ui as batch
+        row = dict(task_id='Dataset123_Example', task_name='示例数据集',
+                   model_id='ext_ab12cd34', display_name='Dataset123_Example',
+                   origin='external_pretrained_unverified',
+                   configuration='3d_fullres', created_at_epoch=1,
+                   labels=[{'name': 'tumor'}], label_names=['tumor'],
+                   execution_backend='local',
+                   manifest_path=str(self.root / 'ext.json'))
+        for mod, ctor in ((single, single.PredictionWindow),
+                          (batch, batch.BatchPredictionWindow)):
+            with self.subTest(window=mod.__name__):
+                w = self.keep(ctor({'workspace': str(self.root / mod.__name__)}, QT))
+                w._loading_models = False
+                with mock.patch.object(mod, 'model_usability', return_value=(True, '')):
+                    w._apply_models([row], '')
+                self.assertEqual('Dataset123_Example（外部导入，未本地验证）',
+                                 w.table.item(0, 1).text())
+
     def test_flexict_unusable_models_never_claim_recommended_or_allow_predict(self):
         import flexict_prediction_setup_ui as ui
         w = self.keep(ui.PredictionWindow({'workspace': str(self.root / 'flex')}, QT))

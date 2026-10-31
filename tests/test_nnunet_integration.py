@@ -1506,6 +1506,32 @@ class SpatialContractTests(unittest.TestCase):
                     {"task_id": "liver", "source_modality": "MR"},
                 )
 
+    def test_external_model_without_profile_reports_plain_skip_note(self):
+        # R101 评审 P3-3：外部导入模型没有训练数据画像——返回给标注者的
+        # 提示必须是中文说明，不再用英文 "legacy model" 术语误称外部模型。
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            image_path = Path(temp) / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(
+                    np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)
+                ),
+                str(image_path),
+            )
+            warnings = pipeline.validate_model_input_compatibility(
+                image_path,
+                {
+                    "task_id": "Dataset123_Example",
+                    "modality": "CT",
+                    "origin": "external_pretrained_unverified",
+                },
+                {"task_id": "Dataset123_Example", "source_modality": "CT"},
+            )
+            self.assertEqual(1, len(warnings))
+            self.assertIn("外部导入", warnings[0])
+
     def _profile_case(self, temp, case_id, label_values, shape=(6, 6, 6), affine=None):
         import nibabel as nib
         import numpy as np
@@ -3320,6 +3346,35 @@ class JobLifecycleTests(unittest.TestCase):
             )
             self.assertFalse(usable)
             self.assertIn("checkpoint_final", reason)
+
+    def test_model_usability_reasons_are_annotator_facing(self):
+        # R101 评审：不可用原因会原样出现在模型管理器/预测窗口，必须是
+        # 标注者可读的中文文案；文件名（plans.json 等）保留字面量。
+        with tempfile.TemporaryDirectory() as temp:
+            usable, reason = common.model_usability(
+                {"model_dir": str(Path(temp) / "missing")}
+            )
+            self.assertFalse(usable)
+            self.assertEqual("模型目录不存在", reason)
+
+            model_dir = Path(temp) / "model"
+            fold = model_dir / "fold_0"
+            fold.mkdir(parents=True)
+            (fold / "checkpoint_final.pth").write_bytes(b"w")
+            for name, expected in (
+                ("plans.json", "plans.json"),
+                ("dataset.json", "dataset.json"),
+            ):
+                usable, reason = common.model_usability(
+                    {"model_dir": str(model_dir), "folds": ["0"]}
+                )
+                self.assertFalse(usable)
+                self.assertIn(expected, reason)
+                (model_dir / name).write_text("{}", encoding="utf-8")
+            usable, reason = common.model_usability(
+                {"model_dir": str(model_dir), "folds": ["0"]}
+            )
+            self.assertTrue(usable, reason)
 
     def test_prediction_backend_accepts_fold_all(self):
         source = (
