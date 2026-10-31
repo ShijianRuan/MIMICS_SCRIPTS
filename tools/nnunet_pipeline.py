@@ -2898,20 +2898,40 @@ def run_inference(job_dir: Path) -> int:
         # output_path is only touched after the prediction passed validation,
         # so a failed or wrong-grid run cannot destroy a previous result.
         staged_output = job_dir / "prediction.staged.nii.gz"
+        # R101: 外部导入的 manifest recipe 记录了导入时选定的 fold 与
+        # checkpoint；不透传时 easy_predict 会退回“全部 fold +
+        # checkpoint_final.pth”。训练侧 manifest 不写 recipe 键，spawn
+        # 参数逐字节不变。fold 名剥前缀成裸 id（"fold_all"→"all"），
+        # nnUNetPredictor 接受整数或 "all"。
+        recipe = manifest.get("recipe")
+        recipe = recipe if isinstance(recipe, dict) else {}
+        recipe_params = {}
+        if recipe.get("checkpoint_name"):
+            recipe_params["checkpoint_name"] = str(recipe["checkpoint_name"])
+        recipe_folds = [
+            str(name)[len("fold_"):]
+            if str(name).startswith("fold_")
+            else str(name)
+            for name in recipe.get("use_folds") or []
+        ]
+        if recipe_folds:
+            recipe_params["use_folds"] = recipe_folds
         try:
+            worker_params = {
+                "model_folder": str(model_dir),
+                "input_path": str(inference_input),
+                "output_path": str(staged_output),
+                "disable_tta": bool(request.get("disable_tta", True)),
+                "use_cpu": bool(request.get("use_cpu", False)),
+                "enable_stats": False,
+                "gpu_device_id": 0,
+                "num_processes_preprocessing": int(request.get("inference_workers") or 2),
+                "num_processes_segmentation_export": int(request.get("inference_workers") or 2),
+            }
+            worker_params.update(recipe_params)
             _spawn_worker(
                 "infer",
-                {
-                    "model_folder": str(model_dir),
-                    "input_path": str(inference_input),
-                    "output_path": str(staged_output),
-                    "disable_tta": bool(request.get("disable_tta", True)),
-                    "use_cpu": bool(request.get("use_cpu", False)),
-                    "enable_stats": False,
-                    "gpu_device_id": 0,
-                    "num_processes_preprocessing": int(request.get("inference_workers") or 2),
-                    "num_processes_segmentation_export": int(request.get("inference_workers") or 2),
-                },
+                worker_params,
                 request,
                 roots,
                 job_dir,

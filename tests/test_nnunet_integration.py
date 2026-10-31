@@ -4304,6 +4304,89 @@ class TestEasyPredictUseFolds(unittest.TestCase):
             self.assertEqual(kwargs["use_folds"], (0, 1))
 
 
+class TestRunInferenceRecipePassthrough(unittest.TestCase):
+    """R101: 外部导入模型的 manifest recipe（选定 fold 与 checkpoint）必须
+    传到 worker；不透传时 easy_predict 会退回全部 fold +
+    checkpoint_final.pth。训练侧 manifest 无 recipe 键，参数必须保持
+    逐字节默认。"""
+
+    def _run(self, manifest_extra, recorded):
+        import nibabel as nib
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = root / "job"
+            job.mkdir()
+            image = root / "image.nii.gz"
+            nib.save(
+                nib.Nifti1Image(np.zeros((4, 4, 4), dtype=np.float32), np.eye(4)),
+                str(image),
+            )
+            model = root / "model"
+            model.mkdir()
+            manifest = model / "mimics_model_manifest.json"
+            payload = {
+                "schema_version": common.MODEL_SCHEMA_VERSION,
+                "model_id": "model",
+                "model_dir": str(model),
+                "labels": [{"name": "A", "id": 1}],
+            }
+            payload.update(manifest_extra)
+            common.write_json_atomic(manifest, payload)
+            common.write_json_atomic(
+                job / "request.json",
+                {
+                    "operation": "infer",
+                    "job_id": "infer",
+                    "workspace": str(root / "workspace"),
+                    "image_path": str(image),
+                    "model_manifest": str(manifest),
+                    "output_path": str(job / "prediction.nii.gz"),
+                },
+            )
+            common.write_json_atomic(job / "control.json", {"action": "run"})
+
+            def fake_worker(stage, params, *args, **kwargs):
+                recorded.update(params)
+                staged = Path(params["output_path"])
+                nib.save(
+                    nib.Nifti1Image(
+                        np.zeros((4, 4, 4), dtype=np.uint8), np.eye(4)),
+                    str(staged),
+                )
+                return {"predicted": True}
+
+            with mock.patch.object(
+                pipeline, "_spawn_worker", side_effect=fake_worker
+            ), mock.patch.object(
+                pipeline, "_acquire_local_gpu", return_value=None
+            ):
+                returncode = pipeline.run_inference(job)
+            self.assertEqual(0, returncode)
+
+    def test_recipe_folds_and_checkpoint_reach_worker(self):
+        recorded = {}
+        self._run(
+            {
+                "recipe": {
+                    "use_folds": ["fold_1", "fold_all"],
+                    "checkpoint_name": "checkpoint_best.pth",
+                }
+            },
+            recorded,
+        )
+        # "fold_all"→"all"；nnUNetPredictor 接受整数或 "all"。
+        self.assertEqual(["1", "all"], recorded["use_folds"])
+        self.assertEqual("checkpoint_best.pth", recorded["checkpoint_name"])
+
+    def test_manifest_without_recipe_keeps_default_worker_params(self):
+        recorded = {}
+        self._run({}, recorded)
+        self.assertNotIn("use_folds", recorded)
+        self.assertNotIn("checkpoint_name", recorded)
+
+
 class FakeMask:
     def __init__(self, name, pixels=1, content=None):
         self.name = name
