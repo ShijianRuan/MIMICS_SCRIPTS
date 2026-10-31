@@ -81,24 +81,12 @@ def _require_checkpoint_loadable(model_dir: Path, family: str) -> None:
         # (audit_model_dir / manifest checks) with a clearer message.
         return
     try:
-        import torch
-    except ImportError as exc:  # pragma: no cover - torch ships with the env
-        raise RuntimeError("模型尚未导入：当前环境缺少 PyTorch，无法安全校验权重。") from exc
-    # Standard nnU-Net logging/checkpoint metadata contains NumPy numeric
-    # arrays/scalars. Allow these specific data constructors, never globals
-    # discovered from the untrusted checkpoint itself or custom model code.
-    import numpy as np
-    multiarray = np._core.multiarray if hasattr(np, "_core") else np.core.multiarray
-    numeric_dtypes = [np.dtype(code) for code in ("?", "i1", "i2", "i4", "i8", "u1", "u2", "u4", "u8", "f2", "f4", "f8", "c8", "c16")]
-    allowed = [np.ndarray, np.dtype, multiarray._reconstruct, multiarray.scalar]
-    allowed += list({type(dtype) for dtype in numeric_dtypes})
-    # NumPy 1.x and 2.x use different module paths for the same data types.
-    allowed += [(multiarray._reconstruct, "numpy.core.multiarray._reconstruct"),
-                (multiarray.scalar, "numpy.core.multiarray.scalar")]
+        from tools.nnunet_external_model import load_checkpoint_restricted
+    except ImportError:  # direct tools/ import (tests, smoke runs)
+        from nnunet_external_model import load_checkpoint_restricted
     for checkpoint in checkpoints:
         try:
-            with torch.serialization.safe_globals(allowed):
-                torch.load(str(checkpoint), map_location="cpu", weights_only=True)
+            load_checkpoint_restricted(checkpoint)
         except Exception as exc:
             raise RuntimeError(
                 "The packaged checkpoint {} is not a loadable torch file under restricted deserialization "
