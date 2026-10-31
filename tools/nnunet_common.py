@@ -926,6 +926,46 @@ def load_models(
             relocated["model_dir"] = str(manifest_path.parent.resolve())
             relocated["manifest_path"] = str(manifest_path.resolve())
             merged[model_id] = relocated
+    # R101: external imports are published under external_models/ with their own
+    # manifest schema; their model_dir points at the preserved
+    # Trainer__Plans__Configuration subdirectory (inference parses the
+    # configuration from that folder name). Lazy import: nnunet_external_model
+    # imports this module at top level.
+    try:
+        from tools.nnunet_external_model import (  # type: ignore
+            EXTERNAL_MANIFEST_NAME,
+            EXTERNAL_SCHEMA_VERSION,
+        )
+    except ImportError:
+        from nnunet_external_model import (  # type: ignore
+            EXTERNAL_MANIFEST_NAME,
+            EXTERNAL_SCHEMA_VERSION,
+        )
+    external_root = workspace_paths(workspace)["root"] / "external_models"
+    if external_root.is_dir():
+        for manifest_path in external_root.glob(
+            "*/*/{}".format(EXTERNAL_MANIFEST_NAME)
+        ):
+            row = read_json(manifest_path, {}) or {}
+            model_id = str(row.get("model_id") or "")
+            if not model_id or row.get("schema_version") != EXTERNAL_SCHEMA_VERSION:
+                continue
+            triplet_name = Path(str(row.get("model_dir") or "")).name
+            if not triplet_name:
+                continue
+            model_dir = manifest_path.parent / triplet_name
+            if not model_dir.is_dir():
+                if include_missing:
+                    relocated = dict(row)
+                    relocated["status"] = "missing_path"
+                    relocated["model_dir"] = str(model_dir)
+                    relocated["manifest_path"] = str(manifest_path.resolve())
+                    merged[model_id] = relocated
+                continue
+            relocated = dict(row)
+            relocated["model_dir"] = str(model_dir.resolve())
+            relocated["manifest_path"] = str(manifest_path.resolve())
+            merged[model_id] = relocated
     return sorted(
         merged.values(),
         key=lambda row: float(row.get("created_at_epoch") or 0),

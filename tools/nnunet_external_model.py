@@ -6,11 +6,11 @@ never executes package code or unrestricted pickles, ZIP archives are
 extracted under strict limits, and a failed or cancelled import never leaves
 a partial registration. A validated model is published under
 ``<workspace>/external_models/<task_slug>/<model_id>/`` with a
-``mimics_nnunet_external_model.v1`` manifest and is deliberately NOT
-registered in the live prediction registry — the prediction UI infers its
-recipe from three-part model folder names and would silently fall back to
-defaults for a foreign layout, so the manager UI entry and the inference
-recipe wiring land together in a later round.
+``mimics_nnunet_external_model.v1`` manifest, preserving the
+``Trainer__Plans__Configuration`` folder name (inference parses the
+configuration from it). ``nnunet_common.load_models`` picks these manifests
+up for the prediction window; the live model registry JSON stays untouched
+(it only records models trained on this machine).
 """
 
 from __future__ import annotations
@@ -631,7 +631,12 @@ def import_external_model(
     use_folds: list[str] | None = None,
     configuration: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and publish an external model; never register it live."""
+    """Validate and publish an external model for the prediction window.
+
+    The live model registry JSON is never written: it records models trained
+    on this machine, while external imports are discovered by
+    ``nnunet_common.load_models`` from ``external_models/`` manifests.
+    """
     source = Path(source).expanduser()
     if source.is_file():
         with tempfile.TemporaryDirectory() as temp:

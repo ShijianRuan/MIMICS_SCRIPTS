@@ -2,8 +2,9 @@
 
 Failure paths first: malicious checkpoints must be rejected without executing
 payloads, ZIP bombs and traversal entries must be refused, blocked models
-must never leave partial registrations, and the live prediction registry
-must stay untouched until the manager UI round wires the recipe.
+must never leave partial registrations, and the live model registry JSON
+must stay untouched — external models reach the prediction window through
+the external_models manifest glob instead.
 """
 import json
 import stat
@@ -296,7 +297,7 @@ class ExternalModelImport(unittest.TestCase):
     def external_root(self):
         return self.workspace / "external_models"
 
-    def test_import_publishes_manifest_outside_live_registry(self):
+    def test_import_publishes_manifest_and_loads_for_prediction(self):
         result = external.import_external_model(self.source, self.workspace)
         self.assertFalse(result["reused"])
         manifest = result["manifest"]
@@ -310,11 +311,29 @@ class ExternalModelImport(unittest.TestCase):
         self.assertTrue(
             (Path(result["destination"]) / "external_model_manifest.json").is_file()
         )
-        # Deliberately NOT in the live prediction registry: the recipe must
-        # not be inferred from a foreign folder name by Action4_Predict.
+        # Visible to the prediction window via load_models (external_models
+        # glob), but never written into the live registry JSON: the registry
+        # only records models trained/registered on this machine.
         import nnunet_common
-        self.assertEqual([], [m for m in nnunet_common.load_models(self.workspace)
-                              if m.get("model_id") == manifest["model_id"]])
+        rows = [m for m in nnunet_common.load_models(self.workspace)
+                if m.get("model_id") == manifest["model_id"]]
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertEqual(manifest["model_dir"], row["model_dir"])
+        self.assertEqual(
+            str(Path(result["destination"]) / "external_model_manifest.json"),
+            row["manifest_path"],
+        )
+        usable, reason = nnunet_common.model_usability(row)
+        self.assertTrue(usable, reason)
+        # 只查本工作区注册表；全局注册表是真实机器状态，测试不得依赖。
+        registry_path = nnunet_common.model_registry_paths(self.workspace)[0]
+        payload = json.loads(registry_path.read_text(encoding="utf-8")) \
+            if registry_path.is_file() else {}
+        self.assertEqual(
+            [], [m for m in payload.get("models") or []
+                 if m.get("model_id") == manifest["model_id"]]
+        )
 
     def test_import_preserves_triplet_dir_and_records_model_dir(self):
         # 推理侧（Action4_Predict._parse_model_folder_triplet）靠目录名解析
