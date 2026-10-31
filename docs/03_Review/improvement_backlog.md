@@ -2999,12 +2999,31 @@
   test_model_portability 23/23 绿为行为不变证据）。
   证据：test_nnunet_external_model 29/29（失败路径优先）；矩阵注册
   fast+full（smoke ~1 分钟预算容不下 20-100s torch 套件）。
-- 待续（下轮，非本轮范围）：模型管理器 UI 原生导入入口、推理配方贯通
-  （use_folds/checkpoint_name 选择）、多通道病例绑定、级联/集成配置。
+- [x] **R101-2【P1】外部模型在 Mimics 中可用（UI 入口 + 预测窗可见 +
+  推理配方贯通）**〔当轮解决，commits `c9413e2` + `67e4eef` + `d36cb0b` +
+  `00a736e` + `48d11ec`〕：R101-1 只完成了 CLI 导入；用户指令"我的目标是
+  在 mimics 中使用"暴露三处断点——① 导入发布目录名丢失 Trainer__Plans__
+  __Config 三段式（推理侧按目录名解析配置，2d 模型会静默退回 3d_fullres）；
+  ② 外部模型不进活跃注册表，预测窗 `load_models` 看不见；③ manifest 的
+  use_folds/checkpoint_name 配方没有贯通到 run_inference worker。修复：
+  ① 发布保留三段式目录 + manifest 写全 task_id/task_name/modality/folds/
+  labels 等推理侧直读键（`c9413e2`）；② `load_models` 增补 external_models
+  glob（含 manifest_path），活跃注册表 JSON 仍只记本机训练/注册的模型
+  （`67e4eef`）；③ manifest recipe 的 use_folds/checkpoint_name 穿透
+  _parse_model_folder_triplet 默认值直达预测 worker（`d36cb0b`）；④ 模型
+  管理器原生导入入口（`00a736e`）：结果文件夹/官方 zip 二选一 → 后台扫描
+  （lazy torch 导入，铁律 1）→ 零可导入逐条阻碍警示 / 多配置·fold_all 明确
+  选择 → 后台导入校验 → 结果页含"外部预训练／未做本地效果验证"标注。
+  证据：test_nnunet_external_model 36/36、test_nnunet_integration 定向绿、
+  gui_smoke + ui_workflow 141 passed + 37 subtests、fast 36/36
+  （`20261031T191500_fast.json`）。
+- 待续（后续轮次，非本轮范围）：多通道病例绑定、级联/集成配置、
+  region-based labels 与自定义 trainer 依赖处理、实机 L5 验收。
 - 红线核查：未用远程服务器；Z 盘数据集未触碰（全部离线临时目录夹具）；
   python_env 未改动。
-- 净代码变化见复杂度账本 R101 行（+1044/−16 净 +1028：产品 +648/−16、
-  测试 +396；另有 a3da6de 测试隔离 +14）。
+- 净代码变化见复杂度账本 R101 行（两段合计：首期切片 +1044/−16；
+  本段 +748/−35——产品 +377/−28、测试 +371/−7；另有 a3da6de 测试隔离
+  +14）。
 - 门禁噪声登记（R92-1/R97-B 同类）：收尾 fast 矩阵两次一次性原生崩溃
   （`20261031T170308`/`171036`：ui_workflow_regressions 0xC0000409 两次
   同点、interactive_algorithms 0xC0000005 空输出一次），两套件单跑
