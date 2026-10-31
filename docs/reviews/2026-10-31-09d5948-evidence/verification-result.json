@@ -1,0 +1,13 @@
+{
+  "status": "pass",
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "remote_commits": 39,
+  "changed_files": 32,
+  "syntax_files": 29,
+  "source_files": 34,
+  "finding_cards": 6,
+  "matrix": "13 pass / 1 fail (2 UI assertions retained)",
+  "targeted_tests": 148,
+  "verified_local_links": 63,
+  "boundary": "Evidence/source consistency, not a claim that product tests all pass"
+}

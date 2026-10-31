@@ -1,5 +1,12 @@
 **MIMICS_SCRIPTS 跨职能评审与开发测试交接**
 
+## 2026-10-31 · 09d5948 新改动与 nnInteractive 加速
+
+[审查报告](2026-10-31-09d5948-revalidation.md) · [结构化记录](2026-10-31-09d5948-revalidation.json) · [证据](2026-10-31-09d5948-evidence/README.md) · [可编辑时序图](2026-10-31-09d5948-evidence/adoption-order.mmd)
+
+39 个新增提交、32 个文件；6 张问题卡（4 P1、2 P2），旧 S11/V01 标为部分解决。14 组选定回归中 13 通过、1 个 UI 套件失败；另 148 项针对性用例通过。本轮仅审查文档与合成证据，不改业务源码。
+
+
 ## 🆕 2026-10-25 · c5947bf 主动学习复核与严重问题修复
 
 [报告](2026-10-25-c5947bf-active-learning.md) · [结构化记录](2026-10-25-c5947bf-active-learning.json) · [证据](2026-10-25-c5947bf-evidence/README.md) · [闭环图](2026-10-25-c5947bf-evidence/active-learning-loop.mmd)

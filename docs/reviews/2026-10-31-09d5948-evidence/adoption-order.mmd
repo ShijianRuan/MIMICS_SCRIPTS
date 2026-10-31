@@ -1,0 +1,15 @@
+sequenceDiagram
+    accTitle: Worker Adoption Guard Ordering
+    accDescr: 当前入口先检查内存中的忙碌任务，随后才从磁盘收养，因此可能在另一图像仍预测时发起新的预热。
+    participant entry as Mimics 入口
+    participant memory as 内存注册表
+    participant disk as 磁盘 worker 记录
+    participant worker as 图像 worker / 服务器
+    entry->>memory: 检查其他图像或模型是否忙碌
+    memory-->>entry: 模块重载后可能为空
+    entry->>disk: 用户选择提示后才收养
+    disk-->>memory: 重新登记 running A
+    entry->>memory: 退役不匹配的空闲 worker
+    Note over memory,worker: running A 被保留，但启动 B 没有再次拒绝
+    entry->>worker: 尝试预热 B
+    Note over entry,worker: 若单会话容量冲突，桥接初始化含自有服务重启路径

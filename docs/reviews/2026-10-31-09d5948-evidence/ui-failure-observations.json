@@ -1,0 +1,38 @@
+{
+  "test_task_model_chooser_full_id_readable_and_copyable": {
+    "assertion": "400 not greater than 805 : long id should overflow the viewport so wrap/scroll matters",
+    "window": [
+      853,
+      440
+    ],
+    "font_family": "Segoe UI",
+    "platform": "offscreen",
+    "boundary": "Unmodified test stops at failure; screenshot does not turn it into a passing regression",
+    "summary_text": "CLoPA-IN\n版本：model_20261014T220658ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaaaa0000\n点提示 · 训练 12 例 + 验证 2 例 · 验证集 AUC +5.0%",
+    "viewport_width": 805,
+    "horizontal_scroll_max": 0,
+    "wrap_mode": "WrapMode.WrapAnywhere"
+  },
+  "test_completion_long_copy_wraps_within_viewport": {
+    "assertion": "14 not greater than 15",
+    "window": [
+      853,
+      440
+    ],
+    "font_family": "Segoe UI",
+    "platform": "offscreen",
+    "boundary": "Unmodified test stops at failure; screenshot does not turn it into a passing regression",
+    "detail_text": "训练完成，但验证比对显示新版本未超过当前标注模型，当前模型保持不变。新版本可用但默认隐藏：点击下方「查看这个版本」定位它，或到「模型版本」页勾选「显示失败与未改进的版本」。",
+    "detail_height": 14,
+    "elapsed_height": 15,
+    "word_wrap": true,
+    "horizontal_scroll_max": [
+      0,
+      0,
+      0
+    ],
+    "settled_detail_height": 14,
+    "settled_detail_text": "训练完成，但验证比对显示新版本未超过当前标注模型，当前模型保持不变。新版本可用但默认隐藏：点击下方「查看这个版本」定位它，或到「模型版本」页勾选「显示失败与未改进的版本」。",
+    "settled_detail_size_hint": 107
+  }
+}

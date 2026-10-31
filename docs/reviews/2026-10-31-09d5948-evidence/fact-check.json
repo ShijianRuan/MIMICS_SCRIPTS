@@ -1,0 +1,171 @@
+{
+  "schema": "review_fact_check.v1",
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "verification_pass": "Separate post-draft verification against pinned source, observed files and original regression outputs",
+  "confidence": "High for six synthetic boundary observations; no confidence claim about unrun deployment outcomes",
+  "claims": [
+    {
+      "id": "NI01",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3651,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 902,
+          "symbol": "_worker_cache_key"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3687,
+          "symbol": "_get_or_start_image_worker"
+        }
+      ],
+      "observation": "same_guid_changed_grid",
+      "note": "actual synthetic cache consumer; downstream incorrect prediction remains source risk"
+    },
+    {
+      "id": "NI02",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 2993,
+          "symbol": "_continue_session_prompt"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3139,
+          "symbol": "_run_with_config"
+        },
+        {
+          "file": "nninteractive_bridge.py",
+          "line": 2298,
+          "symbol": "_BridgeSessionContext.__init__"
+        }
+      ],
+      "observation": "busy_guard_before_adoption",
+      "note": "actual entry/guard reproduction; prewarm intercepted"
+    },
+    {
+      "id": "NI03",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3635,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3384,
+          "symbol": "_shared_image_worker_alive"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3552,
+          "symbol": "_retire_idle_image_workers"
+        },
+        {
+          "file": "runtime_py35/runtime_common.py",
+          "line": 1708,
+          "symbol": "terminate_process_async"
+        }
+      ],
+      "observation": "unowned_live_pid_retirement",
+      "note": "real PID liveness and call path; termination intercepted"
+    },
+    {
+      "id": "PV01",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 894,
+          "symbol": "prepare_source_grid_cases"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 585,
+          "symbol": "_case_source_signature"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 640,
+          "symbol": "_materialize_case"
+        }
+      ],
+      "observation": "project_voxel_cache_omits_intensity_contract",
+      "note": "actual synthetic NIfTI materializer/cache"
+    },
+    {
+      "id": "NI04",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3642,
+          "symbol": "_adopt_disk_image_workers"
+        }
+      ],
+      "observation": "valid_json_invalid_worker_schema",
+      "note": "actual helper with malformed readable JSON"
+    },
+    {
+      "id": "UND01",
+      "result": "confirmed_boundary_qualified_impact",
+      "source_locations": [
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 134,
+          "symbol": "find_latest_receipt"
+        }
+      ],
+      "observation": "ordinary_case_name_misclassified_as_archive",
+      "note": "actual producer naming and discovery; no deletion"
+    }
+  ],
+  "test_claims": [
+    {
+      "claim": "39 remote commits /32 files /29 Python syntax parses",
+      "evidence": "source-scope.json and syntax.json",
+      "result": "confirmed"
+    },
+    {
+      "claim": "14 suites:13 passed/1 failed; UI2 assertions failed",
+      "evidence": "regression-matrix.json",
+      "result": "confirmed"
+    },
+    {
+      "claim": "148 targeted tests OK",
+      "evidence": "nninteractive-targeted.log",
+      "result": "confirmed"
+    },
+    {
+      "claim": "S11 vertical text clipping persists after0.6sec on this host",
+      "evidence": "ui-failure-observations.json plus viewed settled screenshot",
+      "result": "confirmed_local_Qt_only"
+    },
+    {
+      "claim": "Chooser long-ID failure alone demonstrates product clipping",
+      "evidence": "ID400px vs805px viewport and viewed screenshot",
+      "result": "contradicted_not_claimed"
+    }
+  ],
+  "corrections": [
+    "Classified chooser failure as a font-dependent test-data assumption, not a proven product clipping bug",
+    "Classified S11 as an old issue with remaining partial resolution rather than counting it as new",
+    "Qualified server restart, incorrect predictions and PID reuse as downstream source risks; no real inference or process termination performed"
+  ],
+  "unverified_outcomes": [
+    "Windows/Mimics/GPU end-to-end behavior",
+    "Actual first/repeat-call timing or claimed65-72second reduction",
+    "Actual wrong segmentation/clinical impact",
+    "Actual OS PID recycling or unrelated-process termination",
+    "Real training convergence or remote upload execution",
+    "All possible security vulnerabilities"
+  ]
+}

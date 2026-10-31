@@ -1,0 +1,200 @@
+{
+  "baseline": "e22b65e89679786c98d6066365efe74a2949a32a",
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "commit_count": 39,
+  "changed_file_count": 32,
+  "commits": [
+    {
+      "sha": "f9690fc4948e8971370273616dd4d98ddb1f4c7e",
+      "subject": "docs: R93 L5 验收执行记录 + D13 远程多折聚合缺口提案"
+    },
+    {
+      "sha": "982ac2cd1fab05225da0b8973116be83716201f3",
+      "subject": "Merge remote 4af0393/e22b65e: active-learning fix round and review"
+    },
+    {
+      "sha": "08efce72738d3dca1289577ae1df5e4201fc5a9a",
+      "subject": "fix: archived import receipts must not shadow undo discovery"
+    },
+    {
+      "sha": "be9f74393ecdd4894f2168e253abf47c27a0bca7",
+      "subject": "docs: register R94 verification round (archived receipt fix + source-image audit)"
+    },
+    {
+      "sha": "e6ed858ae51dab7e1a61535e6172e95c509acc5d",
+      "subject": "fix: distributed-mcs mask export falls back to in-project grid snapshot"
+    },
+    {
+      "sha": "d98e53054b10019a5791b232429ac60e241d8cf8",
+      "subject": "feat: prediction context falls back to in-project voxel buffer (D20)"
+    },
+    {
+      "sha": "71d08d6c18701369f89cb80ecee27ea4caf748ad",
+      "subject": "feat: job creators and pipelines adopt in-project voxel buffer (D20)"
+    },
+    {
+      "sha": "37b3f22da6113b0b43dacf2388cb27427067a240",
+      "subject": "feat: prediction setup UIs support in-project voxel buffer mode (D20)"
+    },
+    {
+      "sha": "3877f4527dfe1ec75be38d5d5456a12dbfba7c7d",
+      "subject": "fix(test): 主动学习选行门控测试跟进 4af0393 的 UserRole 契约"
+    },
+    {
+      "sha": "c00f60616a2cf00d3e2ffc3df05fd2fc3f777af7",
+      "subject": "fix: 工程体素导出 sha256 custody 格式与 tools 侧对齐 (D20)"
+    },
+    {
+      "sha": "beee6d6186de2ec5f84a1fb64e8d7019cb97b28f",
+      "subject": "test: D20 工程体素预测失败路径与 UI 门禁用例"
+    },
+    {
+      "sha": "d1c4a3a505181c158b05ab3508ece957f4bcec87",
+      "subject": "docs: D20 关闭为 R95（账本/复杂度/L5 表）"
+    },
+    {
+      "sha": "80386d68ac76fb0e745d85a79b25c7075897871c",
+      "subject": "docs: R96 立项登记（D28 训练侧工程体素模式，nnU-Net + FlexiCT）"
+    },
+    {
+      "sha": "bee1aeb25d69dfaaa352945ce0c35f99096d9fbb",
+      "subject": "feat: nnU-Net 训练 project_voxels 模式白名单与创建器拒绝 (D28)"
+    },
+    {
+      "sha": "9f6ad7b14574fe9f4116d3ff5c48dcdd9aeed13e",
+      "subject": "feat: 工程体素训练的运行时图像流式导出与快照预检 (D28)"
+    },
+    {
+      "sha": "9ec2cb53a6b5b664bb63b112dc66dd8e54323ee5",
+      "subject": "feat: project_voxels 管线分支与内容寻址缓存签名 (D28)"
+    },
+    {
+      "sha": "d457b93cc726db0ee18cfdaae1bd8d874cb802e6",
+      "subject": "feat: 训练 UI 第 4 种标签来源\"工程体素\"入口 (D28 步骤 7)"
+    },
+    {
+      "sha": "cbabcacca992c13a75316b82644b5ca5d6451f50",
+      "subject": "test: project_voxels 四类回归（管线/创建器/UI/运行时批量导出） (D28 步骤 8)"
+    },
+    {
+      "sha": "e7b12b51c5c67bb36e459423c833b2f91619ee75",
+      "subject": "test: 修复三处全量门禁既有失败（非 R96 回归）"
+    },
+    {
+      "sha": "222b9360be25971dac97783409b8c1675dea99b4",
+      "subject": "feat: FlexiCT 创建器拒绝工程体素远程训练与主动学习 (R96-2 步骤 A)"
+    },
+    {
+      "sha": "d03dd2a47fc8c2500349e1f5c2d7a4125396de09",
+      "subject": "feat: FlexiCT 工程体素扫描函数与 normalize 透传 (R96-2 步骤 B)"
+    },
+    {
+      "sha": "9b22afa30d212c6295140c6cd070da8b74888499",
+      "subject": "feat: FlexiCT 训练窗第 2 种数据来源\"工程体素\"入口 (R96-2 步骤 C/D)"
+    },
+    {
+      "sha": "240e0526a39a282e1a00eefcf57b7058ab40e91d",
+      "subject": "test: ui_workflow_regressions 注册进回归矩阵 fast/full (R95-3)"
+    },
+    {
+      "sha": "f1afe88dc002bc87d8647441c4a8e39d8a292ed5",
+      "subject": "docs: R96-1/R96-2/R95-3 闭环与复杂度账本 (R96 收尾)"
+    },
+    {
+      "sha": "83e6b6d8edbb69d1b3b4619b4fd2c892b8be02a8",
+      "subject": "fix: 远程训练审计修复——FlexiCT 创建器预检前移 + 远程状态中文标签 (R97)"
+    },
+    {
+      "sha": "0d47f24bee2d5a9101c258b0feabe16089205668",
+      "subject": "fix: 工程体素训练单例失败不再中断整轮 + 真实原因贯通 + 顶层提示 (R97)"
+    },
+    {
+      "sha": "045c91fa0074503807b97d4686760c9d7e91c0c8",
+      "subject": "feat: 状态查看器按例展示训练准备跳过原因并中文化 (R97 P2-4)"
+    },
+    {
+      "sha": "c747f566517c573d5e42d253095888000a792b2d",
+      "subject": "docs: R97 审计双系列入账 + 复杂度台账两行 (R97 收尾)"
+    },
+    {
+      "sha": "e318a84b76960b644e371f7ac8d3d37c33cb1e60",
+      "subject": "feat: 工程体素训练解禁远程执行 (R98-A 用户立项)"
+    },
+    {
+      "sha": "e9238dd1647297820010b1ede7adb4e5794c8e86",
+      "subject": "feat: 训练窗工程体素模式解禁远程选择器 (R98-A)"
+    },
+    {
+      "sha": "e5a930448f9a475018e2aff05f0f886c8f8132bb",
+      "subject": "feat: FlexiCT 训练窗病例/验证划分呈现修复 (R98-B)"
+    },
+    {
+      "sha": "6370d7a60dd1af5af6910868e95fbcb18ecdce0e",
+      "subject": "docs: R98 双条目已解决入账 + 复杂度台账一行 (R98 收尾)"
+    },
+    {
+      "sha": "eac001cc6dce3bdf3719fdf1980efb3943911458",
+      "subject": "fix: _force_nifti_affine 未压缩 .nii 同路径重写改临时文件原子替换 (R95-2)"
+    },
+    {
+      "sha": "0b8eabec591084fb4018c6bbee9b751c285ec55f",
+      "subject": "docs: R95-2 已解决入账 + 复杂度台账一行"
+    },
+    {
+      "sha": "25cd6018953d552ca772278613fe73c041b5e674",
+      "subject": "docs: R99 肾脏标注导出交付外部资源登记入账"
+    },
+    {
+      "sha": "0ec48a351a33bd9814dac759f2433dee939b12dd",
+      "subject": "docs: R100 立项入账——nnInteractive 同图连续标注 65-72s 等待（磁盘收养方案，验收标准锁定）"
+    },
+    {
+      "sha": "dc0f31e6ec3e672867b381ac31f3b893f34fc424",
+      "subject": "feat: nnInteractive 磁盘收养——跨工具调用复用同图 image worker (R100)"
+    },
+    {
+      "sha": "a5da6db47f086e0ced654b8403e5ea1c13b38e20",
+      "subject": "test: nnInteractive 磁盘收养失败路径测试 (R100)"
+    },
+    {
+      "sha": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "subject": "docs: R100 磁盘收养已解决入账 + 复杂度台账一行"
+    }
+  ],
+  "changed_files": [
+    "docs/03_Review/complexity_ledger.md",
+    "docs/03_Review/improvement_backlog.md",
+    "docs/TEST_STRATEGY.md",
+    "mimics_bridge.py",
+    "runtime_py35/flexict_mimics.py",
+    "runtime_py35/import_undo_mimics.py",
+    "runtime_py35/mimics_export.py",
+    "runtime_py35/mimics_mask_apply.py",
+    "runtime_py35/nninteractive_mimics.py",
+    "runtime_py35/nnunet_mimics.py",
+    "tests/fake_mimics_flow_test.py",
+    "tests/test_active_learning_review_regressions.py",
+    "tests/test_all.py",
+    "tests/test_flexict_integration.py",
+    "tests/test_gui_smoke.py",
+    "tests/test_nnunet_integration.py",
+    "tests/test_review_workflow_regressions.py",
+    "tests/test_training_convergence.py",
+    "tests/test_ui_workflow_regressions.py",
+    "tools/flexict_pipeline.py",
+    "tools/flexict_prediction_setup_ui.py",
+    "tools/flexict_status_viewer.py",
+    "tools/flexict_training_setup_ui.py",
+    "tools/io_path_setup_ui.py",
+    "tools/mimics_label_export.py",
+    "tools/nnunet_common.py",
+    "tools/nnunet_jobs.py",
+    "tools/nnunet_pipeline.py",
+    "tools/nnunet_prediction_setup_ui.py",
+    "tools/nnunet_status_viewer.py",
+    "tools/nnunet_training_setup_ui.py",
+    "tools/run_regression_matrix.py"
+  ],
+  "provenance": "SHA/topology and local pushed-commit ledger; no author/email inference",
+  "business_code_modified": false
+}

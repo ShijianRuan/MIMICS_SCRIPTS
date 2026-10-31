@@ -1,0 +1,490 @@
+{
+  "schema": "remote_code_review.v1",
+  "review_date": "2026-10-31",
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "baseline": "e22b65e89679786c98d6066365efe74a2949a32a",
+  "scope": {
+    "baseline": "e22b65e89679786c98d6066365efe74a2949a32a",
+    "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+    "commit_count": 39,
+    "changed_file_count": 32,
+    "commits": [
+      {
+        "sha": "f9690fc4948e8971370273616dd4d98ddb1f4c7e",
+        "subject": "docs: R93 L5 验收执行记录 + D13 远程多折聚合缺口提案"
+      },
+      {
+        "sha": "982ac2cd1fab05225da0b8973116be83716201f3",
+        "subject": "Merge remote 4af0393/e22b65e: active-learning fix round and review"
+      },
+      {
+        "sha": "08efce72738d3dca1289577ae1df5e4201fc5a9a",
+        "subject": "fix: archived import receipts must not shadow undo discovery"
+      },
+      {
+        "sha": "be9f74393ecdd4894f2168e253abf47c27a0bca7",
+        "subject": "docs: register R94 verification round (archived receipt fix + source-image audit)"
+      },
+      {
+        "sha": "e6ed858ae51dab7e1a61535e6172e95c509acc5d",
+        "subject": "fix: distributed-mcs mask export falls back to in-project grid snapshot"
+      },
+      {
+        "sha": "d98e53054b10019a5791b232429ac60e241d8cf8",
+        "subject": "feat: prediction context falls back to in-project voxel buffer (D20)"
+      },
+      {
+        "sha": "71d08d6c18701369f89cb80ecee27ea4caf748ad",
+        "subject": "feat: job creators and pipelines adopt in-project voxel buffer (D20)"
+      },
+      {
+        "sha": "37b3f22da6113b0b43dacf2388cb27427067a240",
+        "subject": "feat: prediction setup UIs support in-project voxel buffer mode (D20)"
+      },
+      {
+        "sha": "3877f4527dfe1ec75be38d5d5456a12dbfba7c7d",
+        "subject": "fix(test): 主动学习选行门控测试跟进 4af0393 的 UserRole 契约"
+      },
+      {
+        "sha": "c00f60616a2cf00d3e2ffc3df05fd2fc3f777af7",
+        "subject": "fix: 工程体素导出 sha256 custody 格式与 tools 侧对齐 (D20)"
+      },
+      {
+        "sha": "beee6d6186de2ec5f84a1fb64e8d7019cb97b28f",
+        "subject": "test: D20 工程体素预测失败路径与 UI 门禁用例"
+      },
+      {
+        "sha": "d1c4a3a505181c158b05ab3508ece957f4bcec87",
+        "subject": "docs: D20 关闭为 R95（账本/复杂度/L5 表）"
+      },
+      {
+        "sha": "80386d68ac76fb0e745d85a79b25c7075897871c",
+        "subject": "docs: R96 立项登记（D28 训练侧工程体素模式，nnU-Net + FlexiCT）"
+      },
+      {
+        "sha": "bee1aeb25d69dfaaa352945ce0c35f99096d9fbb",
+        "subject": "feat: nnU-Net 训练 project_voxels 模式白名单与创建器拒绝 (D28)"
+      },
+      {
+        "sha": "9f6ad7b14574fe9f4116d3ff5c48dcdd9aeed13e",
+        "subject": "feat: 工程体素训练的运行时图像流式导出与快照预检 (D28)"
+      },
+      {
+        "sha": "9ec2cb53a6b5b664bb63b112dc66dd8e54323ee5",
+        "subject": "feat: project_voxels 管线分支与内容寻址缓存签名 (D28)"
+      },
+      {
+        "sha": "d457b93cc726db0ee18cfdaae1bd8d874cb802e6",
+        "subject": "feat: 训练 UI 第 4 种标签来源\"工程体素\"入口 (D28 步骤 7)"
+      },
+      {
+        "sha": "cbabcacca992c13a75316b82644b5ca5d6451f50",
+        "subject": "test: project_voxels 四类回归（管线/创建器/UI/运行时批量导出） (D28 步骤 8)"
+      },
+      {
+        "sha": "e7b12b51c5c67bb36e459423c833b2f91619ee75",
+        "subject": "test: 修复三处全量门禁既有失败（非 R96 回归）"
+      },
+      {
+        "sha": "222b9360be25971dac97783409b8c1675dea99b4",
+        "subject": "feat: FlexiCT 创建器拒绝工程体素远程训练与主动学习 (R96-2 步骤 A)"
+      },
+      {
+        "sha": "d03dd2a47fc8c2500349e1f5c2d7a4125396de09",
+        "subject": "feat: FlexiCT 工程体素扫描函数与 normalize 透传 (R96-2 步骤 B)"
+      },
+      {
+        "sha": "9b22afa30d212c6295140c6cd070da8b74888499",
+        "subject": "feat: FlexiCT 训练窗第 2 种数据来源\"工程体素\"入口 (R96-2 步骤 C/D)"
+      },
+      {
+        "sha": "240e0526a39a282e1a00eefcf57b7058ab40e91d",
+        "subject": "test: ui_workflow_regressions 注册进回归矩阵 fast/full (R95-3)"
+      },
+      {
+        "sha": "f1afe88dc002bc87d8647441c4a8e39d8a292ed5",
+        "subject": "docs: R96-1/R96-2/R95-3 闭环与复杂度账本 (R96 收尾)"
+      },
+      {
+        "sha": "83e6b6d8edbb69d1b3b4619b4fd2c892b8be02a8",
+        "subject": "fix: 远程训练审计修复——FlexiCT 创建器预检前移 + 远程状态中文标签 (R97)"
+      },
+      {
+        "sha": "0d47f24bee2d5a9101c258b0feabe16089205668",
+        "subject": "fix: 工程体素训练单例失败不再中断整轮 + 真实原因贯通 + 顶层提示 (R97)"
+      },
+      {
+        "sha": "045c91fa0074503807b97d4686760c9d7e91c0c8",
+        "subject": "feat: 状态查看器按例展示训练准备跳过原因并中文化 (R97 P2-4)"
+      },
+      {
+        "sha": "c747f566517c573d5e42d253095888000a792b2d",
+        "subject": "docs: R97 审计双系列入账 + 复杂度台账两行 (R97 收尾)"
+      },
+      {
+        "sha": "e318a84b76960b644e371f7ac8d3d37c33cb1e60",
+        "subject": "feat: 工程体素训练解禁远程执行 (R98-A 用户立项)"
+      },
+      {
+        "sha": "e9238dd1647297820010b1ede7adb4e5794c8e86",
+        "subject": "feat: 训练窗工程体素模式解禁远程选择器 (R98-A)"
+      },
+      {
+        "sha": "e5a930448f9a475018e2aff05f0f886c8f8132bb",
+        "subject": "feat: FlexiCT 训练窗病例/验证划分呈现修复 (R98-B)"
+      },
+      {
+        "sha": "6370d7a60dd1af5af6910868e95fbcb18ecdce0e",
+        "subject": "docs: R98 双条目已解决入账 + 复杂度台账一行 (R98 收尾)"
+      },
+      {
+        "sha": "eac001cc6dce3bdf3719fdf1980efb3943911458",
+        "subject": "fix: _force_nifti_affine 未压缩 .nii 同路径重写改临时文件原子替换 (R95-2)"
+      },
+      {
+        "sha": "0b8eabec591084fb4018c6bbee9b751c285ec55f",
+        "subject": "docs: R95-2 已解决入账 + 复杂度台账一行"
+      },
+      {
+        "sha": "25cd6018953d552ca772278613fe73c041b5e674",
+        "subject": "docs: R99 肾脏标注导出交付外部资源登记入账"
+      },
+      {
+        "sha": "0ec48a351a33bd9814dac759f2433dee939b12dd",
+        "subject": "docs: R100 立项入账——nnInteractive 同图连续标注 65-72s 等待（磁盘收养方案，验收标准锁定）"
+      },
+      {
+        "sha": "dc0f31e6ec3e672867b381ac31f3b893f34fc424",
+        "subject": "feat: nnInteractive 磁盘收养——跨工具调用复用同图 image worker (R100)"
+      },
+      {
+        "sha": "a5da6db47f086e0ced654b8403e5ea1c13b38e20",
+        "subject": "test: nnInteractive 磁盘收养失败路径测试 (R100)"
+      },
+      {
+        "sha": "09d5948988c4efd481ddb15d162551c644aebaef",
+        "subject": "docs: R100 磁盘收养已解决入账 + 复杂度台账一行"
+      }
+    ],
+    "changed_files": [
+      "docs/03_Review/complexity_ledger.md",
+      "docs/03_Review/improvement_backlog.md",
+      "docs/TEST_STRATEGY.md",
+      "mimics_bridge.py",
+      "runtime_py35/flexict_mimics.py",
+      "runtime_py35/import_undo_mimics.py",
+      "runtime_py35/mimics_export.py",
+      "runtime_py35/mimics_mask_apply.py",
+      "runtime_py35/nninteractive_mimics.py",
+      "runtime_py35/nnunet_mimics.py",
+      "tests/fake_mimics_flow_test.py",
+      "tests/test_active_learning_review_regressions.py",
+      "tests/test_all.py",
+      "tests/test_flexict_integration.py",
+      "tests/test_gui_smoke.py",
+      "tests/test_nnunet_integration.py",
+      "tests/test_review_workflow_regressions.py",
+      "tests/test_training_convergence.py",
+      "tests/test_ui_workflow_regressions.py",
+      "tools/flexict_pipeline.py",
+      "tools/flexict_prediction_setup_ui.py",
+      "tools/flexict_status_viewer.py",
+      "tools/flexict_training_setup_ui.py",
+      "tools/io_path_setup_ui.py",
+      "tools/mimics_label_export.py",
+      "tools/nnunet_common.py",
+      "tools/nnunet_jobs.py",
+      "tools/nnunet_pipeline.py",
+      "tools/nnunet_prediction_setup_ui.py",
+      "tools/nnunet_status_viewer.py",
+      "tools/nnunet_training_setup_ui.py",
+      "tools/run_regression_matrix.py"
+    ],
+    "provenance": "SHA/topology and local pushed-commit ledger; no author/email inference",
+    "business_code_modified": false
+  },
+  "focus": "nnInteractive disk adoption and project-voxel workflows",
+  "findings": [
+    {
+      "id": "NI01",
+      "priority": "P1",
+      "status": "open",
+      "classification": "R100 expands existing cache weakness across invocations",
+      "title": "同 GUID 图像变化后仍收养旧输入",
+      "scenario": "同一 Image 在配准/处理后保持 GUID 和尺寸，或源文件已更新，再从入口标注另一器官。",
+      "observed": "真实磁盘收养后，合成图像原点改为 LPS x=100，_get_or_start_image_worker 仍返回原 worker，没有请求新导出/运行时验证。",
+      "cause": "官方模型 cache_key 仅 Image GUID；命中时只判断存活和输入模式，不比较当前图像、网格、工程或完整模型/预处理签名。",
+      "impact": "存在用旧图像/映射计算当前提示的风险；应用端当前项目与 GUID 检查不能证明缓存输入正确。没有执行模型或观察临床错误。",
+      "what_to_change": "持久化并验证图像输入的完整身份，不能以 GUID 单独决定跨入口命中。",
+      "why": "错误命中会静默跳过医学影像本应重新准备的步骤。",
+      "how": "绑定工程/父 Mimics 会话、图像内容版本、live shape/affine、源文件身份、强度恢复和模型/权重/折/预处理契约；无法证明相同则保守不复用，并保留在途结果。",
+      "acceptance": [
+        "相同 GUID/尺寸改变物理网格或输入后失效；未变同图跨入口仍可命中。",
+        "更换工程、源图、官方权重或预处理契约时失效；结果应用前再次检查网格。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3651,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 902,
+          "symbol": "_worker_cache_key"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3687,
+          "symbol": "_get_or_start_image_worker"
+        }
+      ],
+      "observation": "same_guid_changed_grid",
+      "evidence_type": "actual synthetic cache consumer; downstream incorrect prediction remains source risk"
+    },
+    {
+      "id": "NI02",
+      "priority": "P1",
+      "status": "open",
+      "classification": "new R100 ordering gap",
+      "title": "先忙碌检查后收养，跨入口漏掉在途预测",
+      "scenario": "图像 A 仍在预测，模块重载清空内存字典，此时用户在图像 B 或另一模型上运行入口。",
+      "observed": "真实 _run_with_config 返回 0 并走到预热；预热拦截点调用真实 busy helper 已能找到收养后的 running A，A 也未被退役。",
+      "cause": "入口 3139/3153 的 busy 检查先于 _continue_session_prompt 2993 的磁盘收养；退役函数遇到在途结果仅跳过，并不阻止随后启动。",
+      "impact": "新 worker 可能遇到 max-sessions=1 容量错误；桥接容量恢复分支会尝试重启已有自有服务器，干扰旧预测并抵消加速。只复现错误放行，未启动或重启服务器。",
+      "what_to_change": "在 busy 检查、草稿创建和预热之前完成经过身份验证的收养。",
+      "why": "忙碌检查必须读取完整任务集合才能保护在途工作。",
+      "how": "将收养移到 _run_with_config 前置阶段，在提交租约下重查；容量恢复也应核对已有 active operation，不能仅因容量满就重启正在服务的服务器。",
+      "acceptance": [
+        "清空内存注册表、保留磁盘 running/未消费结果，另一 Image/模型入口应拒绝，不能创建 worker、改 Mask 或重启服务。",
+        "空闲已消费结果可安全退役；同图续接仍可用。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 2993,
+          "symbol": "_continue_session_prompt"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3139,
+          "symbol": "_run_with_config"
+        },
+        {
+          "file": "nninteractive_bridge.py",
+          "line": 2298,
+          "symbol": "_BridgeSessionContext.__init__"
+        }
+      ],
+      "observation": "busy_guard_before_adoption",
+      "evidence_type": "actual entry/guard reproduction; prewarm intercepted"
+    },
+    {
+      "id": "NI03",
+      "priority": "P1",
+      "status": "open",
+      "classification": "disk record promoted to process authority",
+      "title": "仅凭 PID 存活收养，退役可终止非 worker 进程",
+      "scenario": "worker 崩溃遗留 ready 记录，随后 PID 被复用；或同目录记录来自另一 Mimics 实例。",
+      "observed": "临时旧记录指向本次诊断进程真实 PID，initialize.parent_pid 不符，仍被收养并传给 terminate_process_async。终止被记录器拦截，没有杀进程。",
+      "cause": "仅核对 PID 存活与非终态；未检查 start marker、命令行/控制目录、父 Mimics 身份或所有权 token，退役则按裸 PID 终止。",
+      "impact": "可能终止无关进程或其他标注实例。这是本地残留记录/进程身份问题，不是已证实的远程入侵或 RCE；没有诱发真实 PID 复用。",
+      "what_to_change": "区分进程存在与有权管理该 worker；未知身份不收养也不终止。",
+      "why": "可复用的 PID 不构成终止权限。",
+      "how": "启动时记录 start marker、父会话身份和 token；收养时核对命令行、控制目录并握手，实际终止前再次核验。",
+      "acceptance": [
+        "存活但身份不同的 PID、父 Mimics 不符、缺失/损坏 marker 不得进入终止路径。",
+        "Windows 补测 PID 复用与信息不可读；并发 Mimics 实例不得共享交互命令序列。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3635,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3384,
+          "symbol": "_shared_image_worker_alive"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3552,
+          "symbol": "_retire_idle_image_workers"
+        },
+        {
+          "file": "runtime_py35/runtime_common.py",
+          "line": 1708,
+          "symbol": "terminate_process_async"
+        }
+      ],
+      "observation": "unowned_live_pid_retirement",
+      "evidence_type": "real PID liveness and call path; termination intercepted"
+    },
+    {
+      "id": "PV01",
+      "priority": "P1",
+      "status": "open",
+      "classification": "new D28 cache signature omission",
+      "title": "工程体素缓存遗漏强度恢复和网格契约",
+      "scenario": "raw 字节和标签不变，工程的 GV→源强度参数修正后，再准备 nnU-Net/FlexiCT 训练。",
+      "observed": "真实 NIfTI 材料化：slope 由 1 改为 2，第二次 cache_hit=True，缓存 [0,1,2,3,4,5,6,7]，同参数重新物化应为 [0,2,4,6,8,10,12,14]。",
+      "cause": "project_voxels 的 image_signature 只有 kind/raw sha256；shape/dtype、当前/目标 affine、slope/intercept/zero tolerance 等影响输出却未入签名。",
+      "impact": "可能把旧输入继续用于本机或远程训练。证明的是实际输入不同，未训练或测量精度变化。",
+      "what_to_change": "用完整物化语义生成内容签名，升级缓存契约。",
+      "why": "raw 摘要只证明字节相同，不证明物理值和空间解释相同。",
+      "how": "规范化签入 shape、dtype/字节序、网格、expected_grid、modality、强度恢复 basis/slope/intercept/zero tolerance 和版本；命中前验证当前字节，失效旧签名缓存。",
+      "acceptance": [
+        "raw/标签不变而改变恢复参数、dtype 或网格时失效；输出等于独立新物化。",
+        "相同内容同语义重新导出仍可命中，不依赖临时路径和 mtime；覆盖两后端。"
+      ],
+      "locations": [
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 894,
+          "symbol": "prepare_source_grid_cases"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 585,
+          "symbol": "_case_source_signature"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 640,
+          "symbol": "_materialize_case"
+        }
+      ],
+      "observation": "project_voxel_cache_omits_intensity_contract",
+      "evidence_type": "actual synthetic NIfTI materializer/cache"
+    },
+    {
+      "id": "NI04",
+      "priority": "P2",
+      "status": "open",
+      "classification": "new R100 error isolation gap",
+      "title": "可解析但字段损坏的清单阻断整个入口",
+      "scenario": "某个残留 image_worker.json 是合法 JSON，但 created_at_epoch 不是数字，其他 worker 本可继续工作。",
+      "observed": "真实 _adopt_disk_image_workers 抛 ValueError，没有逐项跳过，未达到失败回退原行为的约定。",
+      "cause": "只检查 dict，随后无逐项异常隔离地 float(created_at_epoch)；必需路径、shape、模型字段也缺完整 schema 校验。",
+      "impact": "单个坏条目即可使本次提示入口失败；这是异常恢复缺口，未证实外部攻击入口。",
+      "what_to_change": "逐项验证清单并隔离坏记录，禁止不完整条目进入可执行缓存。",
+      "why": "加速缓存不可用应退回初始化，而不是破坏原先可工作的入口。",
+      "how": "验证 schema、有限时间、正整数 shape、路径归属、进程/模型必需字段；逐项记可读诊断后跳过，拒绝 NaN/Infinity 排序值。",
+      "acceptance": [
+        "坏 JSON/字段/状态文件与合法 worker 混存时不崩溃、不收养坏项，合法项仍可复用。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3642,
+          "symbol": "_adopt_disk_image_workers"
+        }
+      ],
+      "observation": "valid_json_invalid_worker_schema",
+      "evidence_type": "actual helper with malformed readable JSON"
+    },
+    {
+      "id": "UND01",
+      "priority": "P2",
+      "status": "open",
+      "classification": "new R94 archive-name false positive",
+      "title": "合法病例名含 .previous- 时最新导入回执被跳过",
+      "scenario": "病例名如 kidney.previous-study；此轮归档过滤把它误认成历史回执。",
+      "observed": "真实生产者产生 .kidney.previous-study.import_receipt.json，发现器忽略最新记录，返回时间更早的 ordinary-case 回执。未打开工程或删除 Mask。",
+      "cause": "用任意位置的子串 .previous- 判归档，没有区分病例名与归档时附加的固定摘要后缀。",
+      "impact": "撤销最近导入可能找不到当前病例，或指向更早另一病例；仍有后续确认/身份保护，不声称已删除错误对象。",
+      "what_to_change": "用明确归档元数据或生产者约定的严格后缀识别历史文件。",
+      "why": "通用工具不能把合法病例命名片段当成事务类型。",
+      "how": "共享归档命名/解析函数；优先独立 archive 标志或目录，兼容旧格式时仅识别末尾 .previous-<16hex>.import_receipt.json 并核对内容。",
+      "acceptance": [
+        "正常病例含 .previous- 仍能成为最新撤销候选；真正归档即使时间回拨也不能遮蔽当前回执。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 134,
+          "symbol": "find_latest_receipt"
+        }
+      ],
+      "observation": "ordinary_case_name_misclassified_as_archive",
+      "evidence_type": "actual producer naming and discovery; no deletion"
+    }
+  ],
+  "counts": {
+    "new_cards": 6,
+    "P1": 4,
+    "P2": 2,
+    "old_partial_cards": 2
+  },
+  "prior_issue_assessment": [
+    {
+      "id": "AL01",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S06",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "T04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL03",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S01",
+      "status": "resolved_in_selected_offline_contracts_with_followup",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Clock rollback receipt identity remains protected; archive discovery adds UND01 naming regression"
+    },
+    {
+      "id": "V01",
+      "status": "partially_resolved",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Normal close protected; forced-exit/power-failure recovery unverified"
+    },
+    {
+      "id": "S11",
+      "status": "partially_resolved",
+      "previous_report": "2026-10-16-fda3444-revalidation.json",
+      "note": "No horizontal overflow, but actual Qt 853x440 detail vertically clipped: height14 vs sizeHint107 after0.6s; source unchanged in increment, not a new defect"
+    }
+  ],
+  "business_code_modified": false,
+  "limitations": [
+    "No native Windows/Mimics/CUDA",
+    "No model inference or first/second-run timing",
+    "No patient data, training or environment repair",
+    "Termination intercepted; PID recycling not induced",
+    "Not exhaustive security coverage"
+  ]
+}

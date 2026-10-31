@@ -1,0 +1,33 @@
+{
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "excluded": [
+    "evidence-sha256.json",
+    "verification-result.json"
+  ],
+  "sha256": {
+    "docs/reviews/2026-10-31-09d5948-evidence/README.md": "207cb0219f3f167a49d9e18c4d9485764e80bfa8dd943cbcccfc129627c0b310",
+    "docs/reviews/2026-10-31-09d5948-evidence/adoption-order.mmd": "c4a6bc7b73398ab7396c3dbc4415fb9b6afb7fac3c5a19afab0577f35b2bb571",
+    "docs/reviews/2026-10-31-09d5948-evidence/capture_ui_failures.py": "d60d05023079325f3afdee91414ca6e219a1f292980e612336873ae3623aec83",
+    "docs/reviews/2026-10-31-09d5948-evidence/fact-check.json": "fc6ba11405f33fdb4215f751bdf2bb703a334e12b731707af10e8250aaa191f9",
+    "docs/reviews/2026-10-31-09d5948-evidence/nninteractive-targeted.log": "344385b0dd1c935797ef0f008783f01b3fd35c92905a735e8abcf7e915e5e94d",
+    "docs/reviews/2026-10-31-09d5948-evidence/observations.json": "d87ec1cf89f733a3646442b6e0be04ebaeb99c7d9821d4333419e4e153497a59",
+    "docs/reviews/2026-10-31-09d5948-evidence/regression-matrix.json": "b8230c70b3e25a750798223165fc14be39bc49a15072b8be636a3ec60d4eb422",
+    "docs/reviews/2026-10-31-09d5948-evidence/regression-matrix.log": "786f4feb570db24f1ec67ad230e3cec664b152887b2a68d889cd04b64e7d98cd",
+    "docs/reviews/2026-10-31-09d5948-evidence/reproduce_review.py": "013161fa7db85ad41f01609f8a012bb8fe922e336f50cd943fb95045546f0d17",
+    "docs/reviews/2026-10-31-09d5948-evidence/reproduction.log": "d87ec1cf89f733a3646442b6e0be04ebaeb99c7d9821d4333419e4e153497a59",
+    "docs/reviews/2026-10-31-09d5948-evidence/source-files.json": "18f9b69d95e3a9830db3b1f83f03d72d10cea03395c96b858f608eeca34e9b91",
+    "docs/reviews/2026-10-31-09d5948-evidence/source-scope.json": "98656cddb0596f3f088575943861f4207c70acdcd0bb392c4d7e36ab20d37c2f",
+    "docs/reviews/2026-10-31-09d5948-evidence/syntax.json": "a6d36d0a88932641ecc6e3129a500cdcbe71c651d4924a6cab9fee9b992b3f54",
+    "docs/reviews/2026-10-31-09d5948-evidence/test_completion_long_copy_wraps_within_viewport-settled.png": "ceda1c89699ccd2a86f450bc00f78067abc8c1a0a5d7732f9ef32c8ed1072bbb",
+    "docs/reviews/2026-10-31-09d5948-evidence/test_completion_long_copy_wraps_within_viewport.png": "e0c4897b5ebe183a0c092f4081a9b9e567aa2507eaef02bad3464f5ae3e8265c",
+    "docs/reviews/2026-10-31-09d5948-evidence/test_task_model_chooser_full_id_readable_and_copyable-settled.png": "29bf7569feef20873d7beb86a418cc5495355588a0f31596dfc92519bcc497b5",
+    "docs/reviews/2026-10-31-09d5948-evidence/test_task_model_chooser_full_id_readable_and_copyable.png": "29bf7569feef20873d7beb86a418cc5495355588a0f31596dfc92519bcc497b5",
+    "docs/reviews/2026-10-31-09d5948-evidence/ui-capture.log": "61f276c1795e93cebbfb6e44c8afe59df8d96cf49310eba26b0968faf3b9456d",
+    "docs/reviews/2026-10-31-09d5948-evidence/ui-failure-observations.json": "6d37f9318774eae3f2f49d65474a9fa61c667163bb8d35aec6bcca01cb3d8092",
+    "docs/reviews/2026-10-31-09d5948-evidence/validation-summary.json": "4b2ab7d549ad36c410ec98e591bc643d7afad1509395eaecad8e2be276dd2727",
+    "docs/reviews/2026-10-31-09d5948-evidence/verify_evidence.py": "6265a40878f2baa88e857153da98b3c7f927175458511e5ce82483e2fa6decb5",
+    "docs/reviews/2026-10-31-09d5948-revalidation.json": "c1dbf1a3582e82ca1a1fab1eda73862cc88194570a5ffd9a5838902bc0e0dab1",
+    "docs/reviews/2026-10-31-09d5948-revalidation.md": "5e00ff80625ca65984423b5486a39cd4314affb01d02ccee8c4b303cee43eb33",
+    "docs/reviews/README.md": "0ec7cb1ed2e9a771398184290ac919bc3bb2be699f5eb745a2744a5625b5f920"
+  }
+}

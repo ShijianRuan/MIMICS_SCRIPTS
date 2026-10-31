@@ -1,0 +1,74 @@
+{
+  "source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "observations": {
+    "same_guid_changed_grid": {
+      "outcome": "reproduced",
+      "same_worker_reused": true,
+      "current_voxel_origin_lps": [
+        100.0,
+        -0.0,
+        0.0
+      ],
+      "runtime_paths_or_new_export_called": false,
+      "boundary": "actual disk adoption/cache consumer, synthetic image; no prediction or accuracy measurement"
+    },
+    "busy_guard_before_adoption": {
+      "outcome": "reproduced",
+      "entry_return": 0,
+      "prewarm_attempted_with_other_image_running": true,
+      "attempts": [
+        {
+          "busy_after_adoption": true
+        }
+      ],
+      "boundary": "actual runtime entry and guards; prewarm intercepted before model/server access; no actual server restart"
+    },
+    "unowned_live_pid_retirement": {
+      "outcome": "reproduced",
+      "adopted": 1,
+      "retired": 1,
+      "terminate_requested_for_diagnostic_pid": true,
+      "mismatched_initialize_parent_ignored": true,
+      "actual_kill_executed": false,
+      "boundary": "real PID liveness and disk lookup; termination replaced by recorder; OS PID recycling not induced"
+    },
+    "valid_json_invalid_worker_schema": {
+      "outcome": "reproduced",
+      "exception": "ValueError: could not convert string to float: 'invalid-clock-value'",
+      "boundary": "actual adoption helper; malformed but readable JSON, no model"
+    },
+    "project_voxel_cache_omits_intensity_contract": {
+      "outcome": "reproduced",
+      "second_cache_hit": true,
+      "cached_values": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0
+      ],
+      "fresh_values": [
+        0.0,
+        2.0,
+        4.0,
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        14.0
+      ],
+      "raw_sha256_unchanged": true,
+      "label_bytes_unchanged": true,
+      "boundary": "actual NIfTI materializer and cache; no training or downstream accuracy measurement"
+    },
+    "ordinary_case_name_misclassified_as_archive": {
+      "outcome": "reproduced",
+      "ignored_latest_receipt": ".kidney.previous-study.import_receipt.json",
+      "returned_older_case": "ordinary-case",
+      "boundary": "actual receipt producer naming/payload and discovery; no project opened or masks deleted"
+    }
+  }
+}
