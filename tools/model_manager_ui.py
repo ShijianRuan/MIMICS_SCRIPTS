@@ -3,10 +3,13 @@
 
 Annotators receive model packages (zip bundles produced by
 ``ai_model_bundle.py``) from a developer or a colleague and import them
-here — no folders to copy, no JSON to edit. The window lists every
-registered nnInteractive task model, managed nnU-Net model, and FlexiCT
-model in one table (family, target, created, source, usability), lets the
-user switch the recommended/current model per family, and removes broken
+here — no folders to copy, no JSON to edit. External nnU-Net v2 training
+results (a results folder or an official .zip) get their own import
+entry: the model is validated, published, and immediately selectable in
+the nnU-Net prediction window. The window lists every registered
+nnInteractive task model, managed nnU-Net model, and FlexiCT model in
+one table (family, target, created, source, usability), lets the user
+switch the recommended/current model per family, and removes broken
 registry rows. Rollback = import the previous bundle again or re-select
 an earlier model; the table keeps every imported version visible.
 """
@@ -35,6 +38,7 @@ import nninteractive_task_common as task_common  # noqa: E402
 import nnunet_common  # noqa: E402
 from nnunet_common import read_json  # noqa: E402
 from ui_theme import (  # noqa: E402
+    choose_existing_directory_async,
     choose_open_file_async,
     configure_application,
     clamp_window_to_screen,
@@ -71,6 +75,8 @@ def default_workspaces() -> dict[str, str]:
 
 def _model_source(model: dict) -> str:
     """Human-readable provenance: where this model was trained/imported."""
+    if str(model.get("origin") or "") == "external_pretrained_unverified":
+        return "外部预训练（未本地验证）"
     if model.get("imported_from_bundle"):
         return "导入"
     if str(model.get("execution_backend") or "") == "remote":
@@ -344,6 +350,8 @@ class ModelManagerWindow:
         self.rows: list[dict] = []
         self._loading = True
         self._importing = False
+        self._external_busy = False
+        self._external_source: Path | None = None
         self._results: Queue = Queue()
 
         self.window = QtWidgets.QDialog()
@@ -357,7 +365,7 @@ class ModelManagerWindow:
         title.setObjectName("title")
         root.addWidget(title)
         subtitle = QtWidgets.QLabel(
-            "导入收到的模型包 (zip)，在一处查看所有系列的全部模型，并切换默认使用的模型。不会覆盖任何内容：旧模型未移除前，同名导入会被拒绝。"
+            "导入收到的模型包 (zip) 或外部 nnU-Net 训练结果（结果文件夹 / 官方 .zip），在一处查看所有系列的全部模型，并切换默认使用的模型。不会覆盖任何内容：旧模型未移除前，同名导入会被拒绝。"
         )
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
@@ -399,6 +407,9 @@ class ModelManagerWindow:
         self.import_button.setObjectName("primary")
         self.import_button.clicked.connect(self._import_clicked)
         actions.addWidget(self.import_button)
+        self.external_import_button = QtWidgets.QPushButton("导入 nnU-Net 训练结果...")
+        self.external_import_button.clicked.connect(self._import_external_clicked)
+        actions.addWidget(self.external_import_button)
         self.use_button = QtWidgets.QPushButton("设为默认模型")
         self.use_button.clicked.connect(self._use_clicked)
         actions.addWidget(self.use_button)
@@ -439,6 +450,26 @@ class ModelManagerWindow:
         worker.start()
 
     def _poll(self):
+        if self._external_busy:
+            try:
+                kind, payload, error = self._results.get_nowait()
+            except Empty:
+                return
+            if kind not in ("external_scan", "external_import"):
+                # Bundle-import/load results: keep them for their branch.
+                self._results.put((kind, payload, error))
+                return
+            self._external_busy = False
+            self._set_import_buttons_enabled(True)
+            if error:
+                self._warn("{0}：{1}".format(
+                    "扫描失败" if kind == "external_scan" else "导入失败", error
+                ))
+            elif kind == "external_scan":
+                self._external_scan_done(payload)
+            else:
+                self._external_import_done(payload)
+            return
         if self._importing:
             try:
                 kind, payload, error = self._results.get_nowait()
@@ -449,7 +480,7 @@ class ModelManagerWindow:
                 self._results.put((kind, payload, error))
                 return
             self._importing = False
-            self.import_button.setEnabled(True)
+            self._set_import_buttons_enabled(True)
             if error:
                 # 弹窗而非状态栏：_reload 会立刻改写状态栏文案，行内
                 # 错误提示一闪而过，标注者根本看不到（P1-2）。
@@ -584,9 +615,9 @@ class ModelManagerWindow:
             return
         # A bundle is a multi-GB zip: extracting + checksumming on the GUI
         # thread would freeze the whole window for tens of seconds. Same
-        # thread+queue pattern as _reload; the button stays disabled until
+        # thread+queue pattern as _reload; the buttons stay disabled until
         # the import finishes so double-clicks cannot start two imports.
-        self.import_button.setEnabled(False)
+        self._set_import_buttons_enabled(False)
         self.status_label.setStyleSheet("")
         self.status_label.setText("正在导入模型包（较大的包可能需要几十秒）...")
 
@@ -601,6 +632,226 @@ class ModelManagerWindow:
         thread.daemon = True
         thread.start()
         self._importing = True
+
+    def _set_import_buttons_enabled(self, state: bool):
+        self.import_button.setEnabled(state)
+        self.external_import_button.setEnabled(state)
+
+    def _import_external_clicked(self):
+        QtWidgets = self.QtWidgets
+        box = QtWidgets.QMessageBox(self.window)
+        box.setWindowTitle("导入 nnU-Net 训练结果")
+        box.setText("请选择来源类型：nnU-Net 训练结果文件夹或官方导出的 .zip 包。")
+        folder_button = box.addButton(
+            "训练结果文件夹...", QtWidgets.QMessageBox.AcceptRole
+        )
+        zip_button = box.addButton(
+            "官方 .zip 包...", QtWidgets.QMessageBox.AcceptRole
+        )
+        box.addButton("取消", QtWidgets.QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is folder_button:
+            choose_existing_directory_async(
+                self.QtCore,
+                self.QtWidgets,
+                self.window,
+                "选择 nnU-Net 训练结果文件夹",
+                str(Path.home()),
+                self._external_scan_from,
+            )
+        elif clicked is zip_button:
+            choose_open_file_async(
+                self.QtCore,
+                self.QtWidgets,
+                self.window,
+                "选择 nnU-Net 官方导出包",
+                str(Path.home()),
+                "nnU-Net 导出包 (*.zip)",
+                self._external_scan_from,
+            )
+
+    def _external_scan_from(self, path):
+        if not path:
+            return
+        # 扫描要解压 zip 并逐文件校验（可能数 GB），放后台线程；两个导入
+        # 按钮同时禁用，防止扫描期间再发起另一个导入。nnunet_external_model
+        # 顶层 import torch，延迟到工作线程加载，窗口启动不被拖慢。
+        self._external_source = Path(path)
+        self._set_import_buttons_enabled(False)
+        self.status_label.setStyleSheet("")
+        self.status_label.setText(
+            "正在扫描 nnU-Net 训练结果（较大的包可能需要几十秒）..."
+        )
+
+        def worker():
+            import nnunet_external_model as external
+
+            try:
+                report = external.scan_external_model(self._external_source)
+                self._results.put(("external_scan", report, ""))
+            except Exception as exc:
+                self._results.put(("external_scan", None, str(exc)))
+
+        thread = threading.Thread(
+            target=worker, name="model-manager-external-scan"
+        )
+        thread.daemon = True
+        thread.start()
+        self._external_busy = True
+
+    def _external_scan_done(self, report):
+        """Scan finished: pick configuration/fold, then import in background."""
+        QtWidgets = self.QtWidgets
+        importable = [str(name) for name in report.get("importable") or []]
+        if not importable:
+            details = []
+            for row in report.get("candidates") or []:
+                blockers = "；".join(row.get("blockers") or [])
+                if blockers:
+                    details.append("{0}：{1}".format(
+                        row.get("configuration") or row.get("config_dir"),
+                        blockers,
+                    ))
+            for row in report.get("rejected_candidates") or []:
+                details.append("{0}：缺少 {1}".format(
+                    row.get("config_dir"),
+                    "、".join(row.get("missing") or []),
+                ))
+            self._warn(
+                "该训练结果当前无法导入：\n{0}".format(
+                    "\n".join(details)
+                    if details
+                    else str(report.get("hint") or "原因未知。")
+                )
+            )
+            return
+        candidates = {
+            str(row.get("configuration")): row
+            for row in report.get("candidates") or []
+        }
+        configuration = None
+        if len(importable) > 1:
+            choice, ok = QtWidgets.QInputDialog.getItem(
+                self.window,
+                "选择配置",
+                "该训练结果包含多个可用配置，请选择要导入的配置：",
+                importable,
+                0,
+                False,
+            )
+            if not ok:
+                return
+            configuration = str(choice)
+        row = candidates.get(
+            configuration if configuration is not None else importable[0]
+        )
+        use_folds = None
+        folds = [str(name) for name in (row or {}).get("complete_folds") or []]
+        if (row or {}).get("requires_fold_selection") and folds:
+            default = "fold_all" if "fold_all" in folds else folds[0]
+            choice, ok = QtWidgets.QInputDialog.getItem(
+                self.window,
+                "选择 fold",
+                "该训练结果同时包含 fold_all 与数字 fold，请选择导入时使用的 fold：",
+                folds,
+                folds.index(default),
+                False,
+            )
+            if not ok:
+                return
+            use_folds = [str(choice)]
+        self._external_import_from(
+            use_folds=use_folds, configuration=configuration
+        )
+
+    def _external_import_from(self, use_folds=None, configuration=None):
+        source = self._external_source
+        if source is None:
+            return
+        self._set_import_buttons_enabled(False)
+        self.status_label.setStyleSheet("")
+        self.status_label.setText(
+            "正在导入并校验 nnU-Net 模型（复制与校验可能需要一两分钟）..."
+        )
+        workspace = Path(
+            self.workspaces.get("nnunet") or default_workspaces()["nnunet"]
+        )
+
+        def worker():
+            import nnunet_external_model as external
+
+            try:
+                result = external.import_external_model(
+                    source,
+                    workspace,
+                    use_folds=use_folds,
+                    configuration=configuration,
+                )
+                self._results.put(("external_import", result, ""))
+            except Exception as exc:
+                self._results.put(("external_import", None, str(exc)))
+
+        thread = threading.Thread(
+            target=worker, name="model-manager-external-import"
+        )
+        thread.daemon = True
+        thread.start()
+        self._external_busy = True
+
+    def _external_import_done(self, result):
+        manifest = result.get("manifest") or {}
+        labels = "、".join(
+            str(item.get("name"))
+            for item in manifest.get("labels") or []
+            if isinstance(item, dict)
+        ) or "未声明"
+        channels = "、".join(
+            str(value)
+            for value in (manifest.get("channel_names") or {}).values()
+        ) or "未声明"
+        source = manifest.get("source") or {}
+        source_path = str(source.get("path") or "")
+        source_text = (
+            "官方 ZIP：{0}".format(source_path)
+            if str(source.get("kind")) == "zip"
+            else "文件夹：{0}".format(source_path)
+        )
+        total = sum(
+            int(entry.get("bytes") or 0)
+            for entry in manifest.get("files") or []
+            if isinstance(entry, dict)
+        )
+        size_text = (
+            "{0:.2f} GB".format(total / 1024.0 ** 3)
+            if total >= 1024 ** 3
+            else "{0:.1f} MB".format(total / 1024.0 ** 2)
+        )
+        usable, reason = nnunet_common.model_usability(manifest)
+        status_text = "可正常使用" if usable else "不可用：{0}".format(reason)
+        reused = bool(result.get("reused"))
+        self.QtWidgets.QMessageBox.information(
+            self.window,
+            "该模型此前已导入" if reused else "导入完成",
+            "模型名：{0}\n分割目标：{1}\n要求的输入：{2}\n来源：{3}\n"
+            "大小：{4}\n兼容状态：{5}\n\n{6}\n\n"
+            "外部预训练／未做本地效果验证；"
+            "请在 nnU-Net 预测窗口选择此模型使用。".format(
+                manifest.get("display_name")
+                or manifest.get("task_name")
+                or manifest.get("task_id")
+                or "未声明",
+                labels,
+                channels,
+                source_text,
+                size_text,
+                status_text,
+                "相同内容的模型此前已导入，未生成重复版本。"
+                if reused
+                else "模型已发布到本机模型库。",
+            ),
+        )
+        self._reload()
 
     def _use_clicked(self):
         row = self._selected_row()
