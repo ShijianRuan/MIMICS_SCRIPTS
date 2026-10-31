@@ -15,6 +15,54 @@
 > 2026-09-29 R61 四视角评审后，本区从"已清空"重新填充：P0×3 + P1×10 +
 > P2/P3×8 + 已拍板待实施×4。历史已完成条目移至区尾"以下为历史待办区"。
 
+### R103（2026-11-01 用户实机数据触发：外部模型只有 checkpoint_best.pth 被拒）
+
+> 用户实机验证 R101 导入功能时提供的真实外部训练模型
+> （`E:\MIMICS_SCRIPTS\nnUNet_results\Dataset418_CT18_KidneyLR`）只含
+> checkpoint_best.pth + checkpoint_latest.pth，无 checkpoint_final.pth（训练
+> 未跑满 1000 epoch 的常见交付形态，nnU-Net 官方 `-chk checkpoint_best.pth`
+> 明确支持），被首期导入按设计拒绝 → 用户目标"在 Mimics 中使用得到推理
+> 结果"不闭环。
+
+- [x] **R103【P1】外部模型导入接受 checkpoint_best.pth 回退**
+  （已解决 2026-11-01，commit `93691c5`）：痛点：外部训练模型最常见的
+  交付形态之一是只含最优权重（验证 EMA/最优 epoch），首期实现只认
+  checkpoint_final.pth，把可用模型整体挡在门外。根因：首期把"有
+  final"当作唯一可用性判据，未覆盖官方支持的 best 回退。
+  影响视角：标注者/产品（别人训练好的模型拿不到本地用）。
+  验收标准：
+  ① 扫描：fold 含 checkpoint_final.pth 或 checkpoint_best.pth 即可用，
+  扫描行标记 fallback_checkpoint；checkpoint_latest.pth 仍拒绝且阻断
+  原因列出实际缺的权重文件；
+  ② 导入：按所选 fold 解析出唯一权重文件名写入 manifest
+  recipe.checkpoint_name；混选 final/best fold 报中文错误（权重不一致）；
+  ③ 回退导入前 UI 弹确认（默认否）说明将使用验证集最优权重；结果
+  对话框注明"训练未跑满，使用验证集最优权重"；
+  ④ model_usability 按 recipe.checkpoint_name 判定（best 导入不被误判
+  不可用；recipe 声明的权重缺失时报缺哪个文件）；
+  ⑤ 同内容外部模型换 fold 重新导入报中文错误，不静默沿用旧 recipe；
+  ⑥ 既有 final-only 导入路径行为逐字节不变（既有测试全绿即证据）；
+  ⑦ 实机：真实 best-only 模型（Dataset418_CT18_KidneyLR）导入成功、
+  预测窗口可发现且可用、真实 CT 推理产出双肾掩膜。
+  - 证据：commit `93691c5`（产品 +88/−29、测试 +175/−7）。单元测试
+    `test_nnunet_external_model` 35/35（新增 4：best-only 扫描回退标记、
+    latest-only 双文件阻断、best-only 导入 recipe+可用性回归、混选
+    final/best 拒绝 + 同内容换 fold 拒绝）；GUI `test_gui_smoke` 回退
+    确认弹窗 2 项新测试（确认导入带权重注记 / 拒绝中止不复位失败），
+    外部模型+回退子集 8/8。回归门禁 fast 36/36（工件
+    `.mimics_runtime/regression/20261101T002644_fast.json`）。
+    实机端到端：真实模型导入 live 工作区
+    （model_id `ext_1cf4b771e28d3845`，recipe checkpoint_best.pth +
+    fold_0），`load_models` 发现 1 行外部模型、`model_usability`
+    (True, '')；GPU 真实推理 s0001/ct.nii.gz（249×188×213）40.677s，
+    输出掩膜 kidney_right 50,501 体素 / kidney_left 44,306 体素
+    （输出仅写入项目目录 `.mimics_runtime/external_inference_test/`，
+    nnUNet_results/ 用户数据不入库）。红线核查：未用远程服务器；
+    Z 盘数据集只读未触碰。净代码：产品 +88/−29，测试 +175/−7；
+    新增维护面：0 新文件、0 新配置项、0 新依赖、1 新 UI 确认弹窗、
+    2 新函数（_fold_checkpoint、_resolve_checkpoint_name）、1 新清单键
+    （recipe.checkpoint_name）。
+
 ### R102（2026-10-31 用户立项：MR/非 CT 影像自动对比度）
 
 > 用户原话："现在的窗宽窗位都是针对CT的MR虽然没有窗宽窗位的概念但是
