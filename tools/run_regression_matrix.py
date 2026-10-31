@@ -51,6 +51,7 @@ SUITES = [
     ("flexict_pkg", [sys.executable, "integrations/flexict-finetune/tests/test_flexict_pkg.py"], {"fast", "full"}),
     ("flexict_build_dataset", [sys.executable, "integrations/flexict-finetune/tests/test_build_dataset.py"], {"fast", "full"}),
     ("nnunet_integration", [sys.executable, "tests/test_nnunet_integration.py"], {"fast", "full"}),
+    ("nnunet_external_model", [sys.executable, "tests/test_nnunet_external_model.py"], {"fast", "full"}),
     ("nninteractive_bridge_prompts", [sys.executable, "-m", "pytest", "-q", "tests/test_nninteractive_bridge_prompts.py"], {"fast", "full"}),
     ("nninteractive_task_integration", [sys.executable, "tests/test_nninteractive_task_integration.py"], {"fast", "full"}),
     ("nninteractive_finetune_pkg", [sys.executable, "-m", "pytest", "-q", *sorted(
