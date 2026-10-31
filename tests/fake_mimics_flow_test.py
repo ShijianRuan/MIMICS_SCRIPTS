@@ -1037,6 +1037,209 @@ def test_nninteractive_same_model_dual_image_guard(fake, tmp):
     return "same-model dual-image guard and idle worker retirement passed"
 
 
+def test_nninteractive_disk_worker_adoption(fake, tmp):
+    """R100: adopt image workers left on disk by earlier tool runs.
+
+    Mimics reloads the runtime module on every tool invocation, so the
+    in-process worker cache starts empty while worker processes live on.
+    Adoption must re-register live workers under their recorded cache key
+    (restoring same-image reuse without a duplicate worker or an owned-
+    server capacity restart), skip dead/expired/corrupt ones silently,
+    prefer the owned-server session holder among same-image candidates,
+    and never replace an already-cached live worker.
+    """
+    image = fake.reset_scene(image_shape=(2, 2, 2))
+    inference = import_runtime_module("nninteractive_mimics")
+    inference._ASYNC_MONITORS.clear()
+    inference._ASYNC_IMAGE_WORKERS.clear()
+
+    runtime_root = tmp / "runtime"
+    jobs_root = runtime_root / "async_jobs"
+    jobs_root.mkdir(parents=True)
+    image_key = inference._worker_cache_key({}, image)
+
+    def write_worker(name, cache_key, pid, status="ready", created=1000.0):
+        worker_dir = jobs_root / name
+        worker_dir.mkdir()
+        (worker_dir / "worker_status.json").write_text(
+            json.dumps({"status": status}), encoding="utf-8"
+        )
+        (worker_dir / "image_worker.json").write_text(
+            json.dumps(
+                {
+                    "worker_dir": str(worker_dir),
+                    "pid": pid,
+                    "cache_key": cache_key,
+                    "image_guid": cache_key,
+                    "model_identity": "official",
+                    "created_at_epoch": created,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return worker_dir
+
+    original_exists = inference._process_exists
+    old_runtime_env = os.environ.get("NNINTERACTIVE_RUNTIME_DIR")
+    os.environ["NNINTERACTIVE_RUNTIME_DIR"] = str(runtime_root)
+    live_pids = set()
+    try:
+        inference._process_exists = lambda pid: int(pid or 0) in live_pids
+
+        # Failure paths first: expired, dead, corrupt, and manifest-less
+        # workers are skipped silently — behavior stays exactly as before.
+        write_worker("image_worker_expired", image_key, 201, status="expired")
+        write_worker("image_worker_dead", image_key, 202)
+        corrupt_dir = write_worker("image_worker_corrupt", image_key, 203)
+        (corrupt_dir / "image_worker.json").write_text("{not json", encoding="utf-8")
+        (jobs_root / "image_worker_no_manifest").mkdir()
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            0,
+            "expired/dead/corrupt workers must not be adopted",
+        )
+        assert_equal(
+            len(inference._ASYNC_IMAGE_WORKERS),
+            0,
+            "cache must stay untouched after failed adoption",
+        )
+
+        # A live same-image worker is adopted under its recorded cache key
+        # and passes the shared-worker liveness check.
+        live_pids.add(204)
+        holder_dir = write_worker("image_worker_holder", image_key, 204)
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            1,
+            "live worker must be adopted",
+        )
+        adopted = inference._ASYNC_IMAGE_WORKERS.get(image_key)
+        assert_true(adopted is not None, "adopted worker registered under its cache key")
+        assert_equal(adopted["pid"], 204, "adopted worker identity")
+        assert_equal(adopted["worker_dir"], str(holder_dir), "adopted worker directory")
+        assert_true(
+            inference._shared_image_worker_alive(adopted),
+            "adopted worker must pass the shared-worker liveness check",
+        )
+
+        # Among same-image candidates the owned-server session holder wins
+        # over a newer worker...
+        live_pids.add(205)
+        newer_dir = write_worker("image_worker_newer", image_key, 205, created=2000.0)
+        server_state = runtime_root / ".nninteractive_server.json"
+        server_state.write_text(
+            json.dumps({"client_control_dir": str(holder_dir)}), encoding="utf-8"
+        )
+        inference._ASYNC_IMAGE_WORKERS.clear()
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            1,
+            "only one worker per cache key must be adopted",
+        )
+        assert_equal(
+            inference._ASYNC_IMAGE_WORKERS[image_key]["worker_dir"],
+            str(holder_dir),
+            "server session holder must beat a newer same-image worker",
+        )
+        # ...and without server state the newest wins.
+        server_state.unlink()
+        inference._ASYNC_IMAGE_WORKERS.clear()
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            1,
+            "only one worker per cache key must be adopted",
+        )
+        assert_equal(
+            inference._ASYNC_IMAGE_WORKERS[image_key]["worker_dir"],
+            str(newer_dir),
+            "newest worker must win without a session holder",
+        )
+
+        # A live worker already in the cache is never replaced by adoption.
+        live_pids.add(206)
+        cache_dir = tmp / "cache_worker"
+        cache_dir.mkdir()
+        (cache_dir / "worker_status.json").write_text(
+            json.dumps({"status": "ready"}), encoding="utf-8"
+        )
+        inference._ASYNC_IMAGE_WORKERS[image_key] = {
+            "worker_dir": str(cache_dir),
+            "pid": 206,
+            "model_identity": "official",
+        }
+        write_worker("image_worker_newest_disk", image_key, 205, created=3000.0)
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            0,
+            "a live in-memory worker must not be replaced",
+        )
+        assert_equal(
+            inference._ASYNC_IMAGE_WORKERS[image_key]["worker_dir"],
+            str(cache_dir),
+            "in-memory worker must stay registered",
+        )
+
+        # Reuse disabled -> no adoption at all (existing switch semantics).
+        assert_equal(
+            inference._adopt_disk_image_workers({"async_reuse_image_worker": False}),
+            0,
+            "adoption must respect async_reuse_image_worker=False",
+        )
+
+        # A runtime root without an async_jobs directory must not raise.
+        os.environ["NNINTERACTIVE_RUNTIME_DIR"] = str(tmp / "missing_runtime")
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            0,
+            "missing jobs root must be a silent no-op",
+        )
+
+        # Adopted other-image workers are gracefully retired by the existing
+        # retire path instead of triggering an owned-server capacity restart.
+        os.environ["NNINTERACTIVE_RUNTIME_DIR"] = str(runtime_root)
+        inference._ASYNC_IMAGE_WORKERS.clear()
+        other_dir = write_worker("image_worker_other", "other-image-guid", 207)
+        live_pids.add(207)
+        assert_equal(
+            inference._adopt_disk_image_workers({}),
+            2,
+            "one worker per cache key (same image + other image)",
+        )
+        same_image_dir = Path(inference._ASYNC_IMAGE_WORKERS[image_key]["worker_dir"])
+        assert_true(same_image_dir.exists(), "same-image worker adopted")
+        terminated = []
+        original_terminate = inference.runtime_common.terminate_process_async
+        try:
+            inference.runtime_common.terminate_process_async = (
+                lambda **kwargs: terminated.append(kwargs) or True
+            )
+            retired = inference._retire_idle_image_workers(
+                {},
+                keep_model_identity="official",
+                keep_image_guid=inference._object_id(image),
+            )
+        finally:
+            inference.runtime_common.terminate_process_async = original_terminate
+        assert_equal(retired, 1, "only the other-image worker is retired")
+        assert_true(
+            (other_dir / "close.json").is_file(),
+            "retired worker should receive a close request",
+        )
+        assert_true(
+            not (same_image_dir / "close.json").exists(),
+            "the active image's adopted worker must be kept",
+        )
+    finally:
+        inference._process_exists = original_exists
+        if old_runtime_env is None:
+            os.environ.pop("NNINTERACTIVE_RUNTIME_DIR", None)
+        else:
+            os.environ["NNINTERACTIVE_RUNTIME_DIR"] = old_runtime_env
+        inference._ASYNC_IMAGE_WORKERS.clear()
+        inference._ASYNC_MONITORS.clear()
+    return "disk worker adoption and graceful cross-image retirement passed"
+
+
 def test_window_level_from_selected_mask(fake, tmp):
     image = fake.reset_scene(image_shape=(3, 4, 5), minimum_value=0, maximum_value=2026)
     mask = FakeMask("liver_portal_region", image=image, array=_u8_buffer((3, 4, 5), 1), selected=True)
@@ -1842,6 +2045,7 @@ def main(argv=None):
     if args.only in ("nninteractive", "all"):
         tests.append(("nnInteractive Mimics-side buffer flow", lambda: test_nninteractive_fast_path_and_mask_buffer(fake, tmp / "nninteractive")))
         tests.append(("nnInteractive derived Draft flow", lambda: test_nninteractive_derived_draft_session(fake, tmp / "nninteractive_draft")))
+        tests.append(("nnInteractive disk image-worker adoption", lambda: test_nninteractive_disk_worker_adoption(fake, tmp / "nninteractive_adoption")))
     if args.only in ("taskmodels", "all"):
         tests.append(("nnInteractive task-model routing", lambda: test_nninteractive_task_model_routing(fake, tmp / "nninteractive_task_models")))
         tests.append(("nnInteractive same-model dual-image guard", lambda: test_nninteractive_same_model_dual_image_guard(fake, tmp / "nninteractive_dual_image")))
