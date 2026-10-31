@@ -505,6 +505,234 @@ class TestModelManagerWindow(unittest.TestCase):
         self.assertEqual(manager._model_source({}), "")
 
 
+class TestModelManagerExternalImport(unittest.TestCase):
+    """R101: 外部 nnU-Net 训练结果的模型管理器导入入口。
+
+    失败路径优先：不可导入的来源必须逐条给出阻碍而不是静默无效；用户
+    取消选择不得触发导入；扫描异常必须复位按钮而不是永久禁用。正常路径
+    断言多配置/fold 需明确选择、结果页标注"外部预训练／未做本地效果验证"。
+    """
+
+    def _window(self, name):
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        window = manager.ModelManagerWindow(
+            {"workspaces": {
+                "nnunet": name, "nninteractive": name, "flexict": name,
+            }},
+            QT,
+        )
+        self.addCleanup(window.window.close)
+        return manager, window
+
+    def _drive(self, window, busy):
+        deadline = time.time() + 5.0
+        while busy() and time.time() < deadline:
+            _AppFixture.app().processEvents()
+            window._poll()
+            time.sleep(0.02)
+
+    def _report(self, importable, candidates, rejected=()):
+        return {
+            "source": "X",
+            "source_kind": "directory",
+            "importable": importable,
+            "candidates": candidates,
+            "rejected_candidates": list(rejected),
+            "hint": "",
+        }
+
+    def test_single_importable_imports_directly_with_summary(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                ["3d_fullres"],
+                [{
+                    "configuration": "3d_fullres",
+                    "blockers": [],
+                    "complete_folds": ["fold_0"],
+                    "requires_fold_selection": False,
+                }],
+            )
+            captured = {}
+            result = {
+                "reused": False,
+                "manifest": {
+                    "display_name": "Dataset123_Example",
+                    "labels": [{"name": "tumor", "id": 1}],
+                    "channel_names": {"0": "CT"},
+                    "source": {"kind": "zip", "path": "D:/model.zip"},
+                    "files": [{"path": "a", "sha256": "x",
+                               "bytes": 2 * 1024 * 1024}],
+                    "model_dir": name,
+                    "folds": ["0"],
+                },
+            }
+
+            def fake_import(source, workspace, use_folds=None,
+                            configuration=None):
+                captured["args"] = (source, workspace, use_folds,
+                                    configuration)
+                return result
+
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model", side_effect=fake_import
+            ), mock.patch.object(
+                manager.nnunet_common, "model_usability",
+                return_value=(True, ""),
+            ), mock.patch.object(
+                QtWidgets.QInputDialog, "getItem"
+            ) as get_item, mock.patch.object(
+                QtWidgets.QMessageBox, "information"
+            ) as info:
+                window._external_scan_from("D:/model_source")
+                self.assertFalse(window.external_import_button.isEnabled())
+                self._drive(window, lambda: window._external_busy)
+            # 单一可用配置：不弹选择框，直接导入。
+            get_item.assert_not_called()
+            self.assertEqual(
+                (Path("D:/model_source"), Path(name), None, None),
+                captured["args"],
+            )
+            self.assertTrue(window.external_import_button.isEnabled())
+            self.assertTrue(window.import_button.isEnabled())
+            info.assert_called_once()
+            message = info.call_args[0][2]
+            for expected in ("Dataset123_Example", "tumor", "CT",
+                             "官方 ZIP", "2.0 MB", "可正常使用",
+                             "外部预训练／未做本地效果验证"):
+                self.assertIn(expected, message)
+
+    def test_multiple_configurations_and_folds_require_choice(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                ["2d", "3d_fullres"],
+                [
+                    {"configuration": "2d", "blockers": [],
+                     "complete_folds": ["fold_0"],
+                     "requires_fold_selection": False},
+                    {"configuration": "3d_fullres", "blockers": [],
+                     "complete_folds": ["fold_0", "fold_all"],
+                     "requires_fold_selection": True},
+                ],
+            )
+            captured = {}
+
+            def fake_import(source, workspace, use_folds=None,
+                            configuration=None):
+                captured["args"] = (use_folds, configuration)
+                return {"reused": False, "manifest": {}}
+
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model", side_effect=fake_import
+            ), mock.patch.object(
+                manager.nnunet_common, "model_usability",
+                return_value=(False, "缺 checkpoint"),
+            ), mock.patch.object(
+                QtWidgets.QInputDialog, "getItem",
+                side_effect=[("3d_fullres", True), ("fold_all", True)],
+            ), mock.patch.object(
+                QtWidgets.QMessageBox, "information"
+            ):
+                window._external_scan_from("D:/model_source")
+                self._drive(window, lambda: window._external_busy)
+            self.assertEqual((["fold_all"], "3d_fullres"), captured["args"])
+
+    def test_cancelled_choice_aborts_without_import(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                ["2d", "3d_fullres"],
+                [{"configuration": "2d", "blockers": [],
+                  "complete_folds": ["fold_0"],
+                  "requires_fold_selection": False},
+                 {"configuration": "3d_fullres", "blockers": [],
+                  "complete_folds": ["fold_0"],
+                  "requires_fold_selection": False}],
+            )
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model"
+            ) as do_import, mock.patch.object(
+                QtWidgets.QInputDialog, "getItem",
+                return_value=("", False),
+            ):
+                window._external_scan_from("D:/model_source")
+                self._drive(window, lambda: window._external_busy)
+            do_import.assert_not_called()
+            self.assertTrue(window.external_import_button.isEnabled())
+
+    def test_no_importable_shows_blockers_and_never_imports(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            report = self._report(
+                [],
+                [{"configuration": "3d_fullres",
+                  "blockers": ["自定义训练器 MyCustomTrainer"],
+                  "complete_folds": [], "requires_fold_selection": False}],
+                rejected=[{"config_dir": "only_checkpoint",
+                           "missing": ["dataset.json", "plans.json"]}],
+            )
+            with mock.patch.object(
+                external, "scan_external_model", return_value=report
+            ), mock.patch.object(
+                external, "import_external_model"
+            ) as do_import, mock.patch.object(
+                QtWidgets.QMessageBox, "warning"
+            ) as warn_box:
+                window._external_scan_from("D:/model_source")
+                self._drive(window, lambda: window._external_busy)
+            do_import.assert_not_called()
+            warn_box.assert_called_once()
+            text = warn_box.call_args[0][2]
+            self.assertIn("自定义训练器 MyCustomTrainer", text)
+            self.assertIn("dataset.json", text)
+            self.assertTrue(window.external_import_button.isEnabled())
+
+    def test_scan_failure_resets_buttons_with_readable_error(self):
+        import nnunet_external_model as external
+
+        with tempfile.TemporaryDirectory() as name:
+            manager, window = self._window(name)
+            with mock.patch.object(
+                external, "scan_external_model",
+                side_effect=RuntimeError("来源路径不存在"),
+            ), mock.patch.object(
+                QtWidgets.QMessageBox, "warning"
+            ) as warn_box:
+                window._external_scan_from("D:/gone")
+                self._drive(window, lambda: window._external_busy)
+            warn_box.assert_called_once()
+            self.assertIn("扫描失败", warn_box.call_args[0][2])
+            self.assertIn("来源路径不存在", warn_box.call_args[0][2])
+            self.assertTrue(window.external_import_button.isEnabled())
+            self.assertTrue(window.import_button.isEnabled())
+
+    def test_external_rows_show_unverified_provenance(self):
+        _AppFixture.app()
+        _batch, manager, _config, _presets = _gui_modules()
+        self.assertEqual(
+            "外部预训练（未本地验证）",
+            manager._model_source(
+                {"origin": "external_pretrained_unverified"}
+            ),
+        )
+
+
 class TestViewerNonBlockingRefresh(unittest.TestCase):
     """Status viewers collect off the GUI thread (BackgroundRefresh)."""
 
