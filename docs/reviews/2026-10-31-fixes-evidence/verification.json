@@ -1,0 +1,12 @@
+{
+  "source_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+  "source_files_match_git": 13,
+  "syntax": "Python 3.5 grammar for changed embedded runtime; Python 3.13 grammar otherwise",
+  "selected_matrix_suites": 17,
+  "selected_matrix_failures": 0,
+  "targeted_tests": 155,
+  "targeted_log_source_identity_preserved": true,
+  "qt_visual_review": "Screenshot viewed; two complete lines and non-overlapping controls at 853x440; offscreen macOS only.",
+  "local_links": "All 75 links across new report/design/evidence README and review index resolve; final metadata files checked again before commit.",
+  "scope": "Implementation diff contains 13 explicit product/test files; report commit only docs/reviews."
+}

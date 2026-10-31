@@ -1,0 +1,46 @@
+{
+  "schema": "separate_claim_check.v1",
+  "source_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+  "checks": [
+    {
+      "claim": "Six previous findings addressed, not recounted as six new findings.",
+      "result": "pass",
+      "evidence": "Previous IDs retained in follow-up JSON; synthetic and selected regression gates."
+    },
+    {
+      "claim": "The label allocation contains wrapped text and does not overlap the button or progress bar.",
+      "result": "pass",
+      "evidence": "Actual Qt screenshots manually viewed; test_ui_workflow_regressions geometric assertions, qt-observations.json."
+    },
+    {
+      "claim": "External complete v2 models can migrate; no retraining inherently required.",
+      "result": "supported_primary_source",
+      "source": "MIC-DKFZ nnUNet official inference guide at 288572bae134bb65932074f7f06d3dfa07b198dc."
+    },
+    {
+      "claim": "Native external folder/official ZIP import is already implemented.",
+      "result": "false_and_not_claimed",
+      "evidence": "Existing bundle.json/managed manifest requirements; design explicitly marks native import not implemented."
+    },
+    {
+      "claim": "Current master safetensors support implies this installed integration already accepts it.",
+      "result": "false_and_not_claimed",
+      "evidence": "Current usability and checkpoint discovery require .pth; design requires runtime capability gating."
+    },
+    {
+      "claim": "Restricted import loading is a complete sandbox or proof of inference compatibility.",
+      "result": "false_and_not_claimed",
+      "evidence": "Report SEC01 and design distinguish checkpoint deserialization, plans/classes, dependencies and inference."
+    },
+    {
+      "claim": "Selected offline regressions prove clinical/Windows/Mimics/GPU end-to-end success.",
+      "result": "false_and_not_claimed",
+      "evidence": "No clinical cases, training, real GPU or external model inference executed; 3 GUI platform skips retained."
+    },
+    {
+      "claim": "155-test log was rerun at the final SHA.",
+      "result": "false_and_not_claimed",
+      "evidence": "Original printed 0dbc3e4 is retained. Only two Qt files changed; relevant tested files equal final bytes."
+    }
+  ]
+}

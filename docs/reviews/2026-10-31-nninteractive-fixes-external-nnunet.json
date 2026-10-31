@@ -1,0 +1,479 @@
+{
+  "schema": "remote_code_review_fix_followup.v1",
+  "review_date": "2026-10-31",
+  "source_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+  "baseline": "1b5def7ff031a1bf4eee35e04078478b3f8856ad",
+  "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+  "authorization": "User explicitly requested implementation of the previously reported serious issues and investigation/design of external nnU-Net model use.",
+  "business_code_modified": true,
+  "findings": [
+    {
+      "id": "NI01",
+      "priority": "P1",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "R100 expands existing cache weakness across invocations",
+      "title": "同 GUID 图像变化后仍收养旧输入",
+      "scenario": "同一 Image 在配准/处理后保持 GUID 和尺寸，或源文件已更新，再从入口标注另一器官。",
+      "observed": "真实磁盘收养后，合成图像原点改为 LPS x=100，_get_or_start_image_worker 仍返回原 worker，没有请求新导出/运行时验证。",
+      "cause": "官方模型 cache_key 仅 Image GUID；命中时只判断存活和输入模式，不比较当前图像、网格、工程或完整模型/预处理签名。",
+      "impact": "存在用旧图像/映射计算当前提示的风险；应用端当前项目与 GUID 检查不能证明缓存输入正确。没有执行模型或观察临床错误。",
+      "what_to_change": "持久化并验证图像输入的完整身份，不能以 GUID 单独决定跨入口命中。",
+      "why": "错误命中会静默跳过医学影像本应重新准备的步骤。",
+      "how": "绑定工程/父 Mimics 会话、图像内容版本、live shape/affine、源文件身份、强度恢复和模型/权重/折/预处理契约；无法证明相同则保守不复用，并保留在途结果。",
+      "acceptance": [
+        "相同 GUID/尺寸改变物理网格或输入后失效；未变同图跨入口仍可命中。",
+        "更换工程、源图、官方权重或预处理契约时失效；结果应用前再次检查网格。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 940,
+          "symbol": "_live_image_identity"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 976,
+          "symbol": "_image_worker_input_identity"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3802,
+          "symbol": "_get_or_start_image_worker"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 4752,
+          "symbol": "_handle_async_result"
+        }
+      ],
+      "observation": "same_guid_changed_grid",
+      "evidence_type": "actual synthetic cache consumer; downstream incorrect prediction remains source risk",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3651,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 902,
+          "symbol": "_worker_cache_key"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3687,
+          "symbol": "_get_or_start_image_worker"
+        }
+      ],
+      "fix": "Bind live physical input and model revision to cached workers; recheck before Mask write.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "NI02",
+      "priority": "P1",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "new R100 ordering gap",
+      "title": "先忙碌检查后收养，跨入口漏掉在途预测",
+      "scenario": "图像 A 仍在预测，模块重载清空内存字典，此时用户在图像 B 或另一模型上运行入口。",
+      "observed": "真实 _run_with_config 返回 0 并走到预热；预热拦截点调用真实 busy helper 已能找到收养后的 running A，A 也未被退役。",
+      "cause": "入口 3139/3153 的 busy 检查先于 _continue_session_prompt 2993 的磁盘收养；退役函数遇到在途结果仅跳过，并不阻止随后启动。",
+      "impact": "新 worker 可能遇到 max-sessions=1 容量错误；桥接容量恢复分支会尝试重启已有自有服务器，干扰旧预测并抵消加速。只复现错误放行，未启动或重启服务器。",
+      "what_to_change": "在 busy 检查、草稿创建和预热之前完成经过身份验证的收养。",
+      "why": "忙碌检查必须读取完整任务集合才能保护在途工作。",
+      "how": "将收养移到 _run_with_config 前置阶段，在提交租约下重查；容量恢复也应核对已有 active operation，不能仅因容量满就重启正在服务的服务器。",
+      "acceptance": [
+        "清空内存注册表、保留磁盘 running/未消费结果，另一 Image/模型入口应拒绝，不能创建 worker、改 Mask 或重启服务。",
+        "空闲已消费结果可安全退役；同图续接仍可用。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3215,
+          "symbol": "_run_with_config"
+        }
+      ],
+      "observation": "busy_guard_before_adoption",
+      "evidence_type": "actual entry/guard reproduction; prewarm intercepted",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 2993,
+          "symbol": "_continue_session_prompt"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3139,
+          "symbol": "_run_with_config"
+        },
+        {
+          "file": "nninteractive_bridge.py",
+          "line": 2298,
+          "symbol": "_BridgeSessionContext.__init__"
+        }
+      ],
+      "fix": "Adopt before busy guards; hold a cross-process image lease and protect foreign clients from capacity recovery.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "NI03",
+      "priority": "P1",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "disk record promoted to process authority",
+      "title": "仅凭 PID 存活收养，退役可终止非 worker 进程",
+      "scenario": "worker 崩溃遗留 ready 记录，随后 PID 被复用；或同目录记录来自另一 Mimics 实例。",
+      "observed": "临时旧记录指向本次诊断进程真实 PID，initialize.parent_pid 不符，仍被收养并传给 terminate_process_async。终止被记录器拦截，没有杀进程。",
+      "cause": "仅核对 PID 存活与非终态；未检查 start marker、命令行/控制目录、父 Mimics 身份或所有权 token，退役则按裸 PID 终止。",
+      "impact": "可能终止无关进程或其他标注实例。这是本地残留记录/进程身份问题，不是已证实的远程入侵或 RCE；没有诱发真实 PID 复用。",
+      "what_to_change": "区分进程存在与有权管理该 worker；未知身份不收养也不终止。",
+      "why": "可复用的 PID 不构成终止权限。",
+      "how": "启动时记录 start marker、父会话身份和 token；收养时核对命令行、控制目录并握手，实际终止前再次核验。",
+      "acceptance": [
+        "存活但身份不同的 PID、父 Mimics 不符、缺失/损坏 marker 不得进入终止路径。",
+        "Windows 补测 PID 复用与信息不可读；并发 Mimics 实例不得共享交互命令序列。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_worker_identity.py",
+          "line": 39,
+          "symbol": "owned"
+        }
+      ],
+      "observation": "unowned_live_pid_retirement",
+      "evidence_type": "real PID liveness and call path; termination intercepted",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3635,
+          "symbol": "_adopt_disk_image_workers"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3384,
+          "symbol": "_shared_image_worker_alive"
+        },
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3552,
+          "symbol": "_retire_idle_image_workers"
+        },
+        {
+          "file": "runtime_py35/runtime_common.py",
+          "line": 1708,
+          "symbol": "terminate_process_async"
+        }
+      ],
+      "fix": "Require interpreter owner tokens and child identity/handles; recheck before termination.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "PV01",
+      "priority": "P1",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "new D28 cache signature omission",
+      "title": "工程体素缓存遗漏强度恢复和网格契约",
+      "scenario": "raw 字节和标签不变，工程的 GV→源强度参数修正后，再准备 nnU-Net/FlexiCT 训练。",
+      "observed": "真实 NIfTI 材料化：slope 由 1 改为 2，第二次 cache_hit=True，缓存 [0,1,2,3,4,5,6,7]，同参数重新物化应为 [0,2,4,6,8,10,12,14]。",
+      "cause": "project_voxels 的 image_signature 只有 kind/raw sha256；shape/dtype、当前/目标 affine、slope/intercept/zero tolerance 等影响输出却未入签名。",
+      "impact": "可能把旧输入继续用于本机或远程训练。证明的是实际输入不同，未训练或测量精度变化。",
+      "what_to_change": "用完整物化语义生成内容签名，升级缓存契约。",
+      "why": "raw 摘要只证明字节相同，不证明物理值和空间解释相同。",
+      "how": "规范化签入 shape、dtype/字节序、网格、expected_grid、modality、强度恢复 basis/slope/intercept/zero tolerance 和版本；命中前验证当前字节，失效旧签名缓存。",
+      "acceptance": [
+        "raw/标签不变而改变恢复参数、dtype 或网格时失效；输出等于独立新物化。",
+        "相同内容同语义重新导出仍可命中，不依赖临时路径和 mtime；覆盖两后端。"
+      ],
+      "locations": [
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 611,
+          "symbol": "project_image_content_signature"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 665,
+          "symbol": "_materialize_case"
+        }
+      ],
+      "observation": "project_voxel_cache_omits_intensity_contract",
+      "evidence_type": "actual synthetic NIfTI materializer/cache",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 894,
+          "symbol": "prepare_source_grid_cases"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 585,
+          "symbol": "_case_source_signature"
+        },
+        {
+          "file": "tools/nnunet_pipeline.py",
+          "line": 640,
+          "symbol": "_materialize_case"
+        }
+      ],
+      "fix": "Sign bytes and complete physical materialization semantics before cache acceptance.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "NI04",
+      "priority": "P2",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "new R100 error isolation gap",
+      "title": "可解析但字段损坏的清单阻断整个入口",
+      "scenario": "某个残留 image_worker.json 是合法 JSON，但 created_at_epoch 不是数字，其他 worker 本可继续工作。",
+      "observed": "真实 _adopt_disk_image_workers 抛 ValueError，没有逐项跳过，未达到失败回退原行为的约定。",
+      "cause": "只检查 dict，随后无逐项异常隔离地 float(created_at_epoch)；必需路径、shape、模型字段也缺完整 schema 校验。",
+      "impact": "单个坏条目即可使本次提示入口失败；这是异常恢复缺口，未证实外部攻击入口。",
+      "what_to_change": "逐项验证清单并隔离坏记录，禁止不完整条目进入可执行缓存。",
+      "why": "加速缓存不可用应退回初始化，而不是破坏原先可工作的入口。",
+      "how": "验证 schema、有限时间、正整数 shape、路径归属、进程/模型必需字段；逐项记可读诊断后跳过，拒绝 NaN/Infinity 排序值。",
+      "acceptance": [
+        "坏 JSON/字段/状态文件与合法 worker 混存时不崩溃、不收养坏项，合法项仍可复用。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3729,
+          "symbol": "_adopt_disk_image_workers"
+        }
+      ],
+      "observation": "valid_json_invalid_worker_schema",
+      "evidence_type": "actual helper with malformed readable JSON",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "runtime_py35/nninteractive_mimics.py",
+          "line": 3642,
+          "symbol": "_adopt_disk_image_workers"
+        }
+      ],
+      "fix": "Isolate malformed disk rows and validate finite creation time, shape and owned worker liveness.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "UND01",
+      "priority": "P2",
+      "status": "resolved_in_selected_offline_contracts",
+      "classification": "new R94 archive-name false positive",
+      "title": "合法病例名含 .previous- 时最新导入回执被跳过",
+      "scenario": "病例名如 kidney.previous-study；此轮归档过滤把它误认成历史回执。",
+      "observed": "真实生产者产生 .kidney.previous-study.import_receipt.json，发现器忽略最新记录，返回时间更早的 ordinary-case 回执。未打开工程或删除 Mask。",
+      "cause": "用任意位置的子串 .previous- 判归档，没有区分病例名与归档时附加的固定摘要后缀。",
+      "impact": "撤销最近导入可能找不到当前病例，或指向更早另一病例；仍有后续确认/身份保护，不声称已删除错误对象。",
+      "what_to_change": "用明确归档元数据或生产者约定的严格后缀识别历史文件。",
+      "why": "通用工具不能把合法病例命名片段当成事务类型。",
+      "how": "共享归档命名/解析函数；优先独立 archive 标志或目录，兼容旧格式时仅识别末尾 .previous-<16hex>.import_receipt.json 并核对内容。",
+      "acceptance": [
+        "正常病例含 .previous- 仍能成为最新撤销候选；真正归档即使时间回拨也不能遮蔽当前回执。"
+      ],
+      "locations": [
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 127,
+          "symbol": "find_latest_receipt"
+        }
+      ],
+      "observation": "ordinary_case_name_misclassified_as_archive",
+      "evidence_type": "actual producer naming and discovery; no deletion",
+      "prior_source_commit": "09d5948988c4efd481ddb15d162551c644aebaef",
+      "prior_report": "2026-10-31-09d5948-revalidation.md",
+      "prior_locations": [
+        {
+          "file": "runtime_py35/import_undo_mimics.py",
+          "line": 134,
+          "symbol": "find_latest_receipt"
+        }
+      ],
+      "fix": "Distinguish producer normal filenames from archive digest suffixes.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "verification": "regression-matrix.json; tests/test_worker_cache_safety.py",
+      "target_platform_validation": "pending real Windows/Mimics/GPU"
+    },
+    {
+      "id": "SEC01",
+      "priority": "P1",
+      "status": "resolved_in_import_validation",
+      "classification": "new finding while researching internet model imports",
+      "title": "导入校验使用非受限 Pickle",
+      "scenario": "Import a third-party model bundle containing arbitrary serialized Python objects.",
+      "observed": "Actual torch.save payload containing a custom reduce callback is rejected; its temporary marker is absent. Numeric NumPy scalar/array metadata loads successfully.",
+      "cause": "weights_only=False executes checkpoint-specified globals during import validation.",
+      "impact": "Importing a model could execute package code; no real external malicious model was downloaded or run.",
+      "what_to_change": "Restrict deserialization to known plain data types.",
+      "why": "Validation must not execute the unknown model it is checking.",
+      "how": "weights_only=True plus a static NumPy numeric allowlist; no unsafe fallback and no publication when validation cannot run.",
+      "acceptance": [
+        "Numeric checkpoint metadata remains loadable.",
+        "Custom reduce callback is rejected without execution.",
+        "No unsafe fallback or auto-expanded allowlist."
+      ],
+      "locations": [
+        {
+          "file": "tools/ai_model_bundle.py",
+          "line": 59,
+          "symbol": "_require_checkpoint_loadable"
+        }
+      ],
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+      "limitations": "Checkpoint validation only; not a sandbox for model plans/classes or resource use."
+    }
+  ],
+  "prior_issue_assessment": [
+    {
+      "id": "AL01",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S02",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S06",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "T04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL03",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "AL04",
+      "status": "resolved_in_selected_offline_contracts",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Current selected regressions; target platform still pending"
+    },
+    {
+      "id": "S01",
+      "status": "resolved_in_selected_offline_contracts_with_followup",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Clock rollback receipt identity remains protected; archive discovery adds UND01 naming regression"
+    },
+    {
+      "id": "V01",
+      "status": "partially_resolved",
+      "previous_report": "2026-10-25-c5947bf-active-learning.json",
+      "note": "Normal close protected; forced-exit/power-failure recovery unverified"
+    },
+    {
+      "id": "S11",
+      "status": "resolved_in_real_offscreen_qt_layout",
+      "previous_report": "2026-10-16-fda3444-revalidation.json",
+      "note": "Real 853x440 PySide6: detail height35 equals heightForWidth35; geometry assertions and visual review confirm no overlap; Windows DPI pending.",
+      "implementation_commit": "33e738fca65526156791e03b5acf999f9d9928b3"
+    }
+  ],
+  "counts": {
+    "carried_findings_resolved_in_offline_contracts": 6,
+    "new_findings": 1,
+    "new_findings_fixed": 1,
+    "old_ui_issue_additionally_fixed": "S11"
+  },
+  "validation": {
+    "source_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+    "matrix": {
+      "profile": "explicit subset of fast",
+      "total_suites": 17,
+      "failed_suites": 0,
+      "artifact": "regression-matrix.json"
+    },
+    "targeted_tests": {
+      "count": 155,
+      "artifact": "targeted-tests.log",
+      "recorded_source_commit": "0dbc3e478096c61cbad6514a329684332109774b",
+      "compatibility_note": "Only Qt model-center layout and its GUI regression changed after this run; nnInteractive/bridge/runtime source bytes are unchanged, as verified against final SHA."
+    },
+    "qt": {
+      "platform": "offscreen",
+      "data": "synthetic status/registry; mocked dependencies",
+      "artifact": "qt-observations.json"
+    },
+    "environment": {
+      "python": "3.13.12",
+      "system": "Darwin",
+      "machine": "arm64"
+    },
+    "not_executed": [
+      "clinical cases",
+      "training",
+      "real Windows/Mimics/GPU inference",
+      "external model inference",
+      "environment repair"
+    ],
+    "log_normalization": "qt-capture.log: trailing spaces removed; diagnostic and result text unchanged."
+  },
+  "external_nnunet": {
+    "native_import_implemented": false,
+    "design": "2026-10-31-nnunet-external-model-design.md",
+    "current_support": "Managed Mimics model bundles; low-level predictor has folder loading but native annotator workflow is not wired.",
+    "proposed_first_scope": "Compatible complete v2 single-channel non-cascade models; explicit capability gating.",
+    "upstream": {
+      "repository": "MIC-DKFZ/nnUNet",
+      "upstream_ref": "master",
+      "commit": "288572bae134bb65932074f7f06d3dfa07b198dc",
+      "commit_date": "2026-10-30T22:04:41Z",
+      "sources": [
+        {
+          "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/documentation/how-to/run-inference.md",
+          "sha256": "6241b6ffa848627a49331dc6d1586f2828757ec69202433a68c8f87c490bdbd9",
+          "bytes": 3940
+        },
+        {
+          "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/documentation/how-to/share-models-with-custom-trainers.md",
+          "sha256": "0a94680d1ec4d2ec9c1da13d5c418807aa16326e5d3bcab07e6b6ddd874cb26c",
+          "bytes": 5837
+        },
+        {
+          "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/nnunetv2/utilities/checkpoints.py",
+          "sha256": "ab117214ffa8d10a71d5d39c088bb610279b146dbf5a89bd1997d6479d66cd59",
+          "bytes": 26920
+        }
+      ]
+    }
+  },
+  "limitations": [
+    "Synthetic/fake Mimics paths are not end-to-end workstation validation.",
+    "No clinical cases, model training, real GPU inference, environment repair or external model inference.",
+    "File revision metadata is not an adversarial tamper-proof full weight digest.",
+    "Windows/Mimics singleton coordinate API, native modules, process handles, CUDA, DPI and forced-exit recovery remain unverified."
+  ]
+}

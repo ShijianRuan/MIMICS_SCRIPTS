@@ -1,5 +1,8 @@
 **MIMICS_SCRIPTS 跨职能评审与开发测试交接**
 
+2026-10-31：用户授权的高优先级修复已完成，详见 [nnInteractive 修复与外部 nnU-Net 调查](2026-10-31-nninteractive-fixes-external-nnunet.md)（实施 `33e738f`）、[结构化记录](2026-10-31-nninteractive-fixes-external-nnunet.json)和[外部模型导入设计](2026-10-31-nnunet-external-model-design.md)。原生目录/官方 ZIP 导入为待实施设计，未宣称已上线。
+
+
 ## 2026-10-31 · 09d5948 新改动与 nnInteractive 加速
 
 [审查报告](2026-10-31-09d5948-revalidation.md) · [结构化记录](2026-10-31-09d5948-revalidation.json) · [证据](2026-10-31-09d5948-evidence/README.md) · [可编辑时序图](2026-10-31-09d5948-evidence/adoption-order.mmd)

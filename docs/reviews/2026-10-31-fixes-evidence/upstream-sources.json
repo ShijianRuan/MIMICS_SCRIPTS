@@ -1,0 +1,23 @@
+{
+  "repository": "MIC-DKFZ/nnUNet",
+  "upstream_ref": "master",
+  "commit": "288572bae134bb65932074f7f06d3dfa07b198dc",
+  "commit_date": "2026-10-30T22:04:41Z",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/documentation/how-to/run-inference.md",
+      "sha256": "6241b6ffa848627a49331dc6d1586f2828757ec69202433a68c8f87c490bdbd9",
+      "bytes": 3940
+    },
+    {
+      "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/documentation/how-to/share-models-with-custom-trainers.md",
+      "sha256": "0a94680d1ec4d2ec9c1da13d5c418807aa16326e5d3bcab07e6b6ddd874cb26c",
+      "bytes": 5837
+    },
+    {
+      "url": "https://raw.githubusercontent.com/MIC-DKFZ/nnUNet/288572bae134bb65932074f7f06d3dfa07b198dc/nnunetv2/utilities/checkpoints.py",
+      "sha256": "ab117214ffa8d10a71d5d39c088bb610279b146dbf5a89bd1997d6479d66cd59",
+      "bytes": 26920
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+flowchart TD
+    accTitle: 已实施的 nnInteractive worker 复用保护
+    accDescr: 入口先收养本 Mimics 会话有权管理的 worker，再检查忙碌状态与输入身份；变化且仍有在途结果时保留现场，空闲变化才安全退役；写 Mask 前复查输入身份。
+    entry[入口或模块重载] --> adopt[校验会话 token、父进程及子进程身份]
+    adopt --> busy{其他图像或模型仍有未处理预测?}
+    busy -->|是| preserve[保留原会话和人工 Mask，提示先处理]
+    busy -->|否| identity[比较图像字节、网格、强度与模型输入契约]
+    identity --> same{能够确认输入相同?}
+    same -->|是| reuse[复用已加载的图像 worker]
+    same -->|否| retire[仅退役已证明归属的空闲 worker]
+    retire --> fresh[重新准备输入和 worker]
+    reuse --> infer[持有图像会话租约并预测]
+    fresh --> infer
+    infer --> validate[核对项目、Image、输入版本和目标 Mask]
+    validate -->|仍匹配| apply[短事务应用结果]
+    validate -->|不匹配| discard[不写入，保留人工成果]

@@ -1,0 +1,33 @@
+{
+  "source_commit": "33e738fca65526156791e03b5acf999f9d9928b3",
+  "matrix": {
+    "profile": "explicit subset of fast",
+    "total_suites": 17,
+    "failed_suites": 0,
+    "artifact": "regression-matrix.json"
+  },
+  "targeted_tests": {
+    "count": 155,
+    "artifact": "targeted-tests.log",
+    "recorded_source_commit": "0dbc3e478096c61cbad6514a329684332109774b",
+    "compatibility_note": "Only Qt model-center layout and its GUI regression changed after this run; nnInteractive/bridge/runtime source bytes are unchanged, as verified against final SHA."
+  },
+  "qt": {
+    "platform": "offscreen",
+    "data": "synthetic status/registry; mocked dependencies",
+    "artifact": "qt-observations.json"
+  },
+  "environment": {
+    "python": "3.13.12",
+    "system": "Darwin",
+    "machine": "arm64"
+  },
+  "not_executed": [
+    "clinical cases",
+    "training",
+    "real Windows/Mimics/GPU inference",
+    "external model inference",
+    "environment repair"
+  ],
+  "log_normalization": "qt-capture.log: trailing spaces removed; diagnostic and result text unchanged."
+}

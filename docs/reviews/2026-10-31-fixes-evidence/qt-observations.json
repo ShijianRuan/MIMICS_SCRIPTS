@@ -1,0 +1,28 @@
+{
+  "test_completion_long_copy_wraps_within_viewport": {
+    "assertions": "passed",
+    "window": [
+      853,
+      440
+    ],
+    "platform": "offscreen",
+    "scope": "Real macOS PySide6 widgets; synthetic status, registry and dependency stubs",
+    "height": 35,
+    "required_height": 35,
+    "width": 749,
+    "minimum_height": 35,
+    "word_wrap": true
+  },
+  "test_task_model_chooser_full_id_readable_and_copyable": {
+    "assertions": "passed",
+    "window": [
+      853,
+      440
+    ],
+    "platform": "offscreen",
+    "scope": "Real macOS PySide6 widgets; synthetic status, registry and dependency stubs",
+    "horizontal_scroll_max": 0,
+    "viewport_width": 805,
+    "text_selectable": true
+  }
+}

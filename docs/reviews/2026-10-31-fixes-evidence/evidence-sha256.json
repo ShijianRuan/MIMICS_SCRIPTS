@@ -1,0 +1,17 @@
+{
+  "README.md": "e2f8a539dfb77ddbd16ef09cc094a0c4725f50a903035ea692b6ad13659ff308",
+  "capture_ui.py": "a83feb39c5f8b7ea0c46cbe23690a2fd1874c7862ea433ba034f397cc0de8bfd",
+  "fact-check.json": "4be7e0ce264fa182300584baf0aed7ab1de535c23148c010f7b5cc318e0cc57d",
+  "qt-capture.log": "20437d3adde4a0b115a37738a08e35ae26c2bbf92c53798fa4200cd1b747f9c1",
+  "qt-observations.json": "efd9b41619f6ee5dc92f779d26b96015b89861da1d0ee199a23c8e6b4bdfecfa",
+  "regression-matrix.json": "1b4707bb61381bda445af1bd5f376928f86a1f95e96c897b5834f8aea9e17e83",
+  "regression-matrix.log": "0a11f7bdc74b4a2dd1116f9877ccefef220a37df0d3eae8629d54f08f6bb9d16",
+  "source-files.json": "4f452b6de8492c7dc9fa1155a41bad5ccdfe96a7ffbf4d39678c4eebaca8d1a7",
+  "targeted-tests.log": "1e9f0e8761ca352f758f80aa4cc39593f91922e2a25b6428aacc1b57e3c84089",
+  "test_completion_long_copy_wraps_within_viewport.png": "70eba8717af8e4d013b79da9045b4fc3e005b5b52cc9ae383d460036d1fe7a14",
+  "test_task_model_chooser_full_id_readable_and_copyable.png": "60b9cc4a85abc465e0984d5aa7ec716f86b69d2acbb3edd17f3f87019a195807",
+  "upstream-sources.json": "e289749f804887f0b9d42fc2a66c48d9290f1dae563371208ede15a4d0f975cb",
+  "validation-scope.json": "f4a76f12fd53a4aae59d314306a0a46a24d8684670c5b4dd304f99bce1f6146e",
+  "verification.json": "1611be0b2acc15bef900a0512ea73f6ed7306fa30ba9c8f8dea9712141976819",
+  "worker-lifecycle.mmd": "cd5a46197d07f66cbd7d68b25865bfb3ca376d53595f819be8e3f429af442027"
+}
